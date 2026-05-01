@@ -19,7 +19,9 @@ tauri-build = { version = "2.6.0", features = [] }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
-tauri = { version = "2.11.0", features = [] }
+# devtools = enable webview devtools even in release builds, so we can debug
+# fetch / CSP / ATS issues users hit in the wild.
+tauri = { version = "2.11.0", features = ["devtools"] }
 tauri-plugin-log = "2"
 
 [[bin]]
