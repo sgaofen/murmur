@@ -1,0 +1,8 @@
+# Murmur 微语 — Python dependencies
+#
+# Install with:  pip install -r requirements.txt
+#
+# zstandard is REQUIRED (zstd-compressed message_content / silk voice files).
+# faster-whisper is OPTIONAL (only needed for voice transcription).
+zstandard>=0.22
+faster-whisper>=1.0   # optional — only used by transcribe_voice.py

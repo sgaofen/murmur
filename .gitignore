@@ -1,0 +1,50 @@
+# Murmur — git ignore
+
+# ===== Sensitive: never commit user data =====
+**/decrypted/
+**/agent_reports/
+**/voice_transcripts/
+**/Documents/Murmur/
+**/.murmur/
+**/config.json
+**/shared_preferences.json
+**/EchoTrace/
+*_AI分析包.md
+
+# ===== Build artifacts =====
+app/node_modules/
+app/dist/
+app/dist-ssr/
+app/src-tauri/target/
+app/src-tauri/Cargo.lock
+**/__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# ===== Native binaries (committed via Git LFS or release) =====
+# (We DO ship the .dll because they're load-bearing and Tencent-DMCA-ed elsewhere)
+# But strip the user's local copies of the encrypted source dbs.
+
+# ===== IDE / OS =====
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== Logs =====
+*.log
+batch_*.log
+*.err
+
+# ===== Tauri build cache =====
+app/src-tauri/gen/
+app/.tauri/
+
+# ===== Diag / scratch =====
+_diag_*.py
+test_top*.log
+test_top*.err
