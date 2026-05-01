@@ -3,7 +3,11 @@
 // In dev: run `python3 cli/etcli.py serve --port 9100` (or `bash start-mac.sh` / `start-windows.bat`).
 import type { Friend, FriendStats, HomeSummary, Moment } from './types';
 
-const BASE = (import.meta.env?.VITE_ETCLI_URL as string) || 'http://localhost:9100';
+// Use 127.0.0.1 instead of localhost — macOS WKWebView in sandboxed .app context
+// treats `localhost` as a "local network" hostname that requires the (new in macOS
+// Sequoia) Local Network privacy permission, while a direct IP loopback is exempt.
+// Fixes "Could not connect to the server" / "Load failed" in production .app builds.
+const BASE = (import.meta.env?.VITE_ETCLI_URL as string) || 'http://127.0.0.1:9100';
 
 async function j<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(BASE + path, init);
