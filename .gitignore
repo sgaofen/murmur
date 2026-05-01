@@ -17,6 +17,9 @@ app/dist/
 app/dist-ssr/
 app/src-tauri/target/
 app/src-tauri/Cargo.lock
+app/src-tauri/etcli/
+cli/build/
+cli/dist/
 **/__pycache__/
 *.pyc
 *.pyo
