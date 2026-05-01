@@ -425,15 +425,20 @@ function MacResignPrompt({ diag, onConsent, onPaste }: { diag: Diagnose; onConse
       <div style={{
         padding: '12px 14px', background: 'var(--et-paper-2)',
         border: '0.5px solid var(--et-line-2)', borderRadius: 8,
-        fontSize: 12.5, color: 'var(--et-ink-soft)', lineHeight: 1.7, marginBottom: 12,
+        fontSize: 13, color: 'var(--et-ink)', lineHeight: 1.85, marginBottom: 12,
       }}>
-        <div style={{ marginBottom: 6 }}><strong>点确认后会发生：</strong></div>
+        <div style={{ marginBottom: 8, fontWeight: 600 }}>点确认后我会做这几件事：</div>
         <ol style={{ margin: 0, paddingLeft: 20 }}>
-          <li>退出 WeChat（如果在跑的话）</li>
-          <li>弹出 macOS 系统认证窗口 — <strong>请输入你的开机密码</strong></li>
-          <li>对 <code>/Applications/WeChat.app</code> 运行 <code>codesign --force --deep --sign -</code></li>
-          <li>重启 WeChat — 你需要登录一次（之前的 token 不变，登录走二维码或免密）</li>
+          <li style={{ marginBottom: 4 }}>退出 WeChat（在跑的话）</li>
+          <li style={{ marginBottom: 4 }}>弹 macOS 系统认证窗 — <strong>输入开机密码</strong></li>
+          <li style={{ marginBottom: 4 }}>对 WeChat 主可执行文件做 <code>codesign --remove-signature</code> + 重新 ad-hoc 签名</li>
+          <li>重启 WeChat → <strong>停在你这里等你下一步</strong>，不会自动跑抓 key</li>
         </ol>
+        <div style={{ marginTop: 8, padding: '8px 10px', background: 'rgba(72,167,107,0.10)',
+          borderRadius: 6, fontSize: 12, color: '#3a7a4f' }}>
+          重签名完成后会到下一页「请扫码登录 + 点开几个对话」，<strong>那一步没有时间限制</strong>，
+          慢慢操作 — 你点完按钮我才开始抓密钥。
+        </div>
       </div>
       <div style={{
         padding: '10px 14px', background: 'rgba(232,181,122,0.18)',
@@ -458,22 +463,30 @@ function MacWaitLogin({ onContinue }: { onContinue: () => void }) {
   return (
     <>
       <div className="et-serif" style={{ fontSize: 15, lineHeight: 1.7, color: 'var(--et-ink-soft)', marginBottom: 14 }}>
-        ✓ 重签名成功 — 微信已经重新启动。<br/>
-        请在新的微信窗口里：
+        ✓ 重签名成功 — 微信已经重新启动。
       </div>
-      <ol style={{ paddingLeft: 20, lineHeight: 1.9, fontSize: 13, color: 'var(--et-ink)', marginBottom: 14 }}>
-        <li>用手机扫码登录</li>
-        <li>等列表加载完，<strong>点开几个对话/朋友圈</strong>（让 WCDB 把 key 派生到内存）</li>
-        <li>回到这里，点下面的按钮抓密钥</li>
-      </ol>
+      <div style={{
+        padding: '12px 14px', background: 'var(--et-paper-2)',
+        border: '0.5px solid var(--et-line-2)', borderRadius: 8,
+        fontSize: 14, lineHeight: 1.85, marginBottom: 12, color: 'var(--et-ink)',
+      }}>
+        <div style={{ fontWeight: 600, marginBottom: 8, fontSize: 14 }}>下一步要做的（不急，慢慢来）：</div>
+        <ol style={{ margin: 0, paddingLeft: 20 }}>
+          <li style={{ marginBottom: 6 }}>到微信窗口，<strong>用手机扫码登录</strong></li>
+          <li style={{ marginBottom: 6 }}>等左边联系人列表加载完，<strong>点开 3-5 个对话</strong>，每个滑两下</li>
+          <li style={{ marginBottom: 6 }}>顺手翻一下朋友圈 / 收藏 / 联系人页</li>
+          <li>都做完了再回来点下面按钮 — <strong>不需要赶时间</strong></li>
+        </ol>
+      </div>
       <div style={{
         padding: '10px 14px', background: 'rgba(72,167,107,0.10)',
         border: '0.5px solid rgba(72,167,107,0.30)', borderRadius: 8,
-        fontSize: 12, color: '#3a7a4f', marginBottom: 14,
+        fontSize: 12, color: '#3a7a4f', marginBottom: 14, lineHeight: 1.6,
       }}>
-        💡 不点开对话的话，那个 DB 对应的 key 不会出现在内存里 — 抓出来会少几个库。
+        💡 为啥要点开对话？WCDB 是「点哪个 DB 才解锁哪个 DB」的，没点开 → 那个 DB 的 key 不在内存里 → 我抓出来会缺几个库。<br/>
+        点完再来按下面按钮，会弹密码窗口（要 root 权限扫内存），输完就开始扫。
       </div>
-      <button onClick={onContinue} style={primaryBtn}>开始抓密钥（约 30 秒）</button>
+      <button onClick={onContinue} style={primaryBtn}>WeChat 都准备好了 → 开始抓密钥</button>
     </>
   );
 }
@@ -481,14 +494,30 @@ function MacWaitLogin({ onContinue }: { onContinue: () => void }) {
 function MacAutoExtract({ diag, onStart, onPaste }: { diag: Diagnose; onStart: () => void; onPaste: () => void }) {
   return (
     <>
-      <div className="et-serif" style={{ fontSize: 15, lineHeight: 1.7, color: 'var(--et-ink-soft)', marginBottom: 14 }}>
-        SIP 已经关闭，微信也在跑 — 我可以直接附加到微信进程扫内存抓密钥。<br/>
-        <span style={{ color: 'var(--et-mute)', fontSize: 13 }}>
-          这一步会用 <code>sudo</code>（macOS 要求 root 权限才能附加进程），扫描通常 30 秒以内。
-        </span>
+      <div className="et-serif" style={{ fontSize: 15, lineHeight: 1.7, color: 'var(--et-ink-soft)', marginBottom: 12 }}>
+        我会附加到微信进程扫内存抓 SQLCipher 密钥。<br/>
+      </div>
+      <div style={{
+        padding: '12px 14px', background: 'var(--et-paper-2)',
+        border: '0.5px solid var(--et-line-2)', borderRadius: 8,
+        fontSize: 13, lineHeight: 1.8, marginBottom: 12, color: 'var(--et-ink)',
+      }}>
+        <div style={{ fontWeight: 600, marginBottom: 6 }}>点确认前请先做完这几步：</div>
+        <ol style={{ margin: 0, paddingLeft: 20 }}>
+          <li><strong>WeChat 已经登录</strong>（不是登录界面，是已经能看消息列表）</li>
+          <li><strong>点开 3-5 个对话</strong>、翻一下朋友圈 — 让 WCDB 把每个 DB 的 key 派生到内存。不点开 → 抓出来的 key 数会少</li>
+          <li>WeChat 别关掉，继续在跑</li>
+        </ol>
+      </div>
+      <div style={{
+        padding: '10px 14px', background: 'rgba(232,181,122,0.18)',
+        border: '0.5px solid rgba(138,90,28,0.3)', borderRadius: 8,
+        fontSize: 11.5, color: '#8a5a1c', lineHeight: 1.6, marginBottom: 14,
+      }}>
+        💡 准备好了再点下面 — 一旦点确认，30 秒内会弹一次 macOS 系统密码窗口，输入开机密码后立刻开扫。
       </div>
       <CapabilityList diag={diag} />
-      <button onClick={onStart} style={primaryBtn}>开始自动抓取（约 30 秒）</button>
+      <button onClick={onStart} style={primaryBtn}>WeChat 已就绪 → 开始抓取</button>
       <button onClick={onPaste} style={{
         ...primaryBtn, marginTop: 8, background: 'transparent',
         color: 'var(--et-ink)', boxShadow: 'none',

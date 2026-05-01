@@ -66,37 +66,41 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     const seen = localStorage.getItem(ONBOARDING_SEEN_KEY);
+    // Retry the boot probe — same boot race as in Home.tsx (Tauri webview
+    // mounts seconds before etcli is listening). Without retry, /api/info
+    // fails once, we silently bail, and onboarding never opens even though
+    // the user is on a fresh install that needs it.
+    const probe = async <T,>(fn: () => Promise<T>, attempts = 8, delayMs = 750): Promise<T | null> => {
+      for (let i = 0; i < attempts; i++) {
+        if (cancelled) return null;
+        try { return await fn(); } catch { /* retry */ }
+        await new Promise(r => setTimeout(r, delayMs));
+      }
+      return null;
+    };
     (async () => {
-      try {
-        // Cheaper than diagnose; tells us bootstrap state immediately
-        const info: any = await getInfo();
-        if (cancelled) return;
-        if (info?.bootstrap) {
-          setOnboarding(true);
-          return;
-        }
-      } catch {
-        // /api/info failed — backend genuinely offline. Let HomePage show its
-        // own connection-failed UI; don't auto-open onboarding (it would just
-        // hang on the diagnose request).
+      const info: any = await probe(() => getInfo());
+      if (cancelled) return;
+      if (!info) {
+        // Backend never came up — leave Home's connection error UI in place.
         return;
       }
-      try {
-        const d = await getDiagnose();
-        if (cancelled) return;
-        if (d.platform === 'macos' && d.capabilities.tcc_blocked) {
-          setOnboarding(true);
-          return;
-        }
-        const noData = d.profiles.every(p => !p.has_decrypted_data);
-        const noKey = !d.saved_key;
-        const isMacWithoutData = d.platform === 'macos' && noData;
-        const isWinFirstRun = d.platform === 'windows' && noData && noKey;
-        if (!seen && (isMacWithoutData || isWinFirstRun)) {
-          setOnboarding(true);
-        }
-      } catch {
-        // diagnose failed — leave onboarding closed
+      if (info.bootstrap) {
+        setOnboarding(true);
+        return;
+      }
+      const d = await probe(() => getDiagnose());
+      if (cancelled || !d) return;
+      if (d.platform === 'macos' && d.capabilities.tcc_blocked) {
+        setOnboarding(true);
+        return;
+      }
+      const noData = d.profiles.every(p => !p.has_decrypted_data);
+      const noKey = !d.saved_key;
+      const isMacWithoutData = d.platform === 'macos' && noData;
+      const isWinFirstRun = d.platform === 'windows' && noData && noKey;
+      if (!seen && (isMacWithoutData || isWinFirstRun)) {
+        setOnboarding(true);
       }
     })();
     return () => { cancelled = true; };

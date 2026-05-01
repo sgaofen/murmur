@@ -1773,7 +1773,11 @@ def main(argv=None):
     sp.add_argument("--auto-restart", action="store_true")
 
     sp = sub.add_parser("extract-key-mac", help="(PyInstaller) 调用 extract_key_mac.py 抓 key (macOS)")
-    sp.add_argument("rest", nargs=argparse.REMAINDER, help="所有参数原样传给 extract_key_mac")
+    sp.add_argument("--timeout", type=int, default=120)
+    sp.add_argument("--salts", default=None)
+    sp.add_argument("--out-keys", default=None)
+    sp.add_argument("--pid", type=int, default=None)
+    sp.add_argument("--auto-restart", action="store_true")
 
     sp = sub.add_parser("batch", help="(PyInstaller) 调用 batch_analyze.py 跑批量")
     sp.add_argument("rest", nargs=argparse.REMAINDER, help="所有参数原样传给 batch_analyze")
@@ -1800,9 +1804,12 @@ def main(argv=None):
 
     if args.cmd == "extract-key-mac":
         import extract_key_mac as _ekm
-        rest = list(args.rest or [])
-        if rest and rest[0] == "--": rest = rest[1:]
-        sys.argv = ["extract_key_mac"] + rest
+        forwarded = ["--timeout", str(args.timeout)]
+        if args.salts:    forwarded += ["--salts", args.salts]
+        if args.out_keys: forwarded += ["--out-keys", args.out_keys]
+        if args.pid:      forwarded += ["--pid", str(args.pid)]
+        if args.auto_restart: forwarded += ["--auto-restart"]
+        sys.argv = ["extract_key_mac"] + forwarded
         return _ekm.main()
 
     if args.cmd == "batch":
