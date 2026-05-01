@@ -1,0 +1,181 @@
+"""refresh.py — 调 go_decrypt.dll 批量解密最新微信数据。
+
+用法：
+    python refresh.py                         # 自动发现 wxid 和路径
+    python refresh.py --wxid wxid_xxx         # 指定账号（多账号时）
+    python refresh.py --key da31...           # 跳过从 ~/.murmur/config.json 读 key
+"""
+from __future__ import annotations
+
+import argparse
+import ctypes
+import os
+import shutil
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+# Cross-platform path discovery
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from paths import (
+    IS_WINDOWS, IS_MAC, native_dir, load_config,
+    discover_wechat_profiles, decrypted_root_for, WeChatProfile,
+)
+
+SKIP = {'message_fts.db', 'contact_fts.db', 'favorite_fts.db', 'message_resource.db'}
+
+
+def load_dll():
+    """Win-only: load the bundled go_decrypt.dll. Returns None on non-Windows."""
+    if not IS_WINDOWS:
+        return None
+    nd = native_dir()
+    dll = nd / 'go_decrypt.dll'
+    if not dll.exists():
+        return None
+    os.add_dll_directory(str(nd))
+    lib = ctypes.CDLL(str(dll))
+    lib.DecryptDatabase.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p]
+    lib.DecryptDatabase.restype = ctypes.c_void_p
+    lib.FreeString.argtypes = [ctypes.c_void_p]
+    lib.FreeString.restype = None
+    return lib
+
+
+def decrypt(lib, src: Path, dst: Path, key: bytes) -> str | None:
+    """Decrypt one .db file. Uses Win DLL when available, else pure-Python.
+
+    Returns None on success, or an error string. The caller should set lib=None
+    on Mac/Linux to force the Python implementation.
+    """
+    if lib is not None:
+        ret = lib.DecryptDatabase(str(src).encode('utf-8'), str(dst).encode('utf-8'), key)
+        if ret is None or ret == 0:
+            return None
+        err = ctypes.string_at(ret).decode('utf-8', errors='replace')
+        lib.FreeString(ctypes.c_void_p(ret))
+        return err
+    # Pure-Python fallback (cross-platform, including macOS / Linux)
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from decrypt_py import decrypt_db
+        decrypt_db(src, dst, key.decode('ascii') if isinstance(key, bytes) else key)
+        return None
+    except Exception as e:
+        return f"{type(e).__name__}: {e}"
+
+
+def find_decrypt_key(profile: WeChatProfile, override: str | None = None) -> str | None:
+    """Resolve the decryption key from override / config / legacy echotrace prefs."""
+    if override:
+        return override.strip().lower()
+    cfg = load_config()
+    if cfg.get("decrypt_key"):
+        return cfg["decrypt_key"].strip().lower()
+    # Legacy: read from echotrace's shared_preferences.json
+    if IS_WINDOWS:
+        legacy = Path(os.environ.get("APPDATA") or "") / "com.example/echotrace/shared_preferences.json"
+        if legacy.exists():
+            try:
+                import json
+                d = json.loads(legacy.read_text(encoding="utf-8"))
+                return d.get("flutter.decrypt_key", "").strip().lower() or None
+            except Exception:
+                pass
+    return None
+
+
+def select_profile(args) -> WeChatProfile:
+    profiles = discover_wechat_profiles()
+    if not profiles:
+        raise SystemExit("找不到微信账号数据。请先在微信里登录一次。")
+    if args.wxid:
+        for p in profiles:
+            if p.wxid == args.wxid or p.wxid_short == args.wxid:
+                return p
+        raise SystemExit(f"找不到账号 {args.wxid}. 已发现: {[p.wxid for p in profiles]}")
+    if len(profiles) > 1:
+        print("[!] 发现多个账号，使用第一个 (--wxid 可指定):")
+        for p in profiles:
+            print(f"    - {p.wxid}")
+    return profiles[0]
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--wxid", help="WeChat account (auto-detected if omitted)")
+    parser.add_argument("--key", help="64-hex SQLCipher key (omits config lookup)")
+    args = parser.parse_args()
+
+    profile = select_profile(args)
+    print(f"[INFO] 账号: {profile.wxid}")
+    print(f"[INFO] 加密源: {profile.encrypted_root}")
+
+    key_hex = find_decrypt_key(profile, override=args.key)
+    if not key_hex:
+        raise SystemExit(
+            "找不到密钥。请先运行：\n"
+            "    python extract_key_dll.py --auto-restart --save-to ~/.murmur/key.json\n"
+            "或者用 --key <64位hex> 直接传入。"
+        )
+    if len(key_hex) != 64:
+        raise SystemExit(f"密钥长度不对：{len(key_hex)} 字符 (应为 64).")
+    key_bytes = key_hex.encode("utf-8")
+
+    dst_dir = decrypted_root_for(profile)
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[INFO] 解密目标: {dst_dir}")
+
+    lib = load_dll()
+    src_dbs = sorted(p for p in profile.encrypted_root.rglob("*.db") if p.name not in SKIP)
+
+    staging = Path(tempfile.mkdtemp(prefix='murmur_refresh_'))
+    print(f"[INFO] 临时目录: {staging}")
+    print(f"[INFO] 共 {len(src_dbs)} 个加密 DB 待处理\n")
+
+    results = []
+    t_total = time.time()
+    for i, src in enumerate(src_dbs, 1):
+        out = staging / src.name
+        size_mb = src.stat().st_size / 1e6
+        t0 = time.time()
+        err = decrypt(lib, src, out, key_bytes)
+        dt = time.time() - t0
+        if err:
+            print(f"  [{i:2d}/{len(src_dbs)}] FAIL ({size_mb:6.1f} MB, {dt:5.2f}s) {src.relative_to(profile.encrypted_root)}: {err}")
+            results.append((src.name, False, err))
+        else:
+            print(f"  [{i:2d}/{len(src_dbs)}] OK   ({size_mb:6.1f} MB, {dt:5.2f}s) {src.name}")
+            results.append((src.name, True, None))
+
+    print(f"\n[INFO] 解密耗时 {time.time() - t_total:.2f}s")
+
+    print("\n[INFO] swap 到目标目录...")
+    moved = 0
+    for fname, ok, _ in results:
+        if not ok:
+            continue
+        src_f = staging / fname
+        dst_f = dst_dir / fname
+        try:
+            for ext in ('-wal', '-shm', '-journal'):
+                sc = dst_dir / (fname + ext)
+                if sc.exists():
+                    sc.unlink()
+            if dst_f.exists():
+                dst_f.unlink()
+            shutil.move(src_f, dst_f)
+            moved += 1
+        except OSError as e:
+            print(f"  [SWAP-FAIL] {fname}: {e}")
+
+    shutil.rmtree(staging, ignore_errors=True)
+    n_ok = sum(1 for _, ok, _ in results if ok)
+    n_fail = len(results) - n_ok
+    print(f"\n[DONE] 解密 {n_ok} 个，swap {moved} 个，失败 {n_fail} 个")
+    return 0 if n_fail == 0 else 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())

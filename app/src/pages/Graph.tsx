@@ -1,0 +1,935 @@
+import { useEffect, useState } from 'react';
+import { GraphView } from '../components/extras/GraphView';
+import type { GraphData, GraphNode, GraphEdge, GraphCluster } from '../components/extras/GraphView';
+import { getFriend, getPairPack, findPairReport, getReport, getFriendConnections, invokeAgent, getAgents, invokePairAgent, getPairStream } from '../data/api';
+import type { LocalAgent } from '../data/api';
+import type { FriendConnection } from '../data/api';
+import type { Friend, FriendStats } from '../data/types';
+import { mdToHtml, MURMUR_MD_CSS } from '../utils/markdown';
+import { displayName, maskedWxid } from '../utils/privacy';
+import { usePrivacy } from '../components/PrivacyToggle';
+
+const TIER_COLORS: Record<string, string> = {
+  self: '#FFE6CF', A: '#FF6B47', B: '#E8B57A',
+  C: '#5A7A99', D: '#9E9583', E: '#C8BFAB',
+};
+
+interface BackendNode {
+  id: string;
+  wxid: string;
+  name: string;
+  is_self: boolean;
+  tier: string;
+  size: number;
+  private_msgs: number;
+  group_msgs: number;
+  groups: number;
+  moments_back: number;
+  moments_out: number;
+  combined_score?: number;
+}
+
+interface BackendEdge {
+  source: string;
+  target: string;
+  type: string;
+  weight: number;
+  shared_group_count?: number;
+  mention_count?: number;
+  moments_cross?: number;
+  moments_a_to_b?: number;
+  moments_b_to_a?: number;
+}
+
+interface BackendCluster {
+  id: string;
+  label: string;
+  members: string[];
+}
+
+interface BackendGraph {
+  nodes: BackendNode[];
+  edges: BackendEdge[];
+  clusters: BackendCluster[];
+  stats: { total_people: number; total_edges: number; private_count: number; groups: number };
+}
+
+/**
+ * Layout: Fibonacci sphere — uniform distribution on a sphere, no clumping.
+ *
+ * - Self at origin (0,0,0)
+ * - Friends sorted by combined_score (top friends inner, weak ones outer)
+ * - Each friend gets a unique direction (golden-angle spiral)
+ * - Distance = function of rank: r ∈ [90, 380]
+ * - Plus per-node tier-based jitter so visually distinct tiers don't sit on the exact same sphere
+ */
+function layoutNodes(graph: BackendGraph): GraphData {
+  const nodes: GraphNode[] = [];
+  const self = graph.nodes.find(n => n.is_self);
+  if (self) {
+    nodes.push({
+      id: 'self', name: '你', is_self: true, tier: 'self',
+      cluster: null, color: '#FFE6CF', size: 16,
+      x: 0, y: 0, z: 0,
+      msgs: 0, private_msgs: 0, group_msgs: 0, groups: graph.clusters.length,
+    });
+  }
+
+  const friends = graph.nodes.filter(n => !n.is_self)
+    .sort((a, b) => (b.combined_score || 0) - (a.combined_score || 0));
+  const N = Math.max(1, friends.length);
+  const PHI = Math.PI * (1 + Math.sqrt(5));  // golden angle ≈ 137.5°
+
+  friends.forEach((bn, i) => {
+    const t = (i + 0.5) / N;
+    const phi = Math.acos(1 - 2 * t);
+    const theta = PHI * i;
+    const score = bn.combined_score || 0;
+    const maxScore = (friends[0].combined_score || 1);
+    const norm = score / maxScore;
+    // Wider radius range → more breathing room (was 90-380, now 150-700)
+    const r = 150 + (1 - norm) * 550;
+    // Stronger jitter so rings aren't tight (was 8-36, now 20-80)
+    const tierJitter = ({ A: 20, B: 35, C: 50, D: 70, E: 80 } as Record<string, number>)[bn.tier] || 60;
+    const jx = (Math.sin(i * 7.1) * tierJitter);
+    const jy = (Math.cos(i * 5.3) * tierJitter);
+    const jz = (Math.sin(i * 3.7) * tierJitter);
+    const x = r * Math.sin(phi) * Math.cos(theta) + jx;
+    const y = r * Math.cos(phi) + jy;
+    const z = r * Math.sin(phi) * Math.sin(theta) + jz;
+
+    nodes.push({
+      id: bn.id, name: bn.name,
+      is_self: false, tier: bn.tier,
+      cluster: null, color: TIER_COLORS[bn.tier] || '#9E9583',
+      // Bigger nodes (was 4-14, now 8-26)
+      size: Math.max(8, Math.min(26, bn.size * 0.35)),
+      x, y, z,
+      msgs: bn.private_msgs + bn.group_msgs,
+      private_msgs: bn.private_msgs,
+      group_msgs: bn.group_msgs,
+      groups: bn.groups,
+      moments_back: bn.moments_back,
+      moments_out: bn.moments_out,
+      combined_score: bn.combined_score,
+    });
+  });
+
+  const designClusters: GraphCluster[] = [];  // backend now sends [] by default
+
+  const edges: GraphEdge[] = graph.edges.map(e => ({
+    source: e.source,
+    target: e.target,
+    type: (e.type === 'private' ? 'private'
+         : e.type === 'mutual_reply' ? 'co_active'
+         : e.type === 'mention' ? 'mention'
+         : e.type === 'moments_cross' ? 'moments_cross'
+         : 'co_group') as GraphEdge['type'],
+    weight: Math.min(1, Math.max(0.05, e.weight / 30)),
+    moments_cross: e.moments_cross,
+    mention_count: e.mention_count,
+    shared_group_count: e.shared_group_count,
+  }));
+
+  // Stats
+  const ffEdges = edges.filter(e => e.source !== 'self' && e.target !== 'self').length;
+  const isolates = nodes.filter(n => n.isolated).length;
+  const stats = {
+    people: nodes.length,
+    edges: edges.length,
+    bridges: 0,  // TODO: real bridge detection
+    isolates,
+    clusters: designClusters.length,
+    ffEdges,
+  };
+
+  return { nodes, edges, clusters: designClusters, stats };
+}
+
+interface Props {
+  onBack: () => void;
+  onOpenFriend?: (id: string) => void;
+}
+
+const TOPN_KEY = 'murmur.graph.topN';
+
+export function GraphPage({ onBack, onOpenFriend }: Props) {
+  void usePrivacy();  // re-render when privacy toggle flips
+  const [data, setData] = useState<GraphData | null>(null);
+  const [backendNodes, setBackendNodes] = useState<BackendNode[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [selectedEdge, setSelectedEdge] = useState<GraphEdge | null>(null);
+  const [dark, setDark] = useState(false);
+  const [autoRotate, setAutoRotate] = useState(true);
+  const [topN, setTopN] = useState<number>(() => {
+    const stored = parseInt(localStorage.getItem(TOPN_KEY) || '100', 10);
+    return Number.isFinite(stored) && stored > 0 ? stored : 100;
+  });
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    setLoading(true);
+    setData(null);
+    const BASE = (import.meta.env?.VITE_ETCLI_URL as string) || 'http://localhost:9100';
+    fetch(`${BASE}/api/graph?scope=private&top_n=${topN}`)
+      .then(r => r.json())
+      .then((bg: BackendGraph) => {
+        setBackendNodes(bg.nodes);
+        setData(layoutNodes(bg));
+        setLoading(false);
+      })
+      .catch(e => { setError(e.message || String(e)); setLoading(false); });
+  }, [topN]);
+
+  function changeTopN(n: number) {
+    setTopN(n);
+    localStorage.setItem(TOPN_KEY, String(n));
+  }
+
+  function selectNode(id: string | null) {
+    setSelected(id);
+    if (id) setSelectedEdge(null);
+  }
+  function selectEdge(edge: GraphEdge | null) {
+    setSelectedEdge(edge);
+    if (edge) setSelected(null);
+  }
+  function nameOf(id: string): string {
+    const real = backendNodes.find(n => n.id === id)?.name || id;
+    return displayName(id, real);
+  }
+
+  if (error) {
+    return (
+      <div style={{ padding: 40, textAlign: 'center' }}>
+        <div className="et-h2" style={{ color: 'var(--et-rose)' }}>关系图加载失败</div>
+        <div className="et-meta" style={{ marginTop: 8 }}>{error}</div>
+        <button onClick={onBack} style={{ all: 'unset', cursor: 'pointer', marginTop: 16,
+          padding: '8px 18px', borderRadius: 8, background: 'var(--et-orange)', color: '#fff' }}>
+          返回
+        </button>
+      </div>
+    );
+  }
+  if (!data || loading) {
+    return (
+      <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 18 }}>
+        <div style={{ display: 'inline-block', animation: 'spin 1.4s linear infinite', fontSize: 32 }}>🪐</div>
+        <div className="et-meta">正在编织 top {topN} 关系网络…</div>
+        <div className="et-meta" style={{ fontSize: 11, color: 'var(--et-faint)' }}>
+          首次约 15 秒，之后命中缓存秒开
+        </div>
+        <style>{`@keyframes spin { from { transform: rotate(0); } to { transform: rotate(360deg); } }`}</style>
+      </div>
+    );
+  }
+
+  const selectedNode = selected ? data.nodes.find(n => n.id === selected) : null;
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, overflow: 'hidden' }}>
+      <GraphView
+        data={data}
+        dark={dark}
+        selected={selected}
+        onSelect={selectNode}
+        onSelectEdge={selectEdge}
+        autoRotate={autoRotate}
+      />
+      {/* Top chrome bar */}
+      <div style={{
+        position: 'absolute', top: 0, left: 0, right: 0, zIndex: 5,
+        padding: '14px 28px', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        background: dark
+          ? 'linear-gradient(180deg, rgba(11,15,34,0.7), transparent)'
+          : 'linear-gradient(180deg, rgba(247,241,230,0.85), transparent)',
+        pointerEvents: 'none',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, pointerEvents: 'auto' }}>
+          <button onClick={onBack} style={{
+            all: 'unset', cursor: 'pointer', padding: '6px 12px', borderRadius: 8,
+            background: dark ? 'rgba(20,24,42,0.6)' : 'rgba(251,246,238,0.8)',
+            border: `0.5px solid ${dark ? 'rgba(244,236,218,0.18)' : 'rgba(26,43,74,0.18)'}`,
+            fontSize: 12, color: dark ? '#F4ECDA' : '#1A2B4A',
+            backdropFilter: 'blur(8px)',
+          }}>← 返回首页</button>
+          <span style={{ fontFamily: 'var(--et-serif)', fontSize: 18, fontWeight: 600,
+            color: dark ? '#F4ECDA' : '#1A2B4A' }}>Murmur · 关系网络</span>
+          <span style={{ fontSize: 11, color: dark ? 'rgba(244,236,218,0.65)' : 'rgba(26,43,74,0.65)',
+            letterSpacing: '0.12em' }}>一张可旋转的社交星图</span>
+        </div>
+        <div style={{ display: 'flex', gap: 8, pointerEvents: 'auto', alignItems: 'center' }}>
+          <span style={{ fontSize: 11, color: dark ? 'rgba(244,236,218,0.7)' : 'rgba(26,43,74,0.7)' }}>显示 top</span>
+          {[50, 100, 200, 300].map(n => (
+            <button key={n} onClick={() => changeTopN(n)}
+              style={{
+                ...chromeBtn(dark),
+                background: topN === n
+                  ? (dark ? 'rgba(255,107,71,0.3)' : 'var(--et-orange-soft)')
+                  : (dark ? 'rgba(20,24,42,0.6)' : 'rgba(251,246,238,0.8)'),
+                color: topN === n ? (dark ? '#FFE6CF' : 'var(--et-orange-2)') : (dark ? '#F4ECDA' : '#1A2B4A'),
+                fontWeight: topN === n ? 600 : 500,
+              }}>{n}</button>
+          ))}
+          <button onClick={() => setAutoRotate(r => !r)} style={chromeBtn(dark)}>
+            {autoRotate ? '⏸ 暂停旋转' : '▶ 自动旋转'}
+          </button>
+          <button onClick={() => setDark(d => !d)} style={chromeBtn(dark)}>
+            {dark ? '☼ 亮' : '☾ 暗'}
+          </button>
+        </div>
+      </div>
+      {/* Side panel for selected node */}
+      {selectedNode && !selectedNode.is_self && (
+        <SidePanel node={selectedNode} onClose={() => setSelected(null)}
+                   onOpenFriend={() => onOpenFriend?.(selectedNode.id)}
+                   onSelectPeer={(peerWxid) => {
+                     // Click a "重要连线" entry → open EdgePanel for the X↔peer pair.
+                     // The actual graph edge if it exists; otherwise synthesize one.
+                     const peerEdge = data.edges.find(e =>
+                       (e.source === selectedNode.id && e.target === peerWxid) ||
+                       (e.target === selectedNode.id && e.source === peerWxid));
+                     selectEdge(peerEdge || ({
+                       source: selectedNode.id, target: peerWxid,
+                       type: 'mention', weight: 0.1,
+                     } as GraphEdge));
+                   }} />
+      )}
+      {/* Side panel for selected edge */}
+      {selectedEdge && (
+        <EdgePanel
+          edge={selectedEdge}
+          aName={nameOf(selectedEdge.source)}
+          bName={nameOf(selectedEdge.target)}
+          onClose={() => setSelectedEdge(null)}
+          onOpenFriend={onOpenFriend}
+        />
+      )}
+    </div>
+  );
+}
+
+function chromeBtn(dark: boolean): React.CSSProperties {
+  return {
+    all: 'unset', cursor: 'pointer', padding: '7px 12px', borderRadius: 999,
+    fontFamily: 'var(--et-sans)', fontSize: 12, fontWeight: 500,
+    background: dark ? 'rgba(20,24,42,0.6)' : 'rgba(251,246,238,0.8)',
+    border: `0.5px solid ${dark ? 'rgba(244,236,218,0.18)' : 'rgba(26,43,74,0.18)'}`,
+    color: dark ? '#F4ECDA' : '#1A2B4A',
+    backdropFilter: 'blur(8px)',
+  };
+}
+
+function SidePanel({ node, onClose, onOpenFriend, onSelectPeer }: {
+  node: GraphNode; onClose: () => void; onOpenFriend: () => void;
+  onSelectPeer?: (peerWxid: string) => void;
+}) {
+  void usePrivacy();
+  const maskedName = displayName(node.id, node.name);
+  const [detail, setDetail] = useState<(Friend & { stats: FriendStats | null }) | null>(null);
+  const [reportContent, setReportContent] = useState<string | null>(null);
+  const [showFullReport, setShowFullReport] = useState(false);
+  const [connections, setConnections] = useState<FriendConnection[] | null>(null);
+  const [showAllConnections, setShowAllConnections] = useState(false);
+  const [agents, setAgents] = useState<LocalAgent[]>([]);
+  const [analyzing, setAnalyzing] = useState<'idle' | 'running' | 'error'>('idle');
+  const [analyzeError, setAnalyzeError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setDetail(null);
+    setReportContent(null);
+    setShowFullReport(false);
+    setConnections(null);
+    setShowAllConnections(false);
+    setAnalyzing('idle');
+    setAnalyzeError(null);
+    getFriend(node.id).then(setDetail).catch(() => {});
+    getFriendConnections(node.id).then(r => setConnections(r.connections)).catch(() => setConnections([]));
+    if (agents.length === 0) getAgents().then(setAgents).catch(() => {});
+  }, [node.id]);
+
+  async function runAnalysis(cli: string) {
+    setAnalyzing('running');
+    setAnalyzeError(null);
+    try {
+      const r = await invokeAgent({ cli, wxid: node.id });
+      if (!r.ok) {
+        setAnalyzeError(r.error || 'failed to queue');
+        setAnalyzing('error');
+        return;
+      }
+      // Async: backend spawned the agent. Poll for the saved aiReport.
+      const startedAt = Date.now();
+      const pollId = setInterval(async () => {
+        if (Date.now() - startedAt > 5 * 60 * 1000) {
+          clearInterval(pollId);
+          setAnalyzeError('5 分钟未完成');
+          setAnalyzing('error');
+          return;
+        }
+        try {
+          const updated = await getFriend(node.id);
+          if (updated.aiReport?.available) {
+            clearInterval(pollId);
+            setDetail(updated);
+            setAnalyzing('idle');
+          }
+        } catch {}
+      }, 5000);
+    } catch (e: any) {
+      setAnalyzeError(e?.message || String(e));
+      setAnalyzing('error');
+    }
+  }
+
+  async function viewFullReport() {
+    if (!detail?.aiReport) return;
+    if (reportContent) { setShowFullReport(true); return; }
+    try {
+      const r = await getReport(detail.aiReport.path);
+      setReportContent(r.content);
+      setShowFullReport(true);
+    } catch {}
+  }
+
+  const total = (node.private_msgs || 0) + (node.group_msgs || 0);
+  const briefSummary = detail?.aiReport?.short
+    ? detail.aiReport.short
+        .replace(/^#[^\n]*\n+/, '').replace(/^>[^\n]*\n+/gm, '')
+        .replace(/^---+\n+/m, '').replace(/^#{1,6}\s+/gm, '')
+        .replace(/\*\*([^*]+)\*\*/g, '$1').trim().slice(0, 320)
+    : null;
+
+  return (
+    <div onClick={(e) => e.stopPropagation()} onPointerDown={(e) => e.stopPropagation()} style={{
+      position: 'absolute', right: 0, top: 0, bottom: 0, width: 460,
+      zIndex: 150,
+      background: 'var(--et-paper)', borderLeft: '0.5px solid var(--et-line-2)',
+      boxShadow: '-12px 0 32px rgba(20,24,42,0.25)',
+      display: 'flex', flexDirection: 'column',
+    }}>
+      <div style={{ padding: '18px 22px', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        borderBottom: '0.5px solid var(--et-line)' }}>
+        <button onClick={onClose} style={{ all: 'unset', cursor: 'pointer', fontSize: 12, color: 'var(--et-mute)' }}>← 收起</button>
+        <span className="et-meta" style={{ fontFamily: 'var(--et-mono)', fontSize: 10 }}>{maskedWxid(node.id)}</span>
+      </div>
+      <div style={{ flex: 1, overflow: 'auto', padding: '22px 24px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+          <div style={{
+            width: 64, height: 64, borderRadius: '50%',
+            background: `radial-gradient(circle at 30% 30%, ${node.color}, ${node.color}99)`,
+            border: '0.5px solid rgba(26,43,74,0.18)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            color: '#fff', fontFamily: 'var(--et-serif)', fontSize: 24, fontWeight: 600,
+          }}>{maskedName.charAt(0).toUpperCase()}</div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontFamily: 'var(--et-serif)', fontSize: 22, fontWeight: 600,
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{maskedName}</div>
+            <div style={{ display: 'flex', gap: 6, marginTop: 4, flexWrap: 'wrap' }}>
+              <span style={{ padding: '2px 10px', borderRadius: 999, background: 'var(--et-orange-soft)',
+                color: 'var(--et-orange-2)', fontSize: 11, fontWeight: 600 }}>{node.tier} 级</span>
+              {detail?.aiReport && (
+                <span style={{ padding: '2px 10px', borderRadius: 999, background: 'var(--et-orange)',
+                  color: '#fff', fontSize: 10, fontWeight: 600 }}>AI 已分析</span>
+              )}
+            </div>
+            {detail && (
+              <div className="et-meta" style={{ marginTop: 6, fontSize: 11, color: 'var(--et-mute)' }}>
+                {detail.knew} · 最近活跃 {detail.last}
+              </div>
+            )}
+          </div>
+        </div>
+        {detail && (
+          <div className="et-serif" style={{
+            marginTop: 14, fontSize: 14, lineHeight: 1.6, color: 'var(--et-ink-soft)',
+            paddingLeft: 12, borderLeft: '2px solid var(--et-orange)', fontStyle: 'italic',
+          }}>「{detail.bond}」</div>
+        )}
+
+        {detail?.stats && (
+          <div style={{ marginTop: 18, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+            <Stat label="总消息" value={(detail.stats.totalSelf + detail.stats.totalOther).toLocaleString()} />
+            <Stat label="时间跨度" value={`${detail.stats.spanDays} 天`} />
+            <Stat label="最长沉默" value={`${detail.stats.longestSilenceDays} 天`} />
+            <Stat label="高频词" value={`「${detail.stats.topPhrase}」`} />
+          </div>
+        )}
+
+        <div style={{ marginTop: 18 }}>
+          <div className="et-eyebrow">跨场景</div>
+          <div style={{ marginTop: 8, padding: '12px 14px', borderRadius: 12,
+            background: 'rgba(26,43,74,0.04)', border: '0.5px solid var(--et-line)' }}>
+            <CrossScene label="私聊" value={node.private_msgs || 0} total={total} color="#FF6B47" />
+            <div style={{ height: 8 }} />
+            <CrossScene label="群聊" value={node.group_msgs || 0} total={total} color="#5A7A99" />
+            <div style={{ marginTop: 10, fontSize: 11, color: 'var(--et-mute)' }}>
+              {node.groups != null && <>共群 {node.groups} 个 · </>}
+              <span>朋友圈：他赞你 {node.moments_back || 0} · 你赞他 {node.moments_out || 0}</span>
+            </div>
+          </div>
+        </div>
+
+        {/* AI report card — always rendered. If exists: summary + full. If not: analyze-now button */}
+        <div style={{ marginTop: 18 }}>
+          <div className="et-eyebrow">AI 关系档案</div>
+          {briefSummary ? (
+            <>
+              <div className="et-serif" style={{
+                marginTop: 8, padding: '12px 14px', borderRadius: 10,
+                background: 'var(--et-paper-2)', border: '0.5px solid var(--et-line-2)',
+                fontSize: 13, lineHeight: 1.7, color: 'var(--et-ink-soft)',
+                maxHeight: 200, overflow: 'hidden', position: 'relative',
+              }}>
+                {briefSummary}…
+                <div style={{
+                  position: 'absolute', bottom: 0, left: 0, right: 0, height: 36,
+                  background: 'linear-gradient(to bottom, transparent, var(--et-paper-2))',
+                  pointerEvents: 'none',
+                }} />
+              </div>
+              <button onClick={viewFullReport} style={{
+                all: 'unset', cursor: 'pointer', marginTop: 8,
+                padding: '6px 14px', borderRadius: 8,
+                background: 'var(--et-ink)', color: 'var(--et-paper)',
+                fontSize: 12, fontWeight: 600,
+              }}>📖 阅读完整报告</button>
+            </>
+          ) : (
+            <div style={{
+              marginTop: 8, padding: '14px 16px', borderRadius: 10,
+              background: 'var(--et-paper-2)', border: '0.5px dashed var(--et-line-2)',
+            }}>
+              <div className="et-serif" style={{ fontSize: 13.5, color: 'var(--et-mute)', lineHeight: 1.6 }}>
+                还没让 AI 分析过这个人。
+              </div>
+              {analyzing === 'running' && (
+                <div className="et-meta" style={{ marginTop: 10, color: 'var(--et-orange-2)' }}>
+                  ⏳ 正在分析…一般 2-3 分钟
+                </div>
+              )}
+              {analyzing === 'error' && analyzeError && (
+                <div className="et-meta" style={{ marginTop: 10, color: 'var(--et-rose)' }}>
+                  失败：{analyzeError.slice(0, 120)}
+                </div>
+              )}
+              {analyzing !== 'running' && (
+                <div style={{ marginTop: 10, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                  {agents.length === 0 ? (
+                    <span className="et-meta" style={{ color: 'var(--et-faint)', fontSize: 11 }}>
+                      没检测到 claude / codex CLI；请先安装
+                    </span>
+                  ) : (
+                    agents.map(a => (
+                      <button key={a.cli} onClick={() => runAnalysis(a.cli)} style={{
+                        all: 'unset', cursor: 'pointer',
+                        padding: '6px 12px', borderRadius: 8,
+                        background: 'var(--et-orange)', color: '#fff',
+                        fontSize: 12, fontWeight: 600,
+                      }}>🤖 让 {a.name} 分析</button>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {connections && connections.length > 0 && onSelectPeer && (
+          <div style={{ marginTop: 22 }}>
+            <div className="et-eyebrow">他的重要连线（点击看 {maskedName} ↔ X 之间）</div>
+            <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {(showAllConnections ? connections : connections.slice(0, 6)).map(conn => (
+                <button key={conn.wxid + conn.edge_type}
+                  onClick={() => onSelectPeer(conn.wxid)}
+                  style={{
+                    all: 'unset', cursor: 'pointer',
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                    padding: '8px 12px', borderRadius: 8,
+                    background: 'var(--et-paper-2)', border: '0.5px solid var(--et-line-2)',
+                  }}
+                  onMouseEnter={(e) => e.currentTarget.style.background = 'var(--et-orange-soft)'}
+                  onMouseLeave={(e) => e.currentTarget.style.background = 'var(--et-paper-2)'}
+                >
+                  <span style={{ fontSize: 13, color: 'var(--et-ink)', fontWeight: 500,
+                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 240 }}>
+                    {displayName(conn.wxid, conn.name)}
+                  </span>
+                  <span style={{ fontSize: 10, color: 'var(--et-mute)' }}>
+                    {edgeKindLabel(conn)}
+                  </span>
+                </button>
+              ))}
+            </div>
+            {connections.length > 6 && (
+              <button onClick={() => setShowAllConnections(s => !s)} style={{
+                all: 'unset', cursor: 'pointer', marginTop: 6,
+                fontSize: 11, color: 'var(--et-mute)',
+              }}>
+                {showAllConnections ? '收起' : `展开剩下 ${connections.length - 6} 条…`}
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+      <div style={{ padding: '12px 22px', borderTop: '0.5px solid var(--et-line)' }}>
+        <button onClick={onOpenFriend} style={{
+          all: 'unset', cursor: 'pointer', display: 'block', width: '100%',
+          textAlign: 'center', padding: '10px 0', borderRadius: 10,
+          background: 'var(--et-paper)', border: '0.5px solid var(--et-line-2)',
+          fontSize: 12.5, fontWeight: 600, color: 'var(--et-ink)',
+        }}>📓 完整人物档案 →</button>
+      </div>
+      {showFullReport && reportContent && (
+        <ReportOverlay content={reportContent} title={maskedName} onClose={() => setShowFullReport(false)} />
+      )}
+    </div>
+  );
+}
+
+function edgeKindLabel(conn: FriendConnection): string {
+  if (conn.edge_type === 'mutual_reply') return `群里互动 ${conn.weight}`;
+  if (conn.edge_type === 'mention') return `提及 ${conn.mention_count ?? Math.round(conn.weight * 30)}`;
+  if (conn.edge_type === 'moments_cross') return `朋友圈 ${conn.moments_cross ?? '—'}`;
+  if (conn.edge_type === 'co_group') return `共群 ${conn.shared_group_count ?? conn.weight}`;
+  if (conn.edge_type === 'private') return `私聊 ${conn.weight}`;
+  return conn.edge_type;
+}
+
+function Stat({ label, value }: { label: string; value: string }) {
+  return (
+    <div style={{ padding: '10px 12px', background: 'var(--et-paper-2)',
+      border: '0.5px solid var(--et-line-2)', borderRadius: 8 }}>
+      <div className="et-eyebrow" style={{ fontSize: 9 }}>{label}</div>
+      <div className="et-num" style={{ fontSize: 16, fontWeight: 600, marginTop: 2 }}>{value}</div>
+    </div>
+  );
+}
+
+function ReportOverlay({ content, title, onClose }: { content: string; title: string; onClose: () => void }) {
+  return (
+    <div onClick={onClose} style={{
+      position: 'fixed', inset: 0, zIndex: 200,
+      background: 'rgba(20,24,42,0.6)',
+      display: 'flex', justifyContent: 'center', alignItems: 'flex-start',
+      paddingTop: 40, overflowY: 'auto',
+    }}>
+      <div onClick={e => e.stopPropagation()} style={{
+        width: '85%', maxWidth: 920, marginBottom: 40,
+        background: 'var(--et-paper)', borderRadius: 'var(--et-r-lg)',
+        boxShadow: 'var(--et-shadow-3)', padding: '30px 44px', position: 'relative',
+      }}>
+        <button onClick={onClose} style={{
+          all: 'unset', cursor: 'pointer', position: 'absolute', top: 14, right: 18,
+          fontSize: 22, color: 'var(--et-mute)', padding: 6,
+        }}>×</button>
+        <div className="et-eyebrow">AI 关系档案</div>
+        <div style={{ fontFamily: 'var(--et-serif)', fontSize: 13, color: 'var(--et-mute)', marginTop: 4 }}>关于 {title}</div>
+        <article className="murmur-md" style={{
+          marginTop: 18, fontFamily: 'var(--et-sans)',
+          fontSize: 15, lineHeight: 1.78, color: 'var(--et-ink)',
+        }} dangerouslySetInnerHTML={{ __html: mdToHtml(content) }} />
+      </div>
+      <style>{MURMUR_MD_CSS}</style>
+    </div>
+  );
+}
+
+const EDGE_LABEL: Record<string, { label: string; tone: string }> = {
+  private: { label: '私聊往来', tone: '#FF6B47' },
+  mutual_reply: { label: '群里真互动', tone: '#2C4670' },
+  co_active: { label: '群里真互动', tone: '#2C4670' },
+  mention: { label: '在你聊天里被互相提及', tone: '#B98643' },
+  co_group: { label: '同处群聊', tone: '#5A7A99' },
+  moments_cross: { label: '朋友圈互动（不经你）', tone: '#D17545' },
+};
+
+function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
+  edge: GraphEdge; aName: string; bName: string; onClose: () => void;
+  onOpenFriend?: (id: string) => void;
+}) {
+  const [pack, setPack] = useState<string | null>(null);
+  const [packLoading, setPackLoading] = useState(false);
+  const [aiReport, setAIReport] = useState<{ available: boolean; path?: string; short?: string } | null>(null);
+  const [showFullReport, setShowFullReport] = useState(false);
+  const [fullReport, setFullReport] = useState<string | null>(null);
+  const [agents, setAgents] = useState<LocalAgent[]>([]);
+  const [analyzing, setAnalyzing] = useState<'idle' | 'running' | 'error'>('idle');
+  const [analyzeErr, setAnalyzeErr] = useState<string | null>(null);
+  const [stream, setStream] = useState<{ output: string; stage: string; elapsed: number } | null>(null);
+  const isSelfEdge = edge.source === 'self' || edge.target === 'self';
+  const meta = EDGE_LABEL[edge.type] || EDGE_LABEL.co_group;
+  const otherName = edge.source === 'self' ? bName : aName;
+
+  useEffect(() => {
+    setPack(null);
+    setAIReport(null);
+    setFullReport(null);
+    setShowFullReport(false);
+    setAnalyzing('idle');
+    setAnalyzeErr(null);
+    if (isSelfEdge) return;
+    setPackLoading(true);
+    getPairPack(edge.source, edge.target)
+      .then(r => setPack(r.pack))
+      .catch(() => {})
+      .finally(() => setPackLoading(false));
+    findPairReport(edge.source, edge.target).then(setAIReport).catch(() => {});
+    if (agents.length === 0) getAgents().then(setAgents).catch(() => {});
+  }, [edge.source, edge.target, isSelfEdge]);
+
+  async function runPairAnalysis(cli: string) {
+    setAnalyzing('running');
+    setAnalyzeErr(null);
+    setStream({ output: '', stage: 'queued', elapsed: 0 });
+    try {
+      const r = await invokePairAgent({ cli, a: edge.source, b: edge.target });
+      if (!r.ok) {
+        setAnalyzeErr(r.error || 'failed to queue');
+        setAnalyzing('error');
+        return;
+      }
+      // Poll the live stream every 2 sec
+      const startedAt = Date.now();
+      const pollId = setInterval(async () => {
+        if (Date.now() - startedAt > 5 * 60 * 1000) {
+          clearInterval(pollId);
+          setAnalyzeErr('5 分钟还没完成');
+          setAnalyzing('error');
+          return;
+        }
+        try {
+          const s = await getPairStream(edge.source, edge.target);
+          setStream({ output: s.output, stage: s.stage, elapsed: s.elapsed });
+          if (!s.running) {
+            clearInterval(pollId);
+            if (s.error) {
+              setAnalyzeErr(s.error);
+              setAnalyzing('error');
+            } else {
+              // Re-fetch saved report
+              const rep = await findPairReport(edge.source, edge.target);
+              setAIReport(rep);
+              setAnalyzing('idle');
+              setStream(null);
+            }
+          }
+        } catch {}
+      }, 2000);
+    } catch (e: any) {
+      setAnalyzeErr(e?.message || String(e));
+      setAnalyzing('error');
+    }
+  }
+
+  async function viewFullReport() {
+    if (!aiReport?.path) return;
+    if (fullReport) { setShowFullReport(true); return; }
+    try {
+      const r = await getReport(aiReport.path);
+      setFullReport(r.content);
+      setShowFullReport(true);
+    } catch {}
+  }
+
+  return (
+    <div onClick={(e) => e.stopPropagation()} onPointerDown={(e) => e.stopPropagation()} style={{
+      position: 'absolute', right: 0, top: 0, bottom: 0, width: 460,
+      zIndex: 150,
+      background: 'var(--et-paper)', borderLeft: '0.5px solid var(--et-line-2)',
+      boxShadow: '-12px 0 32px rgba(20,24,42,0.25)',
+      display: 'flex', flexDirection: 'column',
+    }}>
+      <div style={{ padding: '18px 22px', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        borderBottom: '0.5px solid var(--et-line)' }}>
+        <button onClick={onClose} style={{ all: 'unset', cursor: 'pointer', fontSize: 12, color: 'var(--et-mute)' }}>← 收起</button>
+        <span style={{
+          padding: '3px 10px', borderRadius: 999, fontSize: 10, fontWeight: 600,
+          background: meta.tone, color: '#fff',
+        }}>{meta.label}</span>
+      </div>
+      <div style={{ flex: 1, overflow: 'auto', padding: '22px 24px' }}>
+        <div className="et-eyebrow">关系连线</div>
+        <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 12, fontSize: 18, fontWeight: 600 }}>
+          {!isSelfEdge && onOpenFriend && (
+            <div style={{ position: 'absolute', right: 24, marginTop: -4, display: 'flex', gap: 6 }}>
+              <button onClick={() => onOpenFriend(edge.source)} style={{
+                all: 'unset', cursor: 'pointer', padding: '3px 8px', borderRadius: 6,
+                background: 'var(--et-paper-2)', border: '0.5px solid var(--et-line-2)',
+                fontSize: 10, color: 'var(--et-mute)',
+              }}>📓 看 {aName.length > 8 ? aName.slice(0, 8) + '…' : aName}</button>
+              <button onClick={() => onOpenFriend(edge.target)} style={{
+                all: 'unset', cursor: 'pointer', padding: '3px 8px', borderRadius: 6,
+                background: 'var(--et-paper-2)', border: '0.5px solid var(--et-line-2)',
+                fontSize: 10, color: 'var(--et-mute)',
+              }}>📓 看 {bName.length > 8 ? bName.slice(0, 8) + '…' : bName}</button>
+            </div>
+          )}
+          {isSelfEdge ? (
+            <>
+              <span style={{ color: 'var(--et-orange)' }}>你</span>
+              <span style={{ color: 'var(--et-faint)' }}>↔</span>
+              <span style={{ color: 'var(--et-ink)' }}>{otherName}</span>
+            </>
+          ) : (
+            <>
+              <span style={{ color: 'var(--et-ink)' }}>{aName}</span>
+              <span style={{ color: 'var(--et-faint)' }}>↔</span>
+              <span style={{ color: 'var(--et-ink)' }}>{bName}</span>
+            </>
+          )}
+        </div>
+
+        <div style={{ marginTop: 18, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+          {/* Always-visible interaction breakdown — every dimension at once */}
+          {isSelfEdge && edge.type === 'private' && (
+            <Stat label="你们的私聊消息" value={`${edge.weight} 条`} />
+          )}
+          {!isSelfEdge && edge.type === 'mutual_reply' && (
+            <Stat label="群里互相搭话" value={`${edge.weight} 次`} />
+          )}
+          {!isSelfEdge && edge.type !== 'mutual_reply' && edge.weight > 1 && (
+            <Stat label="互动信号强度" value={`${Math.round(edge.weight)}`} />
+          )}
+          {!!edge.moments_cross && (
+            <Stat label="朋友圈互动" value={`${edge.moments_cross} 次`} />
+          )}
+          {!!edge.mention_count && (
+            <Stat label="你提到他俩" value={`${edge.mention_count} 次`} />
+          )}
+          {!!edge.shared_group_count && (
+            <Stat label="共同群" value={`${edge.shared_group_count} 个`} />
+          )}
+          {edge.type === 'close_pair' && <Stat label="近距离对" value="是" />}
+        </div>
+
+        {!isSelfEdge && (
+          <div style={{ marginTop: 18 }}>
+            <div className="et-eyebrow">关系证据 / 数据样本</div>
+            {packLoading && <div className="et-meta" style={{ marginTop: 8 }}>正在拉取证据…</div>}
+            {pack && (
+              <article className="murmur-md" style={{
+                marginTop: 8, padding: '12px 14px', borderRadius: 8,
+                background: 'var(--et-paper-2)', border: '0.5px solid var(--et-line-2)',
+                fontSize: 13, lineHeight: 1.7, color: 'var(--et-ink-soft)',
+                maxHeight: 360, overflow: 'auto',
+              }} dangerouslySetInnerHTML={{ __html: mdToHtml(pack.slice(0, 4000) +
+                (pack.length > 4000 ? '\n\n*…（省略，共 ' + Math.round(pack.length / 1000) + 'K 字）*' : ''))
+              }} />
+            )}
+            <style>{MURMUR_MD_CSS}</style>
+          </div>
+        )}
+
+        {!isSelfEdge && (
+          <div style={{ marginTop: 18 }}>
+            <div className="et-eyebrow">AI 推断报告</div>
+            {aiReport?.available ? (
+              <>
+                <div className="et-serif" style={{
+                  marginTop: 8, padding: '12px 14px', borderRadius: 10,
+                  background: 'var(--et-orange-soft)', border: '0.5px solid var(--et-orange-2)',
+                  fontSize: 13, lineHeight: 1.7, color: 'var(--et-ink-soft)',
+                  maxHeight: 180, overflow: 'hidden', position: 'relative',
+                }}>
+                  {aiReport.short
+                    ?.replace(/^#[^\n]*\n+/, '').replace(/^>[^\n]*\n+/gm, '')
+                    .replace(/^---+\n+/m, '').replace(/^#{1,6}\s+/gm, '')
+                    .replace(/\*\*([^*]+)\*\*/g, '$1').trim().slice(0, 240)}…
+                </div>
+                <button onClick={viewFullReport} style={{
+                  all: 'unset', cursor: 'pointer', marginTop: 8,
+                  padding: '6px 14px', borderRadius: 8,
+                  background: 'var(--et-ink)', color: 'var(--et-paper)',
+                  fontSize: 12, fontWeight: 600,
+                }}>📖 阅读完整推断</button>
+              </>
+            ) : (
+              <div style={{
+                marginTop: 8, padding: '14px 16px', borderRadius: 10,
+                background: 'var(--et-paper-2)', border: '0.5px dashed var(--et-line-2)',
+              }}>
+                <div className="et-serif" style={{ fontSize: 13.5, color: 'var(--et-mute)', lineHeight: 1.6 }}>
+                  这对朋友还没让 AI 推断过。
+                </div>
+                {analyzing === 'running' && (
+                  <div style={{ marginTop: 10 }}>
+                    <div className="et-meta" style={{ color: 'var(--et-orange-2)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span>⏳ {stream?.stage || '排队中'}…</span>
+                      <span style={{ fontFamily: 'var(--et-mono)', fontSize: 10 }}>{stream?.elapsed || 0}s</span>
+                    </div>
+                    {stream?.output && (
+                      <div className="et-serif" style={{
+                        marginTop: 8, padding: '10px 12px', borderRadius: 6,
+                        background: 'var(--et-paper)', border: '0.5px solid var(--et-line-2)',
+                        fontFamily: 'var(--et-mono)', fontSize: 11, lineHeight: 1.55,
+                        color: 'var(--et-ink-soft)', whiteSpace: 'pre-wrap',
+                        maxHeight: 280, overflow: 'auto',
+                      }}>
+                        {stream.output.slice(-2000)}
+                        <span style={{
+                          display: 'inline-block', width: 6, height: 12,
+                          background: 'var(--et-orange)', marginLeft: 2, verticalAlign: 'middle',
+                          animation: 'et-blink 1s steps(1) infinite',
+                        }} />
+                      </div>
+                    )}
+                    <style>{`@keyframes et-blink { 50% { opacity: 0; } }`}</style>
+                  </div>
+                )}
+                {analyzing === 'error' && analyzeErr && (
+                  <div className="et-meta" style={{ marginTop: 10, color: 'var(--et-rose)' }}>
+                    失败：{analyzeErr.slice(0, 120)}
+                  </div>
+                )}
+                {analyzing !== 'running' && (
+                  <div style={{ marginTop: 10, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                    {agents.length === 0 ? (
+                      <span className="et-meta" style={{ color: 'var(--et-faint)', fontSize: 11 }}>
+                        没检测到 claude/codex CLI
+                      </span>
+                    ) : (
+                      agents.map(a => (
+                        <button key={a.cli} onClick={() => runPairAnalysis(a.cli)} style={{
+                          all: 'unset', cursor: 'pointer',
+                          padding: '6px 12px', borderRadius: 8,
+                          background: 'var(--et-orange)', color: '#fff',
+                          fontSize: 12, fontWeight: 600,
+                        }}>🤖 让 {a.name} 分析这对</button>
+                      ))
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+      {showFullReport && fullReport && (
+        <ReportOverlay
+          content={fullReport}
+          title={isSelfEdge ? `你 ↔ ${otherName}` : `${aName} ↔ ${bName}`}
+          onClose={() => setShowFullReport(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+function CrossScene({ label, value, total, color }: { label: string; value: number; total: number; color: string }) {
+  const pct = total > 0 ? (value / total) * 100 : 0;
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 5 }}>
+        <span style={{ fontSize: 12, fontWeight: 600 }}>{label}</span>
+        <span className="et-num" style={{ fontFamily: 'var(--et-serif)', fontSize: 14, fontWeight: 600 }}>
+          {value.toLocaleString()} <span style={{ fontSize: 11, color: 'var(--et-mute)' }}>条</span>
+        </span>
+      </div>
+      <div style={{ height: 6, background: 'rgba(26,43,74,0.08)', borderRadius: 999, overflow: 'hidden' }}>
+        <div style={{ width: `${pct}%`, height: '100%', background: color, borderRadius: 999 }} />
+      </div>
+    </div>
+  );
+}

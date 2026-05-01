@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>EchoTrace 2.0 — 朋友圈年代记</title>
+<link rel="stylesheet" href="tokens.css"/>
+<style>
+  html, body, #root { width:100%; height:100%; margin:0; padding:0; background:#f0eee9; }
+  body { font-family:-apple-system, BlinkMacSystemFont, 'Noto Sans SC', sans-serif; }
+  /* hide native scrollbars inside artboards (each frame scrolls but we don't want bars) */
+  .et-frame::-webkit-scrollbar { width:0; height:0; }
+  .et-frame { scrollbar-width: none; }
+</style>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" src="design-canvas.jsx"></script>
+<script type="text/babel" src="ios-frame.jsx"></script>
+<script type="text/babel" src="tweaks-panel.jsx"></script>
+<script type="text/babel" src="primitives.jsx"></script>
+<script type="text/babel" src="page-home.jsx"></script>
+<script type="text/babel" src="page-friend.jsx"></script>
+<script type="text/babel" src="page-loading-export.jsx"></script>
+<script type="text/babel" src="page-mobile.jsx"></script>
+<script type="text/babel" src="page-extras.jsx"></script>
+<script type="text/babel" src="page-graph.jsx"></script>
+
+<script type="text/babel">
+const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+  "primary": "#FF6B47",
+  "ink": "#1A2B4A",
+  "bg": "#F7F1E6",
+  "fontPair": "songti",
+  "density": "regular",
+  "showStamps": true,
+  "openExport": false
+}/*EDITMODE-END*/;
+
+// — Mac window frame (lightweight, just chrome + traffic lights) —
+function MacFrame({ width, height, title, children, dark=false }) {
+  const titleBg = dark ? '#1B2138' : '#F2EBDD';
+  const titleColor = dark ? '#F4ECDA' : '#1A2B4A';
+  return (
+    <div style={{
+      width, height, borderRadius:14, overflow:'hidden',
+      background: dark ? '#14182A' : '#fff',
+      boxShadow:'0 1px 0 rgba(0,0,0,0.2), 0 22px 60px rgba(20,24,42,0.28)',
+      display:'flex', flexDirection:'column',
+      border: '0.5px solid rgba(0,0,0,0.18)',
+    }}>
+      <div style={{
+        display:'flex', alignItems:'center', height:36, padding:'0 14px',
+        background: titleBg, borderBottom: `0.5px solid ${dark?'rgba(255,255,255,0.08)':'rgba(26,43,74,0.08)'}`,
+        gap:10, position:'relative', flexShrink:0,
+      }}>
+        <div style={{ display:'flex', gap:8 }}>
+          <span style={{ width:12, height:12, borderRadius:'50%', background:'#ff5f57', border:'0.5px solid rgba(0,0,0,0.06)' }}/>
+          <span style={{ width:12, height:12, borderRadius:'50%', background:'#febc2e', border:'0.5px solid rgba(0,0,0,0.06)' }}/>
+          <span style={{ width:12, height:12, borderRadius:'50%', background:'#28c840', border:'0.5px solid rgba(0,0,0,0.06)' }}/>
+        </div>
+        <div style={{
+          position:'absolute', left:0, right:0, textAlign:'center',
+          fontFamily:'var(--et-serif)', fontSize:12, fontWeight:600, color: titleColor, letterSpacing:'0.06em', pointerEvents:'none',
+        }}>{title}</div>
+      </div>
+      <div className="et-frame" style={{ flex:1, overflow:'auto', position:'relative' }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+// — iPhone frame (minimal, custom) —
+function PhoneFrame({ width=375, height=812, children }) {
+  return (
+    <div style={{
+      width: width+24, height: height+24,
+      padding:12, borderRadius:54,
+      background:'linear-gradient(180deg, #2a2632, #14181f)',
+      boxShadow:'0 1px 0 rgba(255,255,255,0.06) inset, 0 22px 56px rgba(20,24,42,0.32)',
+    }}>
+      <div style={{
+        width, height, borderRadius:42, overflow:'hidden',
+        background:'#F7F1E6', position:'relative',
+      }}>
+        {/* dynamic island */}
+        <div style={{
+          position:'absolute', top:10, left:'50%', transform:'translateX(-50%)',
+          width:118, height:34, borderRadius:24, background:'#0c0e16', zIndex:50,
+        }}/>
+        {/* status bar text */}
+        <div style={{
+          position:'absolute', top:18, left:0, right:0, padding:'0 36px',
+          display:'flex', justifyContent:'space-between', fontSize:14, fontWeight:600, color:'#1A2B4A', zIndex:40,
+        }}>
+          <span>9:41</span>
+          <span style={{ display:'flex', gap:5, alignItems:'center' }}>
+            <svg width="17" height="11" viewBox="0 0 17 11"><rect x="0" y="6" width="3" height="5" fill="currentColor"/><rect x="4.5" y="4" width="3" height="7" fill="currentColor"/><rect x="9" y="2" width="3" height="9" fill="currentColor"/><rect x="13.5" y="0" width="3" height="11" fill="currentColor"/></svg>
+            <svg width="24" height="11" viewBox="0 0 24 11"><rect x="0.5" y="0.5" width="20" height="10" rx="2.5" fill="none" stroke="currentColor"/><rect x="2" y="2" width="17" height="7" rx="1.5" fill="currentColor"/><rect x="21" y="3.5" width="1.5" height="4" rx="0.5" fill="currentColor"/></svg>
+          </span>
+        </div>
+        <div style={{ position:'absolute', inset:0, paddingTop:0 }}>{children}</div>
+      </div>
+    </div>
+  );
+}
+
+// ——— App ———
+function App() {
+  const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
+  // expose a quick exportOpen state per-design so user can flip via Tweaks
+  const [exportOpen, setExportOpen] = React.useState(t.openExport);
+  React.useEffect(() => setExportOpen(t.openExport), [t.openExport]);
+
+  const fontMap = {
+    songti:   { serif: "'Noto Serif SC','Source Han Serif SC','Songti SC',serif",  sans: "'Noto Sans SC','PingFang SC',-apple-system,sans-serif" },
+    fraunces: { serif: "'Fraunces','Noto Serif SC',serif",                          sans: "'Inter','Noto Sans SC',-apple-system,sans-serif" },
+    hengshan: { serif: "'Ma Shan Zheng','Noto Serif SC',cursive",                   sans: "'Noto Sans SC','PingFang SC',sans-serif" },
+  };
+  const f = fontMap[t.fontPair] || fontMap.songti;
+
+  // dynamic theme override
+  const themeStyle = {
+    '--et-orange': t.primary,
+    '--et-orange-2': t.primary,
+    '--et-ink': t.ink,
+    '--et-bg': t.bg,
+    '--et-paper': t.bg === '#F7F1E6' ? '#FBF6EE' : '#FBF6EE',
+    '--et-serif': f.serif,
+    '--et-sans':  f.sans,
+  };
+
+  // density: pad scale
+  const density = t.density;
+
+  const Wrap = ({ children }) => (
+    <div className="et-root" style={{ ...themeStyle, height:'100%', width:'100%', position:'relative' }}>
+      {/* hide stamps if user toggled */}
+      {!t.showStamps && <style>{`svg[data-stamp] { display:none !important; }`}</style>}
+      {children}
+    </div>
+  );
+
+  // friend used in single-page + dialog
+  const focusFriend = window.ET_FRIENDS[0];
+
+  return (
+    <DesignCanvas>
+      <DCSection id="overview" title="EchoTrace 2.0 · 朋友圈年代记" subtitle="完全本地的微信聊天回顾应用 · 5 张稿子 · 一份温暖的设计">        <DCArtboard id="home"     label="① 首页 · 朋友圈年代记 (1440×900)" width={1440} height={900}>
+          <Wrap>
+            <MacFrame width={1440} height={900} title="EchoTrace · 朋友圈年代记">
+              <HomePage />
+            </MacFrame>
+          </Wrap>
+        </DCArtboard>
+        <DCArtboard id="friend"   label="② 单人页 · 和 kevin 的故事 (1180×1100)" width={1180} height={1100}>
+          <Wrap>
+            <MacFrame width={1180} height={1100} title="和 kevin 的故事">
+              <FriendPage friend={focusFriend} onExportAI={()=>setExportOpen(true)} />
+              <AIExportDialog open={exportOpen} onClose={()=>setExportOpen(false)} friend={focusFriend} />
+            </MacFrame>
+          </Wrap>
+        </DCArtboard>
+        <DCArtboard id="loading"  label="③ 首次启动 · 检测中 (1100×720)" width={1100} height={720}>
+          <Wrap>
+            <MacFrame width={1100} height={720} title="EchoTrace · 第一次见面">
+              <LoadingPage />
+            </MacFrame>
+          </Wrap>
+        </DCArtboard>
+        <DCArtboard id="dark"     label="④ 暗色模式 · 深夜回顾 (1440×900)" width={1440} height={900}>
+          <div className="et-root et-dark" style={{ ...themeStyle, '--et-bg':'#14182A', '--et-paper':'#1B2138', height:'100%', position:'relative' }}>
+            <MacFrame width={1440} height={900} title="EchoTrace · 深夜模式" dark>
+              <HomePage dark />
+            </MacFrame>
+          </div>
+        </DCArtboard>
+        <DCArtboard id="export"   label="⑤ 导出给 AI · 第一屏 (920×900)" width={920} height={900}>
+          <Wrap>
+            <MacFrame width={920} height={900} title="导出 · 给 AI 分析">
+              {/* show step1 in this artboard */}
+              <div style={{ position:'relative', width:'100%', height:'100%', background:'var(--et-bg)' }}>
+                <FriendPage friend={focusFriend} />
+                <AIExportDialog open={true} onClose={()=>{}} friend={focusFriend} />
+              </div>
+            </MacFrame>
+          </Wrap>
+        </DCArtboard>
+        <DCArtboard id="export2"  label="⑥ 导出给 AI · 第二屏 (920×900)" width={920} height={900}>
+          <Wrap>
+            <MacFrame width={920} height={900} title="导出 · 文件已生成">
+              <div style={{ position:'relative', width:'100%', height:'100%', background:'var(--et-bg)' }}>
+                <FriendPage friend={focusFriend} />
+                <ExportStep2DialogStandalone friend={focusFriend} />
+              </div>
+            </MacFrame>
+          </Wrap>
+        </DCArtboard>
+        <DCArtboard id="mobile"   label="⑦ 移动端 · 首页 (iPhone 14)" width={399} height={836}>
+          <Wrap>
+            <PhoneFrame>
+              <HomeMobile />
+            </PhoneFrame>
+          </Wrap>
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="v2" title="补充三页 · 相册 / 本地 Agent / 任务中心" subtitle="沿用同一套 token，扩展三处关键交互">
+        <DCArtboard id="gallery" label="⑧ 相册 Tab · 按月分组 (1180×900)" width={1180} height={900}>
+          <Wrap>
+            <MacFrame width={1180} height={900} title="和 kevin 的故事 · 相册">
+              <MediaGallery friend={focusFriend}/>
+            </MacFrame>
+          </Wrap>
+        </DCArtboard>
+        <DCArtboard id="agentpanel" label="⑨ 本地 Agent · 优先选项卡 (920×900)" width={920} height={900}>
+          <Wrap>
+            <MacFrame width={920} height={900} title="导出 · 给 AI 分析 · 本地 Agent">
+              <div style={{ position:'relative', width:'100%', height:'100%', background:'var(--et-bg)' }}>
+                <FriendPage friend={focusFriend}/>
+                <AgentDialogWithLocal friend={focusFriend}/>
+              </div>
+            </MacFrame>
+          </Wrap>
+        </DCArtboard>
+        <DCArtboard id="analyzing" label="⑩ Claude Code 流式分析中 (1100×720)" width={1100} height={720}>
+          <Wrap>
+            <MacFrame width={1100} height={720} title="Claude Code · 正在分析">
+              <AgentAnalyzing friend={focusFriend}/>
+            </MacFrame>
+          </Wrap>
+        </DCArtboard>
+        <DCArtboard id="report" label="⑪ 精装分析报告 (1180×1280)" width={1180} height={1280}>
+          <Wrap>
+            <MacFrame width={1180} height={1280} title="精装分析报告 · 与 kevin 的关系画像">
+              <AgentReport friend={focusFriend}/>
+            </MacFrame>
+          </Wrap>
+        </DCArtboard>
+        <DCArtboard id="taskdrawer" label="⑫ 任务中心抽屉 (1440×900)" width={1440} height={900}>
+          <Wrap>
+            <MacFrame width={1440} height={900} title="EchoTrace · 后台任务">
+              <div style={{ position:'relative', width:'100%', height:'100%' }}>
+                <HomePage/>
+                <TaskCenterDrawer/>
+              </div>
+            </MacFrame>
+          </Wrap>
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="murmur" title="Murmur v3 · 立体关系网络" subtitle="把所有人做成一张可旋转、可点击的社交星图">
+        <DCArtboard id="graph-light" label="⑬ 关系网主视图 · 亮色 (1280×860)" width={1280} height={860}>
+          <Wrap>
+            <MacFrame width={1280} height={860} title="Murmur · 关系网络">
+              <GraphView height={826}/>
+            </MacFrame>
+          </Wrap>
+        </DCArtboard>
+        <DCArtboard id="graph-dark" label="⑭ 夜空模式 · 深夜观星 (1280×860)" width={1280} height={860}>
+          <Wrap>
+            <MacFrame width={1280} height={860} title="Murmur · 夜空" dark>
+              <GraphView dark height={826}/>
+            </MacFrame>
+          </Wrap>
+        </DCArtboard>
+        <DCArtboard id="graph-panel" label="⑮ 节点详情侧面板 · kevin × Ashleyyy 对比 (1280×860)" width={1280} height={860}>
+          <Wrap>
+            <MacFrame width={1280} height={860} title="Murmur · 节点详情">
+              <div style={{ position:'relative', width:'100%', height:'100%' }}>
+                <GraphView height={826}/>
+                <GraphSidePanel personaId="kevin"/>
+              </div>
+            </MacFrame>
+          </Wrap>
+        </DCArtboard>
+        <DCArtboard id="graph-views" label="⑯ 视图切换菜单 · 4 种视角 (1100×780)" width={1100} height={780}>
+          <Wrap>
+            <MacFrame width={1100} height={780} title="Murmur · 视图">
+              <ViewSwitcherMenu active="graph"/>
+            </MacFrame>
+          </Wrap>
+        </DCArtboard>
+        <DCArtboard id="graph-concentric" label="⑰ 同心圆视图 · A 内圈 → E 外圈 (1280×860)" width={1280} height={860}>
+          <Wrap>
+            <MacFrame width={1280} height={860} title="Murmur · 同心圆">
+              <ConcentricView/>
+            </MacFrame>
+          </Wrap>
+        </DCArtboard>
+        <DCArtboard id="graph-orbit" label="⑱ 时间轨道视图 · 朋友们的‘轨道’ (1280×860)" width={1280} height={860}>
+          <Wrap>
+            <MacFrame width={1280} height={860} title="Murmur · 时间轨道">
+              <TimeOrbitView/>
+            </MacFrame>
+          </Wrap>
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="notes" title="· 设计说明" subtitle="为什么是这样">
+        <DCArtboard id="memo" label="设计备忘 · 风格 / 色板 / 字体" width={920} height={680}>
+          <DesignMemo themeStyle={themeStyle}/>
+        </DCArtboard>
+      </DCSection>
+
+      <TweaksPanel>
+        <TweakSection label="主题色"/>
+        <TweakColor  label="主色"   value={t.primary} onChange={(v)=>setTweak('primary', v)}/>
+        <TweakColor  label="墨色"   value={t.ink}     onChange={(v)=>setTweak('ink', v)}/>
+        <TweakColor  label="底色"   value={t.bg}      onChange={(v)=>setTweak('bg', v)}/>
+        <TweakSection label="字体"/>
+        <TweakSelect label="字体组合" value={t.fontPair} options={[
+          {value:'songti',  label:'思源宋体 + 无衬线（默认）'},
+          {value:'fraunces',label:'Fraunces + Inter'},
+          {value:'hengshan',label:'马善政（手写感）'},
+        ]} onChange={(v)=>setTweak('fontPair', v)}/>
+        <TweakSection label="布局"/>
+        <TweakRadio  label="密度" value={t.density} options={['compact','regular','comfy']} onChange={(v)=>setTweak('density', v)}/>
+        <TweakToggle label="装饰邮戳" value={t.showStamps} onChange={(v)=>setTweak('showStamps', v)}/>
+        <TweakSection label="演示"/>
+        <TweakToggle label="单人页·打开导出弹窗" value={t.openExport} onChange={(v)=>setTweak('openExport', v)}/>
+      </TweaksPanel>
+    </DesignCanvas>
+  );
+}
+
+// AI export dialog with local-agent panel on top (sits inside friend page)
+function AgentDialogWithLocal({ friend }) {
+  const [agent, setAgent] = React.useState('cc');
+  return (
+    <div style={{
+      position:'absolute', inset:0, zIndex:10,
+      background:'rgba(20,24,42,0.42)', backdropFilter:'blur(6px)', WebkitBackdropFilter:'blur(6px)',
+      display:'flex', alignItems:'center', justifyContent:'center', padding:24,
+    }}>
+      <div style={{
+        width:600, maxWidth:'94%', maxHeight:'92%',
+        background:'var(--et-paper)', borderRadius:'var(--et-r-lg)',
+        boxShadow:'var(--et-shadow-3)', border:'0.5px solid var(--et-line-2)',
+        overflow:'auto', position:'relative',
+      }}>
+        <div style={{ position:'absolute', left:0, top:0, bottom:0, width:6, background:'var(--et-orange)' }}/>
+        <div style={{ padding:'22px 28px 0' }}>
+          <div className="et-eyebrow" style={{ color:'var(--et-orange)' }}>导出 · 给 AI 分析</div>
+          <div className="et-h2" style={{ color:'var(--et-ink)', marginTop:6 }}>把和 {friend.name} 的对话交给 AI</div>
+        </div>
+        <div style={{ padding:'18px 28px 22px' }}>
+          <LocalAgentPanel value={agent} onChange={setAgent}/>
+          <div style={{ display:'flex', alignItems:'center', gap:10, margin:'4px 0 14px' }}>
+            <div style={{ flex:1, height:1, background:'var(--et-line-2)' }}/>
+            <span className="et-meta" style={{ fontSize:11 }}>或者 — 把分析包导出，自己拿给在线 AI 看</span>
+            <div style={{ flex:1, height:1, background:'var(--et-line-2)' }}/>
+          </div>
+          <div style={{ opacity:0.55, pointerEvents:'none' }}>
+            <div style={{ display:'flex', alignItems:'baseline', gap:8, marginBottom:10 }}>
+              <span className="et-serif" style={{ fontSize:14, fontWeight:600, color:'var(--et-mute)' }}>①</span>
+              <span style={{ fontSize:12.5, fontWeight:600, color:'var(--et-mute)' }}>选择给哪个 AI 看</span>
+            </div>
+            <div style={{ display:'grid', gridTemplateColumns:'repeat(4, 1fr)', gap:8 }}>
+              {['ChatGPT','Claude','豆包','文心一言','DeepSeek','Kimi','通用（任何 AI）'].map((a,i) => (
+                <button key={a} style={{
+                  all:'unset', textAlign:'center', padding:'10px 6px', borderRadius:10,
+                  border:'0.5px solid var(--et-line-2)', fontSize:12, color:'var(--et-mute)',
+                  gridColumn: a==='通用（任何 AI）' ? 'span 2' : 'auto',
+                }}>{a}</button>
+              ))}
+            </div>
+          </div>
+          <button style={{
+            all:'unset', cursor:'pointer', display:'block', width:'100%', textAlign:'center',
+            padding:'14px 0', marginTop:18,
+            background:'var(--et-orange)', color:'#fff',
+            borderRadius:'var(--et-r)', fontSize:14, fontWeight:600,
+            boxShadow:'0 6px 16px rgba(255,107,71,0.32)',
+          }}>让 Claude Code 现在就分析 →</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// step2 dialog standalone (just renders the success screen content)
+function ExportStep2DialogStandalone({ friend }) {
+  return (
+    <div style={{
+      position:'absolute', inset:0, zIndex:10,
+      background:'rgba(20,24,42,0.42)', backdropFilter:'blur(6px)', WebkitBackdropFilter:'blur(6px)',
+      display:'flex', alignItems:'center', justifyContent:'center', padding:24,
+    }}>
+      <div style={{
+        width:560, maxWidth:'92%', background:'var(--et-paper)',
+        borderRadius:'var(--et-r-lg)', boxShadow:'var(--et-shadow-3)',
+        border:'0.5px solid var(--et-line-2)', overflow:'hidden', position:'relative',
+      }}>
+        <div style={{ position:'absolute', left:0, top:0, bottom:0, width:6, background:'var(--et-orange)' }}/>
+        <div style={{ padding:'22px 28px 0' }}>
+          <div className="et-eyebrow" style={{ color:'var(--et-orange)' }}>导出 · 给 AI 分析</div>
+          <div className="et-h2" style={{ color:'var(--et-ink)', marginTop:6 }}>搞定！文件已经准备好。</div>
+        </div>
+        <ExportStep2 onClose={()=>{}} friend={friend}/>
+      </div>
+    </div>
+  );
+}
+
+function DesignMemo({ themeStyle }) {
+  const swatches = [
+    { c:'#FF6B47', name:'Coral',     code:'#FF6B47', use:'主品牌色 · 强调数字 / CTA' },
+    { c:'#E0532E', name:'Coral 2',   code:'#E0532E', use:'按下 / hover' },
+    { c:'#FFE2D6', name:'Coral wash',code:'#FFE2D6', use:'高亮卡片 / 标签' },
+    { c:'#1A2B4A', name:'Ink',       code:'#1A2B4A', use:'正文 / 次品牌色' },
+    { c:'#F7F1E6', name:'Cream',     code:'#F7F1E6', use:'页面底色（米白）' },
+    { c:'#FBF6EE', name:'Paper',     code:'#FBF6EE', use:'卡片纸面' },
+    { c:'#E8B57A', name:'Amber',     code:'#E8B57A', use:'三级强调（年代感）' },
+    { c:'#8AA48F', name:'Sage',      code:'#8AA48F', use:'安静 / 温暖标签' },
+  ];
+  return (
+    <div className="et-root" style={{ ...themeStyle, height:'100%', padding:'28px 36px', overflow:'auto', background:'var(--et-bg)' }}>
+      <div className="et-eyebrow">设计备忘</div>
+      <div className="et-h1" style={{ marginTop:6 }}>温暖怀旧，但不土。</div>
+      <div className="et-body" style={{ marginTop:8, color:'var(--et-mute)', maxWidth:560 }}>
+        EchoTrace 的核心情绪是「翻看年代久远的信件」。我们用奶油白纸、暖橘红印章、深墨蓝衬线来搭出年代记的氛围；而工程师味的术语全部隐入后台。
+      </div>
+      <hr className="et-rule-double" style={{ margin:'22px 0 18px' }}/>
+      <div className="et-eyebrow">主色板</div>
+      <div style={{ marginTop:10, display:'grid', gridTemplateColumns:'repeat(4, 1fr)', gap:12 }}>
+        {swatches.map(s => (
+          <div key={s.code} style={{ background:'var(--et-paper)', border:'0.5px solid var(--et-line-2)', borderRadius:12, overflow:'hidden' }}>
+            <div style={{ height:64, background:s.c, borderBottom:'0.5px solid var(--et-line)' }}/>
+            <div style={{ padding:'10px 12px' }}>
+              <div className="et-serif" style={{ fontSize:14, fontWeight:600, color:'var(--et-ink)' }}>{s.name}</div>
+              <div className="et-meta" style={{ fontFamily:'var(--et-mono)', fontSize:11 }}>{s.code}</div>
+              <div className="et-meta" style={{ marginTop:4 }}>{s.use}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+      <div style={{ marginTop:24, display:'grid', gridTemplateColumns:'1fr 1fr', gap:18 }}>
+        <div>
+          <div className="et-eyebrow">字体</div>
+          <div className="et-serif" style={{ fontSize:32, fontWeight:600, color:'var(--et-ink)', marginTop:6 }}>Noto Serif SC · 思源宋体</div>
+          <div className="et-meta" style={{ marginTop:2 }}>标题 / 报刊感</div>
+          <div className="et-body" style={{ fontSize:15, marginTop:12 }}>Noto Sans SC · 正文体 — 在卡片里承担说明职责，避免抢戏。</div>
+        </div>
+        <div>
+          <div className="et-eyebrow">写作语气</div>
+          <ul style={{ marginTop:6, paddingLeft:18, lineHeight:1.7, color:'var(--et-ink)', fontSize:13 }}>
+            <li>每个页面都有一句「⾛⼼标题」，不是功能名</li>
+            <li>不暴露「密钥 / wxid / 数据库」等术语</li>
+            <li>失败也优雅：永远给「我来帮你」的下一步</li>
+            <li>导出是动作，不是页面</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>

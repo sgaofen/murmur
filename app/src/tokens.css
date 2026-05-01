@@ -1,0 +1,124 @@
+/* EchoTrace 2.0 — Design Tokens
+ * Warm cream + ink blue + warm orange. Serif headlines, sans body.
+ * Inspired by: Spotify Wrapped, Apple Memories, Day One journal.
+ */
+
+@import url('https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;500;600;700;900&family=Source+Han+Serif&family=Noto+Sans+SC:wght@300;400;500;600;700&display=swap');
+
+:root {
+  /* —— Color: light (cream) —— */
+  --et-bg:        #F7F1E6;   /* page bg, warm cream */
+  --et-paper:     #FBF6EE;   /* cards, lighter paper */
+  --et-paper-2:   #F1E8D7;   /* sunken / tinted card */
+  --et-ink:       #1A2B4A;   /* primary text + secondary brand */
+  --et-ink-soft:  #3A4862;
+  --et-mute:      #6F6A5C;   /* secondary text */
+  --et-faint:     #B6AC97;   /* hairlines, captions */
+  --et-line:      rgba(26, 43, 74, 0.10);  /* dividers */
+  --et-line-2:    rgba(26, 43, 74, 0.18);
+  --et-orange:    #FF6B47;   /* primary brand — warm coral */
+  --et-orange-2:  #E0532E;   /* hover/pressed */
+  --et-orange-soft: #FFE2D6; /* tinted backgrounds */
+  --et-amber:     #E8B57A;   /* tertiary accent */
+  --et-rose:      #C45A3F;
+  --et-sage:      #8AA48F;   /* "secret" tag */
+  --et-sky:       #5A7A99;
+  --et-postmark:  #C45A3F;
+
+  /* —— Type —— */
+  --et-serif: 'Noto Serif SC', 'Source Han Serif SC', 'Songti SC', 'STSong', serif;
+  --et-sans:  'Noto Sans SC', 'PingFang SC', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
+  --et-mono:  'SF Mono', ui-monospace, 'JetBrains Mono', monospace;
+
+  /* —— Radius / shadow —— */
+  --et-r-sm: 8px;
+  --et-r:    14px;
+  --et-r-lg: 22px;
+  --et-r-xl: 32px;
+  --et-shadow-1: 0 1px 0 rgba(26,43,74,0.04), 0 1px 2px rgba(26,43,74,0.05);
+  --et-shadow-2: 0 1px 0 rgba(26,43,74,0.04), 0 8px 24px rgba(26,43,74,0.08);
+  --et-shadow-3: 0 1px 0 rgba(26,43,74,0.04), 0 18px 48px rgba(26,43,74,0.12);
+
+  /* —— Spacing scale —— */
+  --et-1: 4px;
+  --et-2: 8px;
+  --et-3: 12px;
+  --et-4: 16px;
+  --et-5: 24px;
+  --et-6: 32px;
+  --et-7: 48px;
+  --et-8: 64px;
+  --et-9: 96px;
+}
+
+/* —— Dark theme (deep ink, late-night) —— */
+.et-dark {
+  --et-bg:        #14182A;
+  --et-paper:     #1B2138;
+  --et-paper-2:   #232944;
+  --et-ink:       #F4ECDA;
+  --et-ink-soft:  #DCD3BE;
+  --et-mute:      #A39B86;
+  --et-faint:     #6E6852;
+  --et-line:      rgba(244, 236, 218, 0.10);
+  --et-line-2:    rgba(244, 236, 218, 0.18);
+  --et-orange:    #FF8867;
+  --et-orange-2:  #FF6B47;
+  --et-orange-soft: #3A2519;
+  --et-amber:     #E8B57A;
+  --et-rose:      #E07659;
+  --et-sage:      #9DBBA1;
+  --et-sky:       #8FA8C4;
+}
+
+/* base */
+.et-root {
+  font-family: var(--et-sans);
+  color: var(--et-ink);
+  background: var(--et-bg);
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: 'palt' 1;
+  letter-spacing: 0.005em;
+}
+.et-serif { font-family: var(--et-serif); letter-spacing: 0.01em; }
+.et-mono  { font-family: var(--et-mono); }
+
+/* type scale */
+.et-display { font-family: var(--et-serif); font-weight: 600; font-size: 56px; line-height: 1.15; letter-spacing: -0.005em; }
+.et-h1      { font-family: var(--et-serif); font-weight: 600; font-size: 38px; line-height: 1.2; }
+.et-h2      { font-family: var(--et-serif); font-weight: 500; font-size: 26px; line-height: 1.25; }
+.et-h3      { font-family: var(--et-serif); font-weight: 500; font-size: 20px; line-height: 1.3; }
+.et-eyebrow { font-family: var(--et-sans);  font-weight: 600; font-size: 11px; line-height: 1; letter-spacing: 0.18em; text-transform: uppercase; color: var(--et-mute); }
+.et-body    { font-family: var(--et-sans);  font-weight: 400; font-size: 14px; line-height: 1.55; }
+.et-meta    { font-family: var(--et-sans);  font-weight: 500; font-size: 12px; line-height: 1.4; color: var(--et-mute); }
+.et-num     { font-family: var(--et-serif); font-feature-settings: 'tnum' 1; font-variant-numeric: tabular-nums; }
+
+/* paper texture (subtle) */
+.et-paper-grain {
+  background-image:
+    radial-gradient(rgba(26,43,74,0.025) 1px, transparent 1px),
+    radial-gradient(rgba(26,43,74,0.018) 1px, transparent 1px);
+  background-size: 3px 3px, 7px 7px;
+  background-position: 0 0, 1px 2px;
+}
+
+/* a hairline rule that mimics letterpress */
+.et-rule { height: 1px; background: var(--et-line-2); border: 0; }
+.et-rule-double { height: 5px; border-top: 1px solid var(--et-line-2); border-bottom: 1px solid var(--et-line-2); background: transparent; }
+
+/* tag chip (老朋友 / 夜聊伙伴 / 秒回选手 …) */
+.et-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 3px 9px; border-radius: 999px;
+  font-family: var(--et-sans); font-size: 11px; font-weight: 500;
+  letter-spacing: 0.04em;
+  background: var(--et-orange-soft);
+  color: var(--et-orange-2);
+  border: 0.5px solid rgba(224, 83, 46, 0.18);
+}
+.et-chip.ink   { background: rgba(26,43,74,0.06); color: var(--et-ink); border-color: rgba(26,43,74,0.10); }
+.et-chip.sage  { background: rgba(138,164,143,0.18); color: #506656; border-color: rgba(80,102,86,0.18); }
+.et-chip.amber { background: rgba(232,181,122,0.22); color: #8a5a1c; border-color: rgba(138,90,28,0.18); }
+.et-chip.faint { background: transparent; color: var(--et-mute); border: 0.5px dashed var(--et-line-2); }
+
+.et-dark .et-chip.ink { color: var(--et-ink); background: rgba(244,236,218,0.08); border-color: rgba(244,236,218,0.14); }
