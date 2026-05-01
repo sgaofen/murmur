@@ -2690,35 +2690,50 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             cached = _PAIR_REPORT_CACHE.get(ck)
             if cached and (_time.time() - cached[0]) < _CACHE_TTL:
                 return self._send_json(cached[1])
-            # Look for a pair report mentioning both display names (since pair filenames use names, not wxids)
+            # Pair filenames are deterministic: "<XX>_<safe_name_a>__<safe_name_b>.md"
+            # where _safe_filename = re.sub(r'[<>:"/\\|?*\s]+', '_', name)[:80]
+            # (mirror of batch_analyze._safe_filename — keep them in sync).
+            # We MUST match by filename, not body content: pair reports legitimately
+            # reference other friends' names in the analysis, so body matching causes
+            # bogus matches (e.g. asking for A↔B returns A↔C because B is mentioned).
             contacts = self.store.contacts() if self.store else {}
             ca = contacts.get(a)
             cb = contacts.get(b)
             name_a = (ca.display() if ca else a)
             name_b = (cb.display() if cb else b)
+
+            def _safe(s: str) -> str:
+                return re.sub(r'[<>:"/\\|?*\s]+', "_", s)[:80]
+
+            target = {_safe(name_a), _safe(name_b)}
             pairs_root = Path.home() / "Desktop" / "Murmur" / "agent_reports" / "pairs"
             if pairs_root.exists():
                 for p in pairs_root.iterdir():
                     if p.suffix.lower() != ".md":
                         continue
+                    # stem = "XX_<safeA>__<safeB>" — strip the "XX_" index prefix
+                    stem = p.stem
+                    after_idx = stem.split("_", 1)[1] if "_" in stem else stem
+                    parts = after_idx.split("__")
+                    if len(parts) != 2:
+                        continue
+                    if {parts[0], parts[1]} != target:
+                        continue
                     try:
-                        content = p.read_text(encoding="utf-8")
+                        content = p.read_text(encoding="utf-8", errors="replace")
                     except OSError:
                         continue
-                    # Pair files reference both names in either order. Match by both name appearances.
-                    if name_a in content and name_b in content:
-                        # Skip frontmatter to extract a clean preview
-                        idx = content.find("\n---\n")
-                        body = content[idx + 5:].lstrip() if idx > 0 else content
-                        payload = {
-                            "available": True,
-                            "path": f"pairs/{p.name}",
-                            "size": p.stat().st_size,
-                            "mtime": int(p.stat().st_mtime),
-                            "short": body[:600],
-                        }
-                        _PAIR_REPORT_CACHE[ck] = (_time.time(), payload)
-                        return self._send_json(payload)
+                    idx = content.find("\n---\n")
+                    body = content[idx + 5:].lstrip() if idx > 0 else content
+                    payload = {
+                        "available": True,
+                        "path": f"pairs/{p.name}",
+                        "size": p.stat().st_size,
+                        "mtime": int(p.stat().st_mtime),
+                        "short": body[:600],
+                    }
+                    _PAIR_REPORT_CACHE[ck] = (_time.time(), payload)
+                    return self._send_json(payload)
             payload = {"available": False}
             _PAIR_REPORT_CACHE[ck] = (_time.time(), payload)
             return self._send_json(payload)
