@@ -106,9 +106,13 @@ def kill_weixin(pids: list[int]) -> bool:
 
 
 def launch_weixin(path: str) -> int | None:
-    """Spawn Weixin.exe; return its PID once it appears."""
+    """Spawn Weixin.exe; return its PID once it appears.
+
+    Use CREATE_NEW_PROCESS_GROUP only (0x200) — DETACHED_PROCESS (0x08) caused
+    WeChat 4.x to die a few seconds after launch on some Win11 machines.
+    """
     subprocess.Popen([path], cwd=str(Path(path).parent),
-                     creationflags=0x00000008)  # DETACHED_PROCESS
+                     creationflags=0x00000200)
     # Poll for new pid (up to 15s — WeChat is slow to start)
     for _ in range(150):
         pids = find_weixin_pids()
@@ -233,11 +237,22 @@ def auto_restart_and_extract(timeout: int = 90) -> str | None:
     if not new_pid:
         print("[X] Failed to detect new Weixin.exe after launch.")
         return None
-    print(f"[*] New Weixin.exe pid={new_pid}. Waiting 1s for it to settle...")
-    time.sleep(1.0)
+    print(f"[*] Initial Weixin.exe pid={new_pid}. Waiting 5s for WeChat 4.x launcher → main transition...")
+    time.sleep(5.0)
 
-    # Now inject hook ASAP — auto-login should happen within a few seconds
-    return hook_and_poll(new_pid, timeout=timeout)
+    # WeChat 4.x spawns: launcher → main app process. The first pid is the launcher;
+    # the main app is whichever Weixin.exe pid appears LAST after the launcher dies/forks.
+    # Re-scan and pick the newest pid for hooking.
+    current_pids = find_weixin_pids()
+    if not current_pids:
+        print("[X] Weixin.exe disappeared after launch. WeChat 4.x must spawn a child — try again with WeChat already running.")
+        return None
+    target_pid = max(current_pids)  # newest pid = most recently spawned = main app
+    if target_pid != new_pid:
+        print(f"[*] Switching to newer pid={target_pid} (was {new_pid}, likely the launcher).")
+    else:
+        print(f"[*] Hooking pid={target_pid}.")
+    return hook_and_poll(target_pid, timeout=timeout)
 
 
 def validate_key_against_db(key_hex: str, db_path: str) -> bool:

@@ -37,7 +37,9 @@ export function ExtractKeyDialog({ open, onClose, onSuccess }: Props) {
     window.setTimeout(() => setPhase((p) => p === 'restarting' ? 'waiting-login' : p), 5000);
 
     try {
-      const r = await extractKey({ autoRestart: true, timeout: 90 });
+      // autoRestart=false: hook the running WeChat instead of kill+relaunch
+      // (kill+relaunch makes the new Weixin.exe die before hook attaches on Win11 + WeChat 4.1.x)
+      const r = await extractKey({ autoRestart: false, timeout: 90 });
       if (elapsedTimer.current) { window.clearInterval(elapsedTimer.current); elapsedTimer.current = null; }
       setLog(r.log || '');
       if (r.ok && r.key) {

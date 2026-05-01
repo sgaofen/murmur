@@ -104,7 +104,10 @@ export function OnboardingDialog({ open, onClose, onDone }: Props) {
     setPhase('extract-key');
     setProgress('扫描 WeChat 进程内存中…');
     try {
-      const r = await extractKey({ autoRestart: true, timeout: 90 });
+      // autoRestart=false: hook the existing WeChat instead of kill+relaunch.
+      // Kill+relaunch on Win11 + WeChat 4.1.x sometimes makes the new Weixin.exe die
+      // before the hook can attach. We instead ask the user to re-login to trigger key capture.
+      const r = await extractKey({ autoRestart: false, timeout: 90 });
       // On Mac, extract_key_mac.py writes ~/.murmur/decrypted_keys.json directly.
       // r.ok=true with no r.key means the per-DB JSON was written.
       // On Win, r.key holds the password we still need to save.
@@ -499,11 +502,12 @@ function WinNeedKey({ diag, onStart }: { diag: Diagnose; onStart: () => void }) 
   return (
     <>
       <div className="et-serif" style={{ fontSize: 15, lineHeight: 1.7, color: 'var(--et-ink-soft)', marginBottom: 14 }}>
-        我会帮你做 3 件事：
+        请按顺序做：
       </div>
       <ol style={{ paddingLeft: 20, lineHeight: 1.9, fontSize: 13, color: 'var(--et-ink)', marginBottom: 14 }}>
-        <li>关掉微信，立即帮你重新打开（你的所有窗口会消失几秒）</li>
-        <li><strong>请在弹出的微信窗口里点一下「登录」按钮</strong> —— 这是整个过程里你唯一要做的</li>
+        <li><strong>保持微信开着</strong>（已登录状态）—— 别关</li>
+        <li>点下面的「开始」—— 我会装一个内存 hook 到微信进程</li>
+        <li>看到「等待登录事件」时，<strong>去微信里手动退出登录然后重新登录一次</strong>，hook 会捕获密钥</li>
         <li>读到密钥后，立即解密所有数据，进入 Murmur 主界面</li>
       </ol>
       <div style={{
@@ -511,10 +515,10 @@ function WinNeedKey({ diag, onStart }: { diag: Diagnose; onStart: () => void }) 
         border: '0.5px solid rgba(138,90,28,0.3)', borderRadius: 8,
         fontSize: 12, color: '#8a5a1c', marginBottom: 14,
       }}>
-        💡 准备好了再开始 —— 微信会立刻被关掉。如果你正在打字或传文件，先存一下。
+        💡 不会自动关你的微信。如果微信没在跑，请先打开微信再回来点「开始」。
       </div>
       <CapabilityList diag={diag} />
-      <button onClick={onStart} style={primaryBtn}>开始（30 秒）</button>
+      <button onClick={onStart} style={primaryBtn}>开始抓密钥</button>
     </>
   );
 }
