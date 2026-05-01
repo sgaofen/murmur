@@ -268,7 +268,16 @@ def detect_capabilities() -> Capabilities:
 # ---------- Native lib bundle directory ----------
 
 def native_dir() -> Path:
-    """Directory containing wx_key.dll, go_decrypt.dll, etc. (or .dylib on Mac)."""
+    """Directory containing wx_key.dll, go_decrypt.dll, etc. (or .dylib on Mac).
+
+    PyInstaller-aware: when frozen, looks under sys._MEIPASS/native first.
+    """
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            cand = Path(meipass) / "native"
+            if cand.exists():
+                return cand
     return Path(__file__).resolve().parent / "native"
 
 
