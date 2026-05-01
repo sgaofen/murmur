@@ -41,6 +41,16 @@
 
 双击安装，按引导走完即可。
 
+> ⚠ macOS .app 首次启动会引导你在「系统设置 → 隐私与安全性 → 完全磁盘访问」给 Murmur 打勾（macOS 不让任何 ad-hoc 签名 App 直接读其他 App 的 Container 数据，这是系统硬性限制）。打勾后必须**完全退出 Murmur 再重新打开**。
+
+### macOS 一键脚本（推荐给小白）
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/sgaofen/murmur/main/install-mac.sh | bash
+```
+
+自动装 Homebrew + `python@3.12` + `node` + `ffmpeg` → `git clone` → 装依赖 → 启动。完整一遍约 3 分钟。
+
 ### 从源码运行（开发模式）
 
 ```bash
@@ -55,6 +65,17 @@ cd murmur
 ```
 
 需要：Python 3.11+ 、 Node.js 18+ 。第一次会自动 `pip install -r requirements.txt` + `npm install`。
+
+### Mac onboarding 完整流程（傻瓜式）
+
+打开 Murmur 后会自动诊断你的环境，按需把你引到三种路径之一（无需懂任何术语）：
+
+1. **WeChat 还是 hardened runtime**（系统默认状态）→ 弹窗「一次性给 WeChat 重签名」→ 你点确认 → macOS 弹密码框 → 一键搞定（不需关 SIP 不需重启）
+2. **WeChat 已经 ad-hoc 签名 + 在跑** → 直接「一键抓密钥」→ 又弹一次密码框（root 权限扫内存）→ 自动解密 → 进主界面
+3. **已有解密数据** → 直接进主界面
+
+> 「重签名」做的事：`codesign --remove-signature` + `codesign --force --sign -` 主可执行文件，清掉 hardened-runtime flag 让 task_for_pid 放行。WeChat 自己升级时会重置回原样，不影响后续使用。
+> 「抓密钥」做的事：用户身份采每个加密 DB 的 salt 写到 `/tmp` → osascript admin 提权调 Mach VM API 扫 WeChat 进程内存找 `x'<64hex_aes><32hex_salt>'` 这种 WCDB 缓存格式 → 配 salt 找出 14 个 DB 各自的 AES key → 解密时跳过 PBKDF2 直接用。
 
 ---
 

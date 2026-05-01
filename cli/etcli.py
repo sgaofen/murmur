@@ -41,7 +41,11 @@ def _flutter_prefs_path() -> Path:
 
 
 def discover_data_dir() -> Optional[Path]:
-    """Find the decrypted-DB directory: env > config > Murmur layout > legacy echotrace."""
+    """Find the decrypted-DB directory: env > config > Murmur layout > legacy echotrace.
+
+    All filesystem walks here go through `_paths._safe_listdir` so a TCC-blocked
+    directory (e.g. ~/Documents on macOS without FDA) can never hang the
+    backend startup."""
     env = os.environ.get("ETCLI_DATA_DIR")
     if env and Path(env).is_dir():
         return Path(env)
@@ -57,11 +61,20 @@ def discover_data_dir() -> Optional[Path]:
     for docs in [Path("D:/Documents"), Path.home() / "Documents", Path.home() / "OneDrive/Documents"]:
         for prefix in ("Murmur/decrypted", "EchoTrace"):
             root = docs / prefix
-            if not root.is_dir():
+            try:
+                if not root.is_dir():
+                    continue
+            except (PermissionError, OSError):
                 continue
-            for sub in root.iterdir():
-                if sub.is_dir() and (sub / "session.db").exists():
-                    return sub
+            entries = _paths._safe_listdir(root)
+            if entries is None:
+                continue  # TCC-blocked or hung
+            for sub in entries:
+                try:
+                    if sub.is_dir() and (sub / "session.db").exists():
+                        return sub
+                except (PermissionError, OSError):
+                    continue
     return None
 
 
@@ -1808,6 +1821,20 @@ import subprocess
 import threading
 import time as _time
 
+
+def _spawn_helper_argv(name: str) -> list[str]:
+    """Build the argv to spawn a sibling helper script (refresh / extract_key_mac / etc.).
+
+    In PyInstaller frozen mode (sys.frozen is True), sys.executable is the bundled
+    `etcli` binary itself — we re-enter it via `--internal-script <name>`.
+
+    In dev mode it's the Python interpreter — call `python3 cli/<name>.py` as before.
+    """
+    cli_dir = Path(__file__).resolve().parent
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "--internal-script", name]
+    return [sys.executable, "-u", str(cli_dir / f"{name}.py")]
+
 # Auto-derive friend cards (mirrors what the React app expects)
 
 _HUE_FOR_NAME_CACHE: dict[str, int] = {}
@@ -2468,12 +2495,27 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         path = url.path
         qs = urllib.parse.parse_qs(url.query)
 
+        # Bootstrap mode: only a small allowlist works without decrypted data.
+        _NO_STORE_GET = {"/api/info", "/api/agents", "/api/diagnose", "/api/reports"}
+        if self.store is None and path not in _NO_STORE_GET and not path.startswith("/api/report/"):
+            return self._send_json({
+                "error": "no_decrypted_data",
+                "message": "Backend is in bootstrap mode — provide a key via /api/save-key + /api/refresh first.",
+            }, status=503)
+
         if path.startswith("/api/media/"):
             # Serve media bytes by md5: /api/media/<md5>
             md5 = path[len("/api/media/"):]
             return self._serve_media(md5)
 
         if path == "/api/info":
+            if self.store is None:
+                return self._send_json({
+                    "data_dir": None,
+                    "self_wxid": None,
+                    "version": "0.1",
+                    "bootstrap": True,
+                })
             return self._send_json({
                 "data_dir": str(self.store.dir),
                 "self_wxid": self.store.me,
@@ -2645,6 +2687,10 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     "can_extract_image_key": caps.can_extract_image_key,
                     "has_wechat_installed": caps.has_wechat_installed,
                     "has_wechat_data": caps.has_wechat_data,
+                    "sip_enabled": caps.sip_enabled,
+                    "weixin_running": caps.weixin_running,
+                    "wechat_hardened": caps.wechat_hardened,
+                    "tcc_blocked": caps.tcc_blocked,
                 },
                 "profiles": [
                     {
@@ -2825,19 +2871,34 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         url = urllib.parse.urlparse(self.path)
         path = url.path
 
+        # Bootstrap mode: only the onboarding endpoints work without decrypted data.
+        _NO_STORE_POST = {"/api/refresh", "/api/save-key", "/api/extract-key",
+                          "/api/open-folder", "/api/resign-wechat", "/api/open-fda"}
+        if self.store is None and path not in _NO_STORE_POST:
+            return self._send_json({
+                "error": "no_decrypted_data",
+                "message": "Backend is in bootstrap mode — provide a key via /api/save-key + /api/refresh first.",
+            }, status=503)
+
         if path == "/api/refresh":
             # Run the decrypt pipeline; reuse refresh.py via subprocess to keep things simple
             cli_dir = Path(__file__).resolve().parent
             t0 = _time.time()
-            r = subprocess.run([sys.executable, str(cli_dir / "refresh.py")],
+            r = subprocess.run(_spawn_helper_argv("refresh"),
                                capture_output=True, text=True, encoding="utf-8")
             dt = round((_time.time() - t0) * 1000)
             ok = r.returncode == 0
             # Reload store + flush every cache so the new data shows immediately
             if ok:
-                self.store._contacts = None
-                self.store._sessions = None
-                self.store._msg_db_for_session.clear()
+                if self.store is None:
+                    # Bootstrap mode: this was the first decrypt — instantiate store now
+                    new_dir = discover_data_dir()
+                    if new_dir and new_dir.exists():
+                        _MurmurAPIHandler.store = EchoStore(new_dir)
+                else:
+                    self.store._contacts = None
+                    self.store._sessions = None
+                    self.store._msg_db_for_session.clear()
                 _GRAPH_CACHE.clear()
                 _CONN_CACHE.clear()
                 _FRIEND_DETAIL_CACHE.clear()
@@ -2889,7 +2950,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             log_dir = Path.home() / "Desktop" / "Murmur"
             log_dir.mkdir(parents=True, exist_ok=True)
             log_path = log_dir / f"batch_{int(_time.time())}.log"
-            cmd = [sys.executable, str(cli_dir / "batch_analyze.py"), "--cli", cli_name, "--parallel", "5"]
+            cmd = _spawn_helper_argv("batch_analyze") + ["--cli", cli_name, "--parallel", "5"]
             if mode == "all":
                 cmd += ["--top", "100", "--top-pairs", str(top_pairs), "--min-mentions", "2"]
             elif mode == "pairs-graph":
@@ -3128,13 +3189,20 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             cli_name = opts.get("cli", "claude")
             wxid = opts.get("wxid")
             sample = int(opts.get("sample", 80))
-            if not wxid:
+            if not wxid or wxid in ("undefined", "null"):
                 return self._send_json({"ok": False, "error": "wxid required"}, 400)
+            # Defensive: reject wxids that aren't actually in the contacts table —
+            # protects against frontend bugs that pass garbage like "undefined" or typos.
+            if wxid not in self.store.contacts():
+                return self._send_json({
+                    "ok": False, "error": f"未知的 wxid: {wxid!r}（请从联系人列表点开朋友再触发）",
+                }, 404)
+            contact = self.store.contact(wxid)
             agent = next((a for a in _detect_local_agents() if a["cli"] == cli_name), None)
             if not agent:
                 return self._send_json({"ok": False, "error": f"{cli_name} not installed"}, 404)
 
-            name = self.store.contact(wxid).display() or wxid
+            name = contact.display() or wxid
             agent_path = agent["path"]
             store_ref = self.store
             export_dir = self.export_dir
@@ -3261,20 +3329,136 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             auto_restart = bool(opts.get("auto_restart", True))
             timeout = int(opts.get("timeout", 90))
             cli_dir = Path(__file__).resolve().parent
-            cmd = [sys.executable, "-u", str(cli_dir / "extract_key_dll.py"),
-                   "--timeout", str(timeout)]
-            if auto_restart:
-                cmd.append("--auto-restart")
+            # Pick the right extractor for the OS
+            if _paths.IS_MAC:
+                script_name = "extract_key_mac"
+                script = cli_dir / "extract_key_mac.py"
+            else:
+                script_name = "extract_key_dll"
+                script = cli_dir / "extract_key_dll.py"
+
             t0 = _time.time()
-            r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+            if _paths.IS_MAC:
+                # macOS dance:
+                #   1. The script needs ROOT (for task_for_pid on WeChat).
+                #   2. But ROOT is BLOCKED by TCC from listdir-ing
+                #      ~/Library/Containers (where the encrypted DBs live).
+                #   3. The CURRENT user *is* allowed to read its own containers.
+                # So: collect the salts as user → drop to /tmp → invoke as root
+                # with --salts ... --out-keys ... so the root pass only does
+                # mach_vm work, never touching TCC-protected paths.
+                import shlex, tempfile, shutil
+                # Pre-collect salts as the user (works because we're not root)
+                cli_dir = Path(__file__).resolve().parent
+                sys.path.insert(0, str(cli_dir))
+                from extract_key_mac import collect_db_salts as _collect  # noqa: E402
+                profiles = _paths.discover_wechat_profiles()
+                if not profiles:
+                    return self._send_json({
+                        "ok": False,
+                        "error": "未找到 WeChat profile（请先在微信里登录一次）",
+                    })
+                prof = profiles[0]
+                salt_map = _collect(prof)  # {salt_hex: {name, path, page1}}
+                if not salt_map:
+                    return self._send_json({
+                        "ok": False,
+                        "error": "没找到加密 DB — 让微信完成首次同步后再试",
+                    })
+                # Persist salts file in /tmp (TCC-free)
+                fd_s, salts_path = tempfile.mkstemp(prefix="murmur_salts_", suffix=".json")
+                os.close(fd_s)
+                fd_k, keys_path = tempfile.mkstemp(prefix="murmur_keys_", suffix=".json")
+                os.close(fd_k)
+                # Make tmp files writable by root subprocess; flat dict {salt: name}
+                # plus a sentinel __wxid__ key so the script can record provenance.
+                salts_payload = {salt: meta["name"] for salt, meta in salt_map.items()}
+                salts_payload["__wxid__"] = prof.wxid
+                Path(salts_path).write_text(
+                    json.dumps(salts_payload, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+
+                # Build the elevated command (with paths properly quoted for shell + AS).
+                # In PyInstaller frozen mode, sys.executable IS the binary; re-enter
+                # via --internal-script. In dev, run the .py directly.
+                if getattr(sys, "frozen", False):
+                    inner_argv = [str(sys.executable), "--internal-script", script_name,
+                                  "--timeout", str(timeout),
+                                  "--salts", salts_path,
+                                  "--out-keys", keys_path]
+                else:
+                    inner_argv = [str(sys.executable), "-u", str(script),
+                                  "--timeout", str(timeout),
+                                  "--salts", salts_path,
+                                  "--out-keys", keys_path]
+                inner = " ".join(shlex.quote(a) for a in inner_argv)
+                inner_as = inner.replace("\\", "\\\\").replace('"', '\\"')
+                applescript = f'do shell script "{inner_as}" with administrator privileges'
+                r = subprocess.run(["osascript", "-e", applescript],
+                                   capture_output=True, text=True, encoding="utf-8",
+                                   timeout=max(timeout + 30, 90))
+                stdout = (r.stdout or "") + (r.stderr or "")
+
+                # Copy keys file from /tmp to user's ~/.murmur (so refresh.py finds it)
+                dst = Path.home() / ".murmur" / "decrypted_keys.json"
+                try:
+                    if Path(keys_path).exists() and Path(keys_path).stat().st_size > 0:
+                        dst.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy(keys_path, dst)
+                        # Fix ownership (root → user) so the user can read it
+                        try:
+                            uid = int(os.environ.get("SUDO_UID", os.getuid()))
+                            gid = int(os.environ.get("SUDO_GID", os.getgid()))
+                            os.chown(dst, uid, gid)
+                        except Exception:
+                            pass
+                except Exception as e:
+                    stdout += f"\n[orchestrator] copy {keys_path} → {dst} failed: {e}"
+                # Clean up tmp salts (always) and tmp keys (only if we copied)
+                try: os.unlink(salts_path)
+                except OSError: pass
+                try: os.unlink(keys_path)
+                except OSError: pass
+            else:
+                # Windows path: spawn extract_key_dll.py (or its frozen sibling).
+                # _spawn_helper_argv handles dev vs PyInstaller bundle correctly.
+                cmd = _spawn_helper_argv(script_name) + ["--timeout", str(timeout)]
+                if auto_restart:
+                    cmd.append("--auto-restart")
+                r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+                stdout = r.stdout or ""
             ms = round((_time.time() - t0) * 1000)
-            stdout = r.stdout or ""
-            # Parse the [KEY] line out
+            # Parse output. Two flavours:
+            #   Windows (extract_key_dll.py): single line "[KEY] <64hex>"
+            #   macOS   (extract_key_mac.py):   "[KEY] <db>: <64hex>" per DB,
+            #     plus per-DB JSON file at ~/.murmur/decrypted_keys.json.
             key = None
+            mac_keys_count = 0
             for line in stdout.splitlines():
-                if line.startswith("[KEY]"):
-                    key = line[5:].strip()
-                    break
+                if not line.startswith("[KEY]"):
+                    continue
+                tail = line[5:].strip()
+                if _paths.IS_MAC:
+                    mac_keys_count += 1
+                else:
+                    # Win: take the first 64-hex token we see
+                    parts = tail.split()
+                    for p in parts:
+                        if len(p) == 64 and all(c in "0123456789abcdefABCDEF" for c in p):
+                            key = p.lower()
+                            break
+                    if key:
+                        break
+            if _paths.IS_MAC:
+                # On Mac, success = the per-DB JSON was copied into ~/.murmur
+                ok = (Path.home() / ".murmur" / "decrypted_keys.json").exists() and mac_keys_count > 0
+                return self._send_json({
+                    "ok": ok,
+                    "mac_keys_count": mac_keys_count,
+                    "ms": ms,
+                    "log": stdout[-3000:] or "(no output)",
+                })
             return self._send_json({
                 "ok": bool(key),
                 "key": key,
@@ -3302,6 +3486,100 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             existing["saved_at"] = datetime.now(CST).isoformat()
             cfg.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
             return self._send_json({"ok": True, "path": str(cfg)})
+
+        if path == "/api/resign-wechat":
+            # Mac-only: re-sign WeChat.app ad-hoc to clear hardened-runtime flag.
+            # Triggers macOS native auth prompt via osascript "with administrator privileges".
+            # Body: {"relaunch": true|false}  — whether to re-launch WeChat afterwards
+            if not _paths.IS_MAC:
+                return self._send_json({"ok": False, "error": "macOS only"}, 400)
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length) if length else b"{}"
+            opts = json.loads(body.decode("utf-8") or "{}")
+            relaunch = bool(opts.get("relaunch", True))
+
+            steps_log = []
+            try:
+                # 1. Quit WeChat (graceful, then force)
+                steps_log.append("[1/4] 退出微信…")
+                subprocess.run(["osascript", "-e", 'try\n  tell application "WeChat" to quit\nend try'],
+                               capture_output=True, text=True, timeout=10)
+                _time.sleep(1.5)
+                subprocess.run(["pkill", "-x", "WeChat"], capture_output=True)
+                _time.sleep(0.8)
+
+                # 2. Run codesign with admin privileges via osascript
+                steps_log.append("[2/4] 重签名 (会弹 macOS 系统认证窗口，请输入开机密码)…")
+                # Modern macOS: plain `codesign --force --sign -` PRESERVES the existing
+                # flags (including hardened-runtime), which defeats the whole point.
+                # Fix: first wipe the signature, then ad-hoc re-sign without preserving
+                # flags. Use a chained shell command — osascript runs them as one
+                # admin-elevated subshell so the password prompt only appears once.
+                shell_cmd = (
+                    "codesign --remove-signature /Applications/WeChat.app/Contents/MacOS/WeChat && "
+                    "codesign --force --sign - "
+                    "--preserve-metadata=identifier,entitlements,requirements "
+                    "/Applications/WeChat.app/Contents/MacOS/WeChat"
+                )
+                cmd = (f'do shell script "{shell_cmd}" with administrator privileges')
+                t0 = _time.time()
+                r = subprocess.run(["osascript", "-e", cmd],
+                                   capture_output=True, text=True, timeout=120)
+                dt = round((_time.time() - t0) * 1000)
+                if r.returncode != 0:
+                    return self._send_json({
+                        "ok": False,
+                        "error": "codesign 失败 — 用户取消授权？",
+                        "stderr": r.stderr[-500:],
+                        "log": steps_log,
+                        "ms": dt,
+                    })
+
+                # 3. Verify the runtime flag is now gone (check the main exec, not the bundle)
+                steps_log.append("[3/4] 验证签名…")
+                v = subprocess.run(
+                    ["codesign", "-d", "-v",
+                     "/Applications/WeChat.app/Contents/MacOS/WeChat"],
+                    capture_output=True, text=True,
+                )
+                v_blob = (v.stdout + "\n" + v.stderr)
+                still_hardened = "(runtime)" in v_blob.lower()
+                if still_hardened:
+                    return self._send_json({
+                        "ok": False,
+                        "error": "重签名后主可执行文件仍带 hardened runtime — 这是 macOS / codesign 行为变化导致的，请反馈 issue",
+                        "stderr": v_blob[-800:],
+                        "log": steps_log,
+                    })
+
+                # 4. Re-launch
+                if relaunch:
+                    steps_log.append("[4/4] 启动微信…")
+                    subprocess.Popen(["open", "/Applications/WeChat.app"])
+
+                return self._send_json({
+                    "ok": True,
+                    "ms": dt,
+                    "log": steps_log,
+                    "next_steps": "在新打开的微信里登录、点开几个对话，然后回到这里点「开始抓密钥」",
+                })
+            except subprocess.TimeoutExpired:
+                return self._send_json({"ok": False, "error": "超时", "log": steps_log})
+            except Exception as e:
+                return self._send_json({"ok": False, "error": str(e), "log": steps_log})
+
+        if path == "/api/open-fda":
+            # macOS only: open System Settings to "Full Disk Access" so the user can
+            # tick Murmur. Works on macOS 13+. After granting, user has to relaunch
+            # Murmur (TCC re-evaluates on next process launch).
+            if not _paths.IS_MAC:
+                return self._send_json({"ok": False, "error": "macOS only"}, 400)
+            try:
+                # macOS 13+ deep link
+                subprocess.Popen(["open", "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AllFiles"])
+                return self._send_json({"ok": True})
+            except Exception as e:
+                return self._send_json({"ok": False, "error": str(e)})
 
         if path == "/api/open-folder":
             length = int(self.headers.get("Content-Length") or 0)
@@ -4136,12 +4414,19 @@ def _detect_local_agents() -> list[dict]:
 
 
 def _run_server(args) -> int:
-    # Lazy: load store once at startup
+    # Lazy: load store once at startup. If no decrypted data exists yet, start
+    # in "bootstrap mode" — only serves /api/info, /api/diagnose, /api/save-key,
+    # /api/extract-key, /api/refresh, /api/agents so the onboarding dialog can
+    # decrypt for the first time. Other endpoints return 503 until store loads.
     data_dir = Path(args.data_dir) if args.data_dir else discover_data_dir()
-    if not data_dir or not data_dir.exists():
-        sys.stderr.write("找不到 echotrace 解密数据目录，请先在 echotrace 跑一次「批量解密」\n")
-        return 2
-    store = EchoStore(data_dir)
+    store: Optional[EchoStore] = None
+    if data_dir and data_dir.exists():
+        store = EchoStore(data_dir)
+    else:
+        sys.stderr.write(
+            "[etcli serve] no decrypted data found — running in bootstrap mode "
+            "(onboarding endpoints only). Frontend will guide you to provide a key.\n"
+        )
     _MurmurAPIHandler.store = store
     if args.export_dir:
         _MurmurAPIHandler.export_dir = Path(args.export_dir)
@@ -4152,13 +4437,18 @@ def _run_server(args) -> int:
     # heavy /api/friend-pair-pack runs makes /api/info take seconds.
     httpd = ThreadingHTTPServer(addr, _MurmurAPIHandler)
     sys.stderr.write(f"[etcli serve] Murmur API listening on http://{args.host}:{args.port}/\n")
-    sys.stderr.write(f"  data_dir   : {store.dir}\n")
-    sys.stderr.write(f"  self wxid  : {store.me}\n")
+    if store is not None:
+        sys.stderr.write(f"  data_dir   : {store.dir}\n")
+        sys.stderr.write(f"  self wxid  : {store.me}\n")
+    else:
+        sys.stderr.write(f"  data_dir   : (none yet — bootstrap mode)\n")
     sys.stderr.write(f"  export dir : {_MurmurAPIHandler.export_dir}\n")
 
     # Pre-warm caches in a background thread. Tries disk first (instant if previously
     # computed), falls back to recompute (~10s) which then gets saved to disk too.
     def _prewarm():
+        if store is None:
+            return  # bootstrap mode — nothing to pre-warm
         try:
             t0 = _time.time()
             for ck, scope, top_n in [

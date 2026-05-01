@@ -3,6 +3,8 @@
 # Install with:  pip install -r requirements.txt
 #
 # zstandard is REQUIRED (zstd-compressed message_content / silk voice files).
+# cryptography is REQUIRED (pure-Python WCDB v4 SQLCipher decrypt — decrypt_py.py).
 # faster-whisper is OPTIONAL (only needed for voice transcription).
 zstandard>=0.22
+cryptography>=42
 faster-whisper>=1.0   # optional — only used by transcribe_voice.py

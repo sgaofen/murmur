@@ -102,6 +102,96 @@ def select_profile(args) -> WeChatProfile:
     return profiles[0]
 
 
+def _load_per_db_keys() -> dict | None:
+    """Mac path: ~/.murmur/decrypted_keys.json (written by extract_key_mac.py).
+    Returns the dict if present and well-formed, else None."""
+    p = Path.home() / ".murmur" / "decrypted_keys.json"
+    if not p.exists():
+        return None
+    try:
+        d = __import__("json").loads(p.read_text(encoding="utf-8"))
+        if isinstance(d, dict) and (d.get("keys_by_db") or d.get("keys_by_salt")):
+            return d
+    except Exception:
+        pass
+    return None
+
+
+def _decrypt_per_db(profile: WeChatProfile, per_db: dict) -> int:
+    """Mac fast-path: each DB has its own pre-derived AES key, no PBKDF2."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from decrypt_py import decrypt_db as _decrypt_one  # noqa: E402
+
+    keys_by_name: dict[str, str] = per_db.get("keys_by_db") or {}
+    keys_by_salt: dict[str, str] = per_db.get("keys_by_salt") or {}
+
+    dst_dir = decrypted_root_for(profile)
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[INFO] 解密目标: {dst_dir}")
+    print(f"[INFO] 模式: 每库独立 AES key（macOS WCDB 路径，跳过 PBKDF2）")
+
+    src_dbs = sorted(p for p in profile.encrypted_root.rglob("*.db") if p.name not in SKIP)
+    staging = Path(tempfile.mkdtemp(prefix='murmur_refresh_'))
+    print(f"[INFO] 临时目录: {staging}")
+    print(f"[INFO] 共 {len(src_dbs)} 个加密 DB 待处理\n")
+
+    results = []
+    t_total = time.time()
+    for i, src in enumerate(src_dbs, 1):
+        out = staging / src.name
+        size_mb = src.stat().st_size / 1e6
+        rel = str(src.relative_to(profile.encrypted_root)).replace("\\", "/")
+        # Try by name, then by salt
+        key_hex = keys_by_name.get(rel)
+        if not key_hex:
+            try:
+                with open(src, "rb") as f:
+                    salt_hex = f.read(16).hex()
+                key_hex = keys_by_salt.get(salt_hex)
+            except OSError:
+                pass
+        if not key_hex:
+            print(f"  [{i:2d}/{len(src_dbs)}] SKIP ({size_mb:6.1f} MB) {rel}: 这个 DB 在 WCDB 缓存里没找到，请在微信里点开它对应的对话/页面后重抓 key")
+            results.append((src.name, False, "no key in WCDB cache"))
+            continue
+        t0 = time.time()
+        try:
+            _decrypt_one(src, out, key_hex, pre_derived=True)
+            dt = time.time() - t0
+            print(f"  [{i:2d}/{len(src_dbs)}] OK   ({size_mb:6.1f} MB, {dt:5.2f}s) {src.name}")
+            results.append((src.name, True, None))
+        except Exception as e:
+            dt = time.time() - t0
+            print(f"  [{i:2d}/{len(src_dbs)}] FAIL ({size_mb:6.1f} MB, {dt:5.2f}s) {rel}: {e}")
+            results.append((src.name, False, str(e)))
+
+    print(f"\n[INFO] 解密耗时 {time.time() - t_total:.2f}s")
+    print("\n[INFO] swap 到目标目录...")
+    moved = 0
+    for fname, ok, _ in results:
+        if not ok:
+            continue
+        src_f = staging / fname
+        dst_f = dst_dir / fname
+        try:
+            for ext in ('-wal', '-shm', '-journal'):
+                sc = dst_dir / (fname + ext)
+                if sc.exists():
+                    sc.unlink()
+            if dst_f.exists():
+                dst_f.unlink()
+            shutil.move(src_f, dst_f)
+            moved += 1
+        except OSError as e:
+            print(f"  [SWAP-FAIL] {fname}: {e}")
+    shutil.rmtree(staging, ignore_errors=True)
+    n_ok = sum(1 for _, ok, _ in results if ok)
+    n_fail = len(results) - n_ok
+    print(f"\n[DONE] 解密 {n_ok} 个，swap {moved} 个，失败 {n_fail} 个")
+    # Mac path: succeed if at least the core DBs (session, contact) are decrypted
+    return 0 if n_ok > 0 else 1
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--wxid", help="WeChat account (auto-detected if omitted)")
@@ -111,6 +201,12 @@ def main():
     profile = select_profile(args)
     print(f"[INFO] 账号: {profile.wxid}")
     print(f"[INFO] 加密源: {profile.encrypted_root}")
+
+    # Mac WCDB path: if extract_key_mac.py left per-DB keys, use them
+    # (skips PBKDF2 — much faster and works with the AES keys WCDB caches).
+    per_db = _load_per_db_keys()
+    if per_db and not args.key:
+        return _decrypt_per_db(profile, per_db)
 
     key_hex = find_decrypt_key(profile, override=args.key)
     if not key_hex:

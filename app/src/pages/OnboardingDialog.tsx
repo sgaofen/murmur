@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { extractKey, getDiagnose, refreshData, saveKey } from '../data/api';
+import { extractKey, getDiagnose, openFullDiskAccess, refreshData, resignWechat, saveKey } from '../data/api';
 import type { Diagnose } from '../data/api';
 
 interface Props {
@@ -8,7 +8,7 @@ interface Props {
   onDone?: () => void;
 }
 
-type Phase = 'welcome' | 'diagnose' | 'mac-no-data' | 'mac-paste-key' | 'win-need-key' | 'win-decrypt' | 'extract-key' | 'done' | 'error';
+type Phase = 'welcome' | 'diagnose' | 'mac-no-data' | 'mac-paste-key' | 'mac-auto-extract' | 'mac-resign-prompt' | 'mac-resigning' | 'mac-wait-login' | 'mac-fda-needed' | 'win-need-key' | 'win-decrypt' | 'extract-key' | 'done' | 'error';
 
 export function OnboardingDialog({ open, onClose, onDone }: Props) {
   const [phase, setPhase] = useState<Phase>('welcome');
@@ -39,8 +39,21 @@ export function OnboardingDialog({ open, onClose, onDone }: Props) {
       } else if (d.platform === 'windows' && hasWeChatData && d.saved_key) {
         // Win with key but no decrypted yet — go straight to decrypt
         await runDecrypt();
+      } else if (d.platform === 'macos' && d.capabilities.tcc_blocked) {
+        // Highest-priority Mac branch: TCC blocked the backend from reading
+        // ~/Library/Containers/<wechat>. Without this permission nothing else
+        // can succeed — show the FDA-grant flow first.
+        setPhase('mac-fda-needed');
       } else if (d.platform === 'macos' && hasWeChatData) {
-        setPhase('mac-paste-key');  // Mac: needs manual key paste
+        if (d.saved_key) {
+          await runDecrypt();
+        } else if (d.capabilities.can_extract_key) {
+          setPhase('mac-auto-extract');
+        } else if (d.capabilities.wechat_hardened === true) {
+          setPhase('mac-resign-prompt');
+        } else {
+          setPhase('mac-paste-key');
+        }
       } else if (d.platform === 'macos' && !hasWeChatData) {
         setPhase('mac-no-data');
       } else {
@@ -89,16 +102,22 @@ export function OnboardingDialog({ open, onClose, onDone }: Props) {
 
   async function startKeyExtract() {
     setPhase('extract-key');
-    setProgress('准备重启微信…');
+    setProgress('扫描 WeChat 进程内存中…');
     try {
       const r = await extractKey({ autoRestart: true, timeout: 90 });
-      if (!r.ok || !r.key) {
-        setError(r.log?.split('\n').slice(-3).join('\n') || '没读到密钥');
+      // On Mac, extract_key_mac.py writes ~/.murmur/decrypted_keys.json directly.
+      // r.ok=true with no r.key means the per-DB JSON was written.
+      // On Win, r.key holds the password we still need to save.
+      if (!r.ok) {
+        setError(r.log?.split('\n').slice(-6).join('\n') || '没读到密钥 — 请确保已登录微信并点开几个对话');
         setPhase('error');
         return;
       }
-      await saveKey(r.key);
-      setProgress('密钥已就位，开始解密最新数据…');
+      if (r.key) {
+        // Windows path
+        await saveKey(r.key);
+      }
+      setProgress('密钥已就位，开始解密…');
       setPhase('win-decrypt');
       const r2 = await refreshData();
       if (r2.ok) {
@@ -110,6 +129,32 @@ export function OnboardingDialog({ open, onClose, onDone }: Props) {
     } catch (e: any) {
       setError(e?.message || String(e));
       setPhase('error');
+    }
+  }
+
+  async function startResign() {
+    setPhase('mac-resigning');
+    setProgress('退出 WeChat 并重签名…（系统会弹窗要开机密码）');
+    try {
+      const r = await resignWechat({ relaunch: true });
+      if (!r.ok) {
+        setError(r.error || r.stderr || '重签名失败 — 你可能取消了授权');
+        setPhase('error');
+        return;
+      }
+      setPhase('mac-wait-login');
+    } catch (e: any) {
+      setError(e?.message || String(e));
+      setPhase('error');
+    }
+  }
+
+  async function openFDAAndWait() {
+    try {
+      await openFullDiskAccess();
+    } catch (e: any) {
+      // If endpoint fails (rare), still show the manual instructions
+      console.warn('open-fda failed', e);
     }
   }
 
@@ -145,6 +190,11 @@ export function OnboardingDialog({ open, onClose, onDone }: Props) {
             {phase === 'welcome' && '回顾你的微信故事'}
             {phase === 'diagnose' && '正在检测你的电脑…'}
             {phase === 'mac-no-data' && 'Mac 上需要先从 Windows 同步数据'}
+            {phase === 'mac-auto-extract' && '一切就绪 — 一键抓密钥'}
+            {phase === 'mac-resign-prompt' && '一次性给 WeChat 重签名（不需要关 SIP）'}
+            {phase === 'mac-resigning' && '正在重签名…'}
+            {phase === 'mac-wait-login' && '微信已重启，请登录 → 然后回来抓密钥'}
+            {phase === 'mac-fda-needed' && '第一步：给 Murmur 完全磁盘访问权限'}
             {phase === 'win-need-key' && '只需要 30 秒，读取一次密钥'}
             {phase === 'extract-key' && '正在读取密钥…'}
             {phase === 'win-decrypt' && '正在解密最新数据…'}
@@ -157,6 +207,11 @@ export function OnboardingDialog({ open, onClose, onDone }: Props) {
           {phase === 'diagnose' && <Diagnosing />}
           {phase === 'mac-no-data' && diag && <MacNoData diag={diag} onClose={onClose} />}
           {phase === 'mac-paste-key' && diag && <MacPasteKey diag={diag} onSubmit={submitMacKey} />}
+          {phase === 'mac-auto-extract' && diag && <MacAutoExtract diag={diag} onStart={startKeyExtract} onPaste={() => setPhase('mac-paste-key')} />}
+          {phase === 'mac-resign-prompt' && diag && <MacResignPrompt diag={diag} onConsent={startResign} onPaste={() => setPhase('mac-paste-key')} />}
+          {phase === 'mac-resigning' && <Working text={progress || '正在重签名…'} />}
+          {phase === 'mac-wait-login' && <MacWaitLogin onContinue={startKeyExtract} />}
+          {phase === 'mac-fda-needed' && <MacFDANeeded onOpenSettings={openFDAAndWait} onRetry={startDiagnose} />}
           {phase === 'win-need-key' && diag && <WinNeedKey diag={diag} onStart={startKeyExtract} />}
           {phase === 'extract-key' && <Working text={progress} />}
           {phase === 'win-decrypt' && <Working text={progress || "正在解密所有微信数据库…"} />}
@@ -207,14 +262,25 @@ function Diagnosing() {
 }
 
 function CapabilityList({ diag }: { diag: Diagnose }) {
-  const rows = [
+  const rows: Array<[string, string, boolean]> = [
     ['平台', diag.platform === 'windows' ? 'Windows ✓' : diag.platform === 'macos' ? 'macOS' : diag.platform, true],
     ['微信安装', diag.capabilities.has_wechat_installed ? '已安装 ✓' : '未找到', diag.capabilities.has_wechat_installed],
     ['微信数据', diag.capabilities.has_wechat_data ? '已找到 ✓' : '没有 ❌', diag.capabilities.has_wechat_data],
     ['可解密数据库', diag.capabilities.can_decrypt_db ? '可以 ✓' : '不行 ⚠', diag.capabilities.can_decrypt_db],
     ['可抓取密钥', diag.capabilities.can_extract_key ? '可以 ✓' : '不行 ⚠', diag.capabilities.can_extract_key],
-    ['本机 AI agents', `${diag.agents_found} 个 ✓`, true],
   ];
+  if (diag.platform === 'macos') {
+    if (diag.capabilities.wechat_hardened !== null && diag.capabilities.wechat_hardened !== undefined) {
+      rows.push(['WeChat 签名状态', diag.capabilities.wechat_hardened ? 'hardened（默认）' : 'ad-hoc ✓', !diag.capabilities.wechat_hardened]);
+    }
+    if (diag.capabilities.sip_enabled !== null && diag.capabilities.sip_enabled !== undefined) {
+      rows.push(['SIP（系统完整性保护）', diag.capabilities.sip_enabled ? '开启（默认）' : '已关闭', true]);
+    }
+    if (diag.capabilities.weixin_running !== null && diag.capabilities.weixin_running !== undefined) {
+      rows.push(['微信进程', diag.capabilities.weixin_running ? '运行中 ✓' : '未运行', !!diag.capabilities.weixin_running]);
+    }
+  }
+  rows.push(['本机 AI agents', `${diag.agents_found} 个 ✓`, true]);
   return (
     <div style={{ background: 'var(--et-paper-2)', padding: '12px 16px', borderRadius: 10, fontSize: 12 }}>
       {rows.map(([k, v, ok]) => (
@@ -247,27 +313,40 @@ function MacPasteKey({ diag, onSubmit }: { diag: Diagnose; onSubmit: (key: strin
   const [key, setKey] = useState('');
   const cleaned = key.trim().toLowerCase();
   const valid = cleaned.length === 64 && /^[0-9a-f]+$/.test(cleaned);
+  const sipOn = diag.capabilities.sip_enabled === true;
   return (
     <>
       <div className="et-serif" style={{ fontSize: 15, lineHeight: 1.7, color: 'var(--et-ink-soft)', marginBottom: 14 }}>
-        Mac 上微信进程内存读取受 SIP 限制，没法自动抓密钥。但**解密本身能在 Mac 上跑**——你只需要把 64 位 SQLCipher 密钥粘进来。
+        {sipOn
+          ? <>Mac 默认开着 <strong>SIP（系统完整性保护）</strong>，导致无法自动从微信进程内存抓密钥。<br/>三种办法可以拿到 64 位 SQLCipher 密钥，任选一个：</>
+          : <>把 64 位 SQLCipher 密钥粘进来，解密在你这台 Mac 上跑。</>}
       </div>
       <div style={{
-        padding: '12px 16px', background: 'rgba(255,107,71,0.10)',
-        border: '0.5px solid rgba(224,83,46,0.35)', borderRadius: 8,
-        fontSize: 12.5, color: 'var(--et-ink-soft)', lineHeight: 1.6, marginBottom: 14,
+        padding: '12px 14px', background: 'rgba(255,107,71,0.08)',
+        border: '0.5px solid rgba(224,83,46,0.30)', borderRadius: 8,
+        fontSize: 12.5, color: 'var(--et-ink-soft)', lineHeight: 1.7, marginBottom: 14,
       }}>
-        <strong style={{ color: 'var(--et-orange-2)' }}>怎么获取密钥：</strong>
-        <ul style={{ marginTop: 6, paddingLeft: 18, marginBottom: 0 }}>
-          <li>有 Windows 电脑 → 在 Windows 上跑一次 Murmur，密钥会保存在 <code>~/.murmur/config.json</code>，把 <code>decrypt_key</code> 字段拷过来</li>
-          <li>没 Windows → 用 lldb 附加到 Mac WeChat 进程扫内存（高级用法，文档稍后补）</li>
-        </ul>
+        <div style={{ marginBottom: 6 }}><strong style={{ color: 'var(--et-orange-2)' }}>① 有 Windows 电脑（最快）</strong></div>
+        <div style={{ paddingLeft: 14, marginBottom: 10 }}>
+          在 Win 上 <code>git clone</code> 这个仓库 → 运行 <code>start-windows.bat</code>。引导跑完后，密钥就在 <code>~/.murmur/config.json</code> 里 <code>decrypt_key</code> 字段，拷过来粘到下面。
+        </div>
+        <div style={{ marginBottom: 6 }}><strong style={{ color: 'var(--et-orange-2)' }}>② 关掉 Mac 的 SIP（一次性）</strong></div>
+        <div style={{ paddingLeft: 14, marginBottom: 10 }}>
+          重启进恢复模式（开机长按电源键）→ 终端运行 <code>csrutil disable</code> → 重启 → 在这个仓库根目录运行：
+          <pre style={{ background: 'var(--et-paper-2)', padding: '6px 10px', borderRadius: 4, marginTop: 4, fontSize: 11, fontFamily: 'var(--et-mono)' }}>sudo python3 cli/extract_key_mac.py</pre>
+          密钥会打印在终端里。<em style={{ color: 'var(--et-mute)' }}>注意：关 SIP 是系统级操作，请权衡。</em>
+        </div>
+        <div style={{ marginBottom: 6 }}><strong style={{ color: 'var(--et-orange-2)' }}>③ 借朋友的 Win 跑一次</strong></div>
+        <div style={{ paddingLeft: 14 }}>
+          在朋友 Win 上短时间登录你的微信 → 跑 <code>cli/extract_key_dll.py</code> → 拷密钥回来。微信账号是同一个，密钥相同。
+        </div>
       </div>
       <input
         value={key}
         onChange={(e) => setKey(e.target.value)}
         placeholder="把 64 位 hex 密钥粘到这里"
         spellCheck={false}
+        autoFocus
         style={{
           all: 'unset', width: '100%', boxSizing: 'border-box',
           padding: '10px 14px', borderRadius: 8,
@@ -277,7 +356,7 @@ function MacPasteKey({ diag, onSubmit }: { diag: Diagnose; onSubmit: (key: strin
         }}
       />
       <div style={{ fontSize: 11, color: 'var(--et-mute)', marginBottom: 14 }}>
-        {key && (valid ? '✓ 格式正确' : `${cleaned.length}/64 位 hex`)}
+        {key && (valid ? '✓ 格式正确（64 位 hex）' : `${cleaned.length}/64 位 hex`)}
       </div>
       <CapabilityList diag={diag} />
       <button onClick={() => onSubmit(key)} disabled={!valid} style={{
@@ -285,6 +364,133 @@ function MacPasteKey({ diag, onSubmit }: { diag: Diagnose; onSubmit: (key: strin
         opacity: valid ? 1 : 0.4,
         cursor: valid ? 'pointer' : 'not-allowed',
       }}>解密 + 进入</button>
+    </>
+  );
+}
+
+function MacFDANeeded({ onOpenSettings, onRetry }: { onOpenSettings: () => void; onRetry: () => void }) {
+  const [opened, setOpened] = useState(false);
+  return (
+    <>
+      <div className="et-serif" style={{ fontSize: 15, lineHeight: 1.7, color: 'var(--et-ink-soft)', marginBottom: 14 }}>
+        macOS 出于隐私保护，不让普通 App 直接读 <code>~/Library/Containers/</code> 里其他 App 的数据。
+        <br/>
+        Murmur 需要读你电脑上的微信加密数据库 —— 必须由你手动给一次「<strong>完全磁盘访问</strong>」权限。
+      </div>
+      <div style={{
+        padding: '12px 16px', background: 'var(--et-paper-2)',
+        border: '0.5px solid var(--et-line-2)', borderRadius: 8,
+        fontSize: 13, lineHeight: 1.8, marginBottom: 14, color: 'var(--et-ink)',
+      }}>
+        <div style={{ fontWeight: 600, marginBottom: 6 }}>3 步搞定（约 30 秒）：</div>
+        <ol style={{ margin: 0, paddingLeft: 20 }}>
+          <li>点下面 <strong>「打开系统设置」</strong> → 自动跳到「完全磁盘访问」面板</li>
+          <li>找到 <strong>Murmur</strong>，把右边开关打 <strong>开</strong>（如果没列出来，点 <strong>+</strong> 选 <code>/Applications/Murmur.app</code>）</li>
+          <li>授权完后，<strong>完全退出 Murmur 再重新打开</strong>（macOS 必须重启进程才生效）</li>
+        </ol>
+      </div>
+      <div style={{
+        padding: '10px 14px', background: 'rgba(232,181,122,0.18)',
+        border: '0.5px solid rgba(138,90,28,0.3)', borderRadius: 8,
+        fontSize: 11.5, color: '#8a5a1c', lineHeight: 1.6, marginBottom: 14,
+      }}>
+        💡 这是 macOS 的硬性要求 —— 任何想读微信数据的 Mac 工具都得过这一步。授权后只这一次。
+      </div>
+      <button onClick={() => { setOpened(true); onOpenSettings(); }} style={primaryBtn}>
+        打开系统设置 → 完全磁盘访问
+      </button>
+      <button onClick={onRetry} style={{
+        ...primaryBtn, marginTop: 8, background: 'transparent',
+        color: 'var(--et-ink)', boxShadow: 'none',
+        border: '1px solid var(--et-line-2)',
+        opacity: opened ? 1 : 0.5,
+      }}>
+        我已经授权 + 重启过了 — 重新检测
+      </button>
+    </>
+  );
+}
+
+function MacResignPrompt({ diag, onConsent, onPaste }: { diag: Diagnose; onConsent: () => void; onPaste: () => void }) {
+  return (
+    <>
+      <div className="et-serif" style={{ fontSize: 15, lineHeight: 1.7, color: 'var(--et-ink-soft)', marginBottom: 14 }}>
+        macOS 默认给 WeChat 加了 <strong>hardened runtime</strong> 标记，导致系统拒绝任何调试器附加 ——
+        所以也不能从内存里抓 SQLCipher 密钥。<br/>
+        但有个不需要重启、不需要关 SIP 的优雅做法：<strong>给 WeChat 重新做一次 ad-hoc 签名</strong>。
+      </div>
+      <div style={{
+        padding: '12px 14px', background: 'var(--et-paper-2)',
+        border: '0.5px solid var(--et-line-2)', borderRadius: 8,
+        fontSize: 12.5, color: 'var(--et-ink-soft)', lineHeight: 1.7, marginBottom: 12,
+      }}>
+        <div style={{ marginBottom: 6 }}><strong>点确认后会发生：</strong></div>
+        <ol style={{ margin: 0, paddingLeft: 20 }}>
+          <li>退出 WeChat（如果在跑的话）</li>
+          <li>弹出 macOS 系统认证窗口 — <strong>请输入你的开机密码</strong></li>
+          <li>对 <code>/Applications/WeChat.app</code> 运行 <code>codesign --force --deep --sign -</code></li>
+          <li>重启 WeChat — 你需要登录一次（之前的 token 不变，登录走二维码或免密）</li>
+        </ol>
+      </div>
+      <div style={{
+        padding: '10px 14px', background: 'rgba(232,181,122,0.18)',
+        border: '0.5px solid rgba(138,90,28,0.3)', borderRadius: 8,
+        fontSize: 11.5, color: '#8a5a1c', lineHeight: 1.6, marginBottom: 14,
+      }}>
+        ⚠ 重签名是合法但属于「修改 App」操作。WeChat 自己升级时会把签名重置回原样，不影响后续使用。
+        如果不想动 WeChat，下面有「手动粘贴密钥」的备选路径。
+      </div>
+      <CapabilityList diag={diag} />
+      <button onClick={onConsent} style={primaryBtn}>确认重签名（系统会弹密码窗口）</button>
+      <button onClick={onPaste} style={{
+        ...primaryBtn, marginTop: 8, background: 'transparent',
+        color: 'var(--et-ink)', boxShadow: 'none',
+        border: '1px solid var(--et-line-2)',
+      }}>不用，我手动粘贴密钥</button>
+    </>
+  );
+}
+
+function MacWaitLogin({ onContinue }: { onContinue: () => void }) {
+  return (
+    <>
+      <div className="et-serif" style={{ fontSize: 15, lineHeight: 1.7, color: 'var(--et-ink-soft)', marginBottom: 14 }}>
+        ✓ 重签名成功 — 微信已经重新启动。<br/>
+        请在新的微信窗口里：
+      </div>
+      <ol style={{ paddingLeft: 20, lineHeight: 1.9, fontSize: 13, color: 'var(--et-ink)', marginBottom: 14 }}>
+        <li>用手机扫码登录</li>
+        <li>等列表加载完，<strong>点开几个对话/朋友圈</strong>（让 WCDB 把 key 派生到内存）</li>
+        <li>回到这里，点下面的按钮抓密钥</li>
+      </ol>
+      <div style={{
+        padding: '10px 14px', background: 'rgba(72,167,107,0.10)',
+        border: '0.5px solid rgba(72,167,107,0.30)', borderRadius: 8,
+        fontSize: 12, color: '#3a7a4f', marginBottom: 14,
+      }}>
+        💡 不点开对话的话，那个 DB 对应的 key 不会出现在内存里 — 抓出来会少几个库。
+      </div>
+      <button onClick={onContinue} style={primaryBtn}>开始抓密钥（约 30 秒）</button>
+    </>
+  );
+}
+
+function MacAutoExtract({ diag, onStart, onPaste }: { diag: Diagnose; onStart: () => void; onPaste: () => void }) {
+  return (
+    <>
+      <div className="et-serif" style={{ fontSize: 15, lineHeight: 1.7, color: 'var(--et-ink-soft)', marginBottom: 14 }}>
+        SIP 已经关闭，微信也在跑 — 我可以直接附加到微信进程扫内存抓密钥。<br/>
+        <span style={{ color: 'var(--et-mute)', fontSize: 13 }}>
+          这一步会用 <code>sudo</code>（macOS 要求 root 权限才能附加进程），扫描通常 30 秒以内。
+        </span>
+      </div>
+      <CapabilityList diag={diag} />
+      <button onClick={onStart} style={primaryBtn}>开始自动抓取（约 30 秒）</button>
+      <button onClick={onPaste} style={{
+        ...primaryBtn, marginTop: 8, background: 'transparent',
+        color: 'var(--et-ink)', boxShadow: 'none',
+        border: '1px solid var(--et-line-2)',
+      }}>或者：手动粘贴密钥</button>
     </>
   );
 }

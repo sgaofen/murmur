@@ -101,7 +101,7 @@ export function MediaGallery({ friend }: Props) {
           <div className="et-meta" style={{ maxWidth: 480, margin: '0 auto' }}>
             视频和图片需要先建立索引。在终端跑：
             <code style={{ display: 'block', marginTop: 10, padding: '8px 12px', background: 'var(--et-paper-2)', borderRadius: 6, fontFamily: 'var(--et-mono)' }}>
-              python C:\Users\YY\murmur\cli\media.py index
+              python3 cli/media.py index
             </code>
           </div>
         </div>

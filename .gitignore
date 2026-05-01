@@ -48,3 +48,11 @@ app/.tauri/
 _diag_*.py
 test_top*.log
 test_top*.err
+
+# ===== PyInstaller (backend bundle build artifacts) =====
+cli/build/
+cli/dist/
+cli/__pycache__/
+
+# ===== Editor / agent caches =====
+.claude/

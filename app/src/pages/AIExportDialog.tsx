@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { Friend } from '../data/types';
 import { generateAIPack, openFolder } from '../data/api';
+import { displayName } from '../utils/privacy';
 import { LocalAgentPanel } from './extras/LocalAgentPanel';
 
 interface Props {
@@ -82,7 +83,7 @@ export function AIExportDialog({ open, onClose, friend, onLocalAgent }: Props) {
         <div style={{ padding: '22px 28px 0' }}>
           <div className="et-eyebrow" style={{ color: 'var(--et-orange)' }}>导出 · 给 AI 分析</div>
           <div className="et-h2" style={{ color: 'var(--et-ink)', marginTop: 6 }}>
-            {step === 1 ? `把和 ${friend.name} 的对话打包成一份分析材料` : '搞定！文件已经准备好。'}
+            {step === 1 ? `把和 ${displayName(friend.id, friend.name)} 的对话打包成一份分析材料` : '搞定！文件已经准备好。'}
           </div>
         </div>
         {error && (

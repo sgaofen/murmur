@@ -190,10 +190,10 @@ ${sections}
         <button onClick={onBack} style={{ all: 'unset', cursor: 'pointer', color: 'var(--et-mute)' }}>← 返回</button>
         <div className="et-h2" style={{ marginTop: 20 }}>还没有 AI 分析报告</div>
         <div className="et-meta" style={{ marginTop: 12, lineHeight: 1.7 }}>
-          先在终端跑：<br/>
+          先在 Murmur 仓库根目录的终端跑：<br/>
           <code style={{ display: 'inline-block', marginTop: 8, padding: '8px 14px',
             background: 'var(--et-paper-2)', borderRadius: 6, fontFamily: 'var(--et-mono)' }}>
-            python C:\Users\YY\murmur\cli\batch_analyze.py --top 10
+            python3 cli/batch_analyze.py --top 10
           </code><br/>
           约 8-10 分钟后报告会出现在这里。
         </div>

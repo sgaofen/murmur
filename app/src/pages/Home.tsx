@@ -294,9 +294,11 @@ export function HomePage({ dark = false, onOpenFriend }: Props) {
       }}>
         <div className="et-h2" style={{ color: 'var(--et-ink)' }}>没法连接到数据后端</div>
         <div className="et-meta" style={{ color: 'var(--et-mute)', maxWidth: 520, textAlign: 'center' }}>
-          请先在终端运行：<br/>
+          请在 Murmur 目录下启动后端：<br/>
           <code style={{ background: 'var(--et-paper-2)', padding: '4px 8px', borderRadius: 4, marginTop: 8, display: 'inline-block' }}>
-            python C:\Users\YY\murmur\cli\etcli.py serve --port 9100
+            {navigator.platform.toLowerCase().includes('mac') || navigator.userAgent.toLowerCase().includes('mac')
+              ? 'bash start-mac.sh'
+              : 'start-windows.bat'}
           </code>
         </div>
         <div className="et-meta" style={{ color: 'var(--et-faint)' }}>{error}</div>
