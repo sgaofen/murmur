@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { GraphView } from '../components/extras/GraphView';
 import type { GraphData, GraphNode, GraphEdge, GraphCluster } from '../components/extras/GraphView';
-import { getFriend, getPairPack, findPairReport, getReport, getFriendConnections, invokeAgent, getAgents, invokePairAgent, getPairStream } from '../data/api';
+import { getFriend, getPairPack, findPairReport, getReport, getFriendConnections, invokeAgent, getAgents, invokePairAgent, getPairStream, startBatch, getBatchStatus } from '../data/api';
 import type { LocalAgent } from '../data/api';
 import type { FriendConnection } from '../data/api';
 import type { Friend, FriendStats } from '../data/types';
@@ -167,6 +167,51 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
     return Number.isFinite(stored) && stored > 0 ? stored : 100;
   });
   const [loading, setLoading] = useState(true);
+  // Batch analysis state
+  const [agents, setAgents] = useState<LocalAgent[]>([]);
+  const [batch, setBatch] = useState<{ pid: number; log_path: string } | null>(null);
+  const [batchStatus, setBatchStatusState] = useState<{ running: boolean; n_friends: number; n_pairs: number; log_tail: string } | null>(null);
+  const [batchPanelOpen, setBatchPanelOpen] = useState(false);
+
+  // Load agents once
+  useEffect(() => { getAgents().then(setAgents).catch(() => {}); }, []);
+
+  // Poll batch progress
+  useEffect(() => {
+    if (!batch) return;
+    let stop = false;
+    const tick = async () => {
+      if (stop) return;
+      try {
+        const s = await getBatchStatus(batch.pid, batch.log_path);
+        setBatchStatusState(s);
+        if (!s.running) return;
+      } catch {}
+      setTimeout(tick, 5000);
+    };
+    tick();
+    return () => { stop = true; };
+  }, [batch]);
+
+  async function startGraphBatch(top_pairs: number) {
+    if (agents.length === 0) {
+      alert('没检测到本地 claude / codex CLI。\n\n安装其一：\n  npm install -g @anthropic-ai/claude-code\n  npm install -g @openai/codex');
+      return;
+    }
+    const cli = agents[0].cli as 'claude' | 'codex';
+    try {
+      const r = await startBatch({ cli, mode: 'pairs-graph', top: 0, top_pairs });
+      if (!r.ok || !r.pid || !r.log_path) {
+        alert('启动失败：' + (r.error || ''));
+        return;
+      }
+      setBatch({ pid: r.pid, log_path: r.log_path });
+      setBatchStatusState({ running: true, n_friends: 0, n_pairs: 0, log_tail: '启动中…' });
+      setBatchPanelOpen(true);
+    } catch (e: any) {
+      alert('错误：' + (e?.message || e));
+    }
+  }
 
   useEffect(() => {
     setLoading(true);
@@ -275,11 +320,33 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
           <button onClick={() => setAutoRotate(r => !r)} style={chromeBtn(dark)}>
             {autoRotate ? '⏸ 暂停旋转' : '▶ 自动旋转'}
           </button>
+          <button onClick={() => setBatchPanelOpen(o => !o)} style={{
+            ...chromeBtn(dark),
+            background: batch && batchStatus?.running
+              ? (dark ? 'rgba(255,107,71,0.4)' : 'var(--et-orange-soft)')
+              : (dark ? 'rgba(20,24,42,0.6)' : 'rgba(251,246,238,0.8)'),
+            color: batch && batchStatus?.running
+              ? (dark ? '#FFE6CF' : 'var(--et-orange-2)')
+              : (dark ? '#F4ECDA' : '#1A2B4A'),
+            fontWeight: batch && batchStatus?.running ? 600 : 500,
+          }} title="一次跑完关系网里所有重要朋友对的 AI 分析">
+            🤖 批量分析关系{batch && batchStatus?.running ? ` (${batchStatus.n_pairs} 已完成)` : ''}
+          </button>
           <button onClick={() => setDark(d => !d)} style={chromeBtn(dark)}>
             {dark ? '☼ 亮' : '☾ 暗'}
           </button>
         </div>
       </div>
+      {batchPanelOpen && (
+        <BatchAnalysisPanel
+          dark={dark}
+          agents={agents}
+          batch={batch}
+          status={batchStatus}
+          onLaunch={startGraphBatch}
+          onClose={() => setBatchPanelOpen(false)}
+        />
+      )}
       {/* Side panel for selected node */}
       {selectedNode && !selectedNode.is_self && (
         <SidePanel node={selectedNode} onClose={() => setSelected(null)}
@@ -914,6 +981,126 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
         />
       )}
     </div>
+  );
+}
+
+function BatchAnalysisPanel({
+  dark, agents, batch, status, onLaunch, onClose,
+}: {
+  dark: boolean;
+  agents: LocalAgent[];
+  batch: { pid: number; log_path: string } | null;
+  status: { running: boolean; n_friends: number; n_pairs: number; log_tail: string } | null;
+  onLaunch: (top_pairs: number) => void;
+  onClose: () => void;
+}) {
+  const running = !!batch && !!status?.running;
+  const done = !!batch && status && !status.running;
+  return (
+    <div style={{
+      position: 'absolute', top: 64, right: 28, zIndex: 7, width: 380,
+      background: dark ? 'rgba(20,24,42,0.95)' : 'rgba(251,246,238,0.98)',
+      border: `0.5px solid ${dark ? 'rgba(244,236,218,0.22)' : 'rgba(26,43,74,0.16)'}`,
+      borderRadius: 12, padding: '18px 18px 14px',
+      boxShadow: dark ? '0 24px 48px rgba(0,0,0,0.6)' : '0 24px 48px rgba(26,43,74,0.16)',
+      backdropFilter: 'blur(12px)',
+      color: dark ? '#F4ECDA' : '#1A2B4A',
+      fontSize: 13,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+        <div style={{ fontFamily: 'var(--et-serif)', fontSize: 16, fontWeight: 600 }}>批量分析关系</div>
+        <button onClick={onClose} style={{ all: 'unset', cursor: 'pointer', fontSize: 16,
+          color: dark ? 'rgba(244,236,218,0.6)' : 'rgba(26,43,74,0.5)' }}>×</button>
+      </div>
+      <div style={{ fontSize: 12, lineHeight: 1.6, color: dark ? 'rgba(244,236,218,0.75)' : 'rgba(26,43,74,0.7)', marginBottom: 12 }}>
+        一次性把关系网里 top-N 重要朋友对的关系档案全跑出来 ——
+        合并私聊互相提及、共群活跃、朋友圈点赞评论，AI 推断他们俩的关系类型 + 时间走向 + 关键证据。
+      </div>
+      {!running && !done && (
+        <>
+          {agents.length === 0 ? (
+            <div style={{
+              padding: '10px 12px', background: dark ? 'rgba(255,107,71,0.16)' : 'rgba(255,107,71,0.10)',
+              border: `0.5px solid ${dark ? 'rgba(255,107,71,0.4)' : 'rgba(255,107,71,0.3)'}`,
+              borderRadius: 8, fontSize: 12, lineHeight: 1.6,
+            }}>
+              没装 claude / codex CLI，AI 分析跑不了。装其一：<br/>
+              <code style={{ background: 'rgba(0,0,0,0.2)', padding: '1px 5px', borderRadius: 3 }}>npm install -g @anthropic-ai/claude-code</code>
+            </div>
+          ) : (
+            <>
+              <div style={{ fontSize: 11, color: dark ? 'rgba(244,236,218,0.55)' : 'rgba(26,43,74,0.55)', marginBottom: 8 }}>
+                用本地 <strong>{agents[0].cli}</strong> 跑。已有报告会跳过（除非删掉重新跑）。
+              </div>
+              <div style={{ display: 'grid', gap: 8 }}>
+                <BatchOption label="Top 10 对" sub="约 10 分钟" onClick={() => onLaunch(10)} />
+                <BatchOption label="Top 20 对" sub="约 20 分钟" onClick={() => onLaunch(20)} primary />
+                <BatchOption label="Top 40 对" sub="约 40 分钟" onClick={() => onLaunch(40)} />
+              </div>
+            </>
+          )}
+        </>
+      )}
+      {running && (
+        <div>
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px',
+            background: dark ? 'rgba(255,107,71,0.18)' : 'var(--et-orange-soft)',
+            borderRadius: 8, marginBottom: 10,
+          }}>
+            <div style={{ fontSize: 18, animation: 'spin 1.4s linear infinite' }}>⏳</div>
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 13 }}>正在跑 · {status.n_pairs} 对完成</div>
+              <div style={{ fontSize: 11, color: dark ? 'rgba(244,236,218,0.65)' : 'rgba(26,43,74,0.65)' }}>
+                关掉这个面板没事，跑在后台
+              </div>
+            </div>
+          </div>
+          <pre style={{
+            margin: 0, padding: 10, fontSize: 10.5, lineHeight: 1.5, maxHeight: 200, overflowY: 'auto',
+            background: dark ? 'rgba(0,0,0,0.3)' : 'rgba(26,43,74,0.05)',
+            border: `0.5px solid ${dark ? 'rgba(244,236,218,0.12)' : 'rgba(26,43,74,0.1)'}`,
+            borderRadius: 6, fontFamily: 'monospace', whiteSpace: 'pre-wrap',
+          }}>{status.log_tail || '(等输出…)'}</pre>
+          <style>{`@keyframes spin { from { transform: rotate(0); } to { transform: rotate(360deg); } }`}</style>
+        </div>
+      )}
+      {done && (
+        <div>
+          <div style={{
+            padding: '10px 12px', background: dark ? 'rgba(78,176,109,0.16)' : 'rgba(78,176,109,0.12)',
+            border: `0.5px solid ${dark ? 'rgba(78,176,109,0.4)' : 'rgba(78,176,109,0.3)'}`,
+            borderRadius: 8, marginBottom: 10, fontSize: 13,
+          }}>
+            ✓ 跑完了 · {status.n_pairs} 对关系档案已落盘
+          </div>
+          <div style={{ fontSize: 11, color: dark ? 'rgba(244,236,218,0.6)' : 'rgba(26,43,74,0.6)', marginBottom: 8 }}>
+            报告路径：<code style={{ fontSize: 10 }}>~/Desktop/Murmur/agent_reports/pairs/</code>
+          </div>
+          <button onClick={onClose} style={{
+            all: 'unset', cursor: 'pointer', display: 'block', width: '100%',
+            padding: '8px 12px', textAlign: 'center', borderRadius: 6,
+            background: dark ? 'rgba(244,236,218,0.12)' : 'rgba(26,43,74,0.08)',
+            fontSize: 12, fontWeight: 500,
+          }}>关闭</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BatchOption({ label, sub, onClick, primary }: { label: string; sub: string; onClick: () => void; primary?: boolean }) {
+  return (
+    <button onClick={onClick} style={{
+      all: 'unset', cursor: 'pointer', padding: '10px 14px', borderRadius: 8,
+      background: primary ? 'var(--et-orange)' : 'transparent',
+      color: primary ? '#fff' : 'inherit',
+      border: primary ? 'none' : '0.5px solid rgba(26,43,74,0.18)',
+      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+    }}>
+      <span style={{ fontWeight: primary ? 600 : 500, fontSize: 13 }}>{label}</span>
+      <span style={{ fontSize: 11, opacity: 0.75 }}>{sub}</span>
+    </button>
   );
 }
 
