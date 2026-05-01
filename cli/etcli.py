@@ -3763,7 +3763,14 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
 
 
 def _which(cli: str) -> str | None:
-    """Cross-platform `which`. On Windows, also searches for .cmd / .bat / .exe."""
+    """Cross-platform `which`. On Windows, also searches for .cmd / .bat / .exe.
+
+    On macOS / Linux, when running inside a launchd-spawned GUI .app, the
+    inherited PATH is the bare `/usr/bin:/bin:/usr/sbin:/sbin` — it does NOT
+    include common npm/yarn/pnpm install dirs like ~/.nvm/.../bin or
+    /opt/homebrew/bin. So shutil.which() misses claude/codex/gemini even
+    when they're installed. We augment the search with the common dirs.
+    """
     import shutil as _shutil
     p = _shutil.which(cli)
     if p:
@@ -3775,6 +3782,35 @@ def _which(cli: str) -> str | None:
             cand = npm_dir / f"{cli}{ext}"
             if cand.exists():
                 return str(cand)
+        return None
+    # macOS / Linux: search common install dirs that .app's PATH usually misses
+    home = Path.home()
+    extra_dirs: list[Path] = [
+        Path("/opt/homebrew/bin"),
+        Path("/usr/local/bin"),
+        home / ".local" / "bin",
+        home / ".cargo" / "bin",
+        home / "Library" / "pnpm",
+    ]
+    # All nvm-managed Node versions: ~/.nvm/versions/node/v*/bin
+    nvm_root = home / ".nvm" / "versions" / "node"
+    if nvm_root.is_dir():
+        try:
+            for ver in sorted(nvm_root.iterdir(), reverse=True):  # newest first
+                if ver.is_dir():
+                    extra_dirs.append(ver / "bin")
+        except OSError:
+            pass
+    # Volta / asdf / fnm node managers
+    extra_dirs += [
+        home / ".volta" / "bin",
+        home / ".asdf" / "shims",
+        home / ".local" / "share" / "fnm" / "node-versions",
+    ]
+    for d in extra_dirs:
+        cand = d / cli
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return str(cand)
     return None
 
 
