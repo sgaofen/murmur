@@ -127,12 +127,6 @@ cd murmur
 
 ![friend](docs/screenshots/friend.png)
 
-### 朋友 ↔ 朋友 关系（连线点击）
-
-显示朋友圈互动次数 / 群里互动次数 / 提及次数 / 共群数。可一键让 Claude 或 Codex 推断他们之间什么关系。
-
-![edge-panel](docs/screenshots/edge-panel.png)
-
 ### AI 关系档案（claude 或 codex 写）
 
 强制要求每个结论引用具体消息或统计 —— 不接受空洞形容词。
