@@ -2554,6 +2554,20 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         path = url.path
         qs = urllib.parse.parse_qs(url.query)
 
+        # If we started in bootstrap (TCC blocking discover_data_dir at boot)
+        # but the user later granted FDA, retry discovery on every request
+        # before deciding to send a 503. This auto-promotes the backend out
+        # of bootstrap as soon as the data becomes readable, without needing
+        # a full /api/refresh.
+        if self.store is None:
+            try:
+                d = discover_data_dir()
+                if d and d.exists():
+                    _MurmurAPIHandler.store = EchoStore(d)
+                    sys.stderr.write(f"[etcli serve] auto-promoted from bootstrap → store loaded from {d}\n")
+            except Exception as e:
+                sys.stderr.write(f"[etcli serve] bootstrap auto-promote failed: {e}\n")
+
         # Bootstrap mode: only a small allowlist works without decrypted data.
         _NO_STORE_GET = {"/api/info", "/api/agents", "/api/diagnose", "/api/reports"}
         if self.store is None and path not in _NO_STORE_GET and not path.startswith("/api/report/"):

@@ -7,7 +7,7 @@ import { GraphPage } from './pages/Graph';
 import { OfflineSignalsTable } from './pages/OfflineSignalsTable';
 import { ReportsPage } from './pages/Reports';
 import { YearbookPage } from './pages/Yearbook';
-import { getDiagnose } from './data/api';
+import { getDiagnose, getInfo } from './data/api';
 import { TaskCenterProvider } from './components/extras/TaskCenter';
 import { PrivacyToggle } from './components/PrivacyToggle';
 
@@ -56,14 +56,38 @@ export default function App() {
     document.documentElement.classList.toggle('et-dark', dark);
   }, [dark]);
 
-  // Auto-show onboarding on first launch when there's no data
+  // Auto-show onboarding when data isn't ready. Three triggers:
+  //   1. Backend in bootstrap mode (no decrypted data) — ALWAYS show, regardless
+  //      of `seen` flag. This fires when TCC blocked the boot-time discover or
+  //      the user is on a fresh install.
+  //   2. macOS + TCC blocked at request time — show FDA grant flow.
+  //   3. First-launch heuristic (legacy): fresh user with WeChat installed but
+  //      no key yet, only if onboarding has never been completed (`seen`).
   useEffect(() => {
     let cancelled = false;
     const seen = localStorage.getItem(ONBOARDING_SEEN_KEY);
     (async () => {
       try {
+        // Cheaper than diagnose; tells us bootstrap state immediately
+        const info: any = await getInfo();
+        if (cancelled) return;
+        if (info?.bootstrap) {
+          setOnboarding(true);
+          return;
+        }
+      } catch {
+        // /api/info failed — backend genuinely offline. Let HomePage show its
+        // own connection-failed UI; don't auto-open onboarding (it would just
+        // hang on the diagnose request).
+        return;
+      }
+      try {
         const d = await getDiagnose();
         if (cancelled) return;
+        if (d.platform === 'macos' && d.capabilities.tcc_blocked) {
+          setOnboarding(true);
+          return;
+        }
         const noData = d.profiles.every(p => !p.has_decrypted_data);
         const noKey = !d.saved_key;
         const isMacWithoutData = d.platform === 'macos' && noData;
@@ -72,7 +96,7 @@ export default function App() {
           setOnboarding(true);
         }
       } catch {
-        // backend offline — don't auto-show, let HomePage display its own connection error
+        // diagnose failed — leave onboarding closed
       }
     })();
     return () => { cancelled = true; };
