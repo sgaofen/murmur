@@ -6,7 +6,8 @@
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Downloads](https://img.shields.io/github/v/release/sgaofen/murmur)](https://github.com/sgaofen/murmur/releases)
 
-![cover](docs/screenshots/cover.png)
+![cover](docs/screenshots/graph-full.png)
+*所有截图都开了「🔒 隐私模式」—— 真实使用时显示真名。*
 
 ---
 
@@ -109,13 +110,34 @@ cd murmur
 
 ## 截图
 
-| 主页 | 关系图 | 朋友档案 |
-|---|---|---|
-| ![home](docs/screenshots/home.png) | ![graph](docs/screenshots/graph.png) | ![friend](docs/screenshots/friend.png) |
+### 关系网络（隐私模式开启）
 
-| AI 分析 | 双人年代记 | 离线信号 |
-|---|---|---|
-| ![ai-report](docs/screenshots/ai-report.png) | ![yearbook](docs/screenshots/yearbook.png) | ![signals](docs/screenshots/signals.png) |
+97 个真实朋友 / 149 条边，按互动权重分布。每个节点点开能看到详情面板。
+
+![graph-full](docs/screenshots/graph-full.png)
+
+### 选中朋友 → 查看跨场景画像 + 重要连线
+
+![graph-detail](docs/screenshots/graph-detail.png)
+
+### 朋友档案：AI 摘要 + 离线证据卡
+
+不接 AI 也能用：层级、持续年、线下证据条数、朋友圈双向、深夜比、通话次数 全离线统计。
+接了 AI 多一份精装关系档案。
+
+![friend](docs/screenshots/friend.png)
+
+### 朋友 ↔ 朋友 关系（连线点击）
+
+显示朋友圈互动次数 / 群里互动次数 / 提及次数 / 共群数。可一键让 Claude 或 Codex 推断他们之间什么关系。
+
+![edge-panel](docs/screenshots/edge-panel.png)
+
+### AI 关系档案（claude 或 codex 写）
+
+强制要求每个结论引用具体消息或统计 —— 不接受空洞形容词。
+
+![ai-report](docs/screenshots/ai-report.png)
 
 ---
 
