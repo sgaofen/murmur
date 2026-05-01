@@ -233,7 +233,32 @@ export function HomePage({ dark = false, onOpenFriend }: Props) {
 
   // Initial load
   useEffect(() => {
-    getHomeSummary().then(setSummary).catch(e => setError(String(e.message || e)));
+    // Retry up to 8 times with 750ms backoff for the first fetch — covers the
+    // boot race where the Tauri shell shows the React app a few seconds before
+    // the spawned etcli backend has bound to port 9100. Without this, users
+    // see "Load failed" for the first 1-3 seconds of every cold launch.
+    let cancelled = false;
+    let attempts = 0;
+    const tryFetch = async () => {
+      while (!cancelled && attempts < 8) {
+        attempts++;
+        try {
+          const r = await getHomeSummary();
+          if (!cancelled) { setSummary(r); setError(null); }
+          return;
+        } catch (e: any) {
+          if (cancelled) return;
+          // Last attempt — surface the error
+          if (attempts >= 8) {
+            setError(String(e?.message || e));
+            return;
+          }
+          await new Promise(resolve => setTimeout(resolve, 750));
+        }
+      }
+    };
+    tryFetch();
+    return () => { cancelled = true; };
   }, []);
 
   // Debounce search
