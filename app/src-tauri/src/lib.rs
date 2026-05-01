@@ -1,47 +1,68 @@
 // Murmur 微语 — Tauri shell
 //
-// Boots the backend in one of two ways:
-//   (a) bundled mode — uses the PyInstaller `etcli` binary in
-//       Contents/Resources/backend/etcli (production .app). NO Python required.
-//   (b) dev mode     — falls back to `python3 cli/etcli.py serve` so HMR works.
-// On window close we kill the child so no orphan backend lingers.
+// Boots the backend in one of three ways:
+//   (a) production: bundled PyInstaller `etcli{.exe}` from Contents/Resources/etcli/
+//       (or the equivalent for other platforms). NO Python required.
+//   (b) dev fallback: `python3 cli/etcli.py serve` if no bundle is found —
+//       lets `npm run tauri:dev` work without rebuilding the backend.
+//
+// All backend stdout/stderr is piped to a log file under
+//   ~/Documents/Murmur/logs/{tauri-shell.log,serve.log}     (macOS / Linux)
+//   %USERPROFILE%/Documents/Murmur/logs/...                  (Windows)
+// so we can debug PyInstaller bootloader / port-bind / TCC failures.
+//
+// On window close the spawned backend child is killed cleanly.
 
+use std::fs::OpenOptions;
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
-use tauri::Manager;
+use tauri::{AppHandle, Manager};
 
 struct ServeProcess(Mutex<Option<Child>>);
 
-fn find_bundled_binary() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let exe_dir = exe.parent()?;
-    let candidates = [
-        // macOS .app: Contents/MacOS/Murmur → Contents/Resources/backend/etcli
-        exe_dir.join("../Resources/backend/etcli"),
-        // Generic sibling layouts
-        exe_dir.join("backend/etcli"),
-        exe_dir.join("etcli"),
-    ];
-    for c in &candidates {
-        if c.exists() {
-            return Some(c.canonicalize().unwrap_or_else(|_| c.clone()));
-        }
-    }
-    None
+fn log_dir() -> Option<PathBuf> {
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
+    let p = PathBuf::from(home).join("Documents").join("Murmur").join("logs");
+    std::fs::create_dir_all(&p).ok()?;
+    Some(p)
 }
 
-fn find_dev_etcli_py() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let mut search = exe.parent().map(PathBuf::from)?;
-    for _ in 0..6 {
-        let candidate = search.join("cli").join("etcli.py");
+fn log_line(s: &str) {
+    if let Some(d) = log_dir() {
+        if let Ok(mut f) = OpenOptions::new()
+            .create(true).append(true).open(d.join("tauri-shell.log"))
+        {
+            let _ = writeln!(f, "{}", s);
+        }
+    }
+}
+
+fn locate_etcli_exe(app: &AppHandle) -> Option<PathBuf> {
+    let exe_name = if cfg!(target_os = "windows") { "etcli.exe" } else { "etcli" };
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        let candidate = resource_dir.join("etcli").join(exe_name);
+        log_line(&format!(
+            "trying resource_dir/etcli/{}: {:?} exists={}",
+            exe_name, candidate, candidate.exists()
+        ));
         if candidate.exists() {
             return Some(candidate);
         }
-        let alt = search.join("..").join("cli").join("etcli.py");
-        if alt.exists() {
-            return alt.canonicalize().ok();
+    }
+    let exe = std::env::current_exe().ok()?;
+    let mut search = exe.parent().map(PathBuf::from)?;
+    for _ in 0..6 {
+        for sub in &["etcli", "_up_/etcli", "../etcli", "../Resources/etcli"] {
+            let candidate = search.join(sub).join(exe_name);
+            log_line(&format!(
+                "trying walk-up {}: {:?} exists={}",
+                sub, candidate, candidate.exists()
+            ));
+            if candidate.exists() {
+                return Some(candidate);
+            }
         }
         match search.parent() {
             Some(p) => search = p.to_path_buf(),
@@ -51,74 +72,101 @@ fn find_dev_etcli_py() -> Option<PathBuf> {
     None
 }
 
-fn spawn_serve() -> Option<Child> {
-    // Production: bundled PyInstaller binary (no Python on the user's machine needed)
-    if let Some(bin) = find_bundled_binary() {
-        let mut cmd = Command::new(&bin);
+fn locate_dev_etcli_py() -> Option<PathBuf> {
+    // Dev mode: walk up from the target/ binary to find <repo>/cli/etcli.py
+    let exe = std::env::current_exe().ok()?;
+    let mut search = exe.parent().map(PathBuf::from)?;
+    for _ in 0..6 {
+        let candidate = search.join("cli").join("etcli.py");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        match search.parent() {
+            Some(p) => search = p.to_path_buf(),
+            None => break,
+        }
+    }
+    None
+}
+
+fn open_log_for_serve() -> (Stdio, Stdio) {
+    let log_path = log_dir().map(|d| d.join("serve.log"));
+    let stdout: Stdio = log_path
+        .as_ref()
+        .and_then(|p| std::fs::File::create(p).ok())
+        .map(Stdio::from)
+        .unwrap_or_else(Stdio::null);
+    let stderr: Stdio = log_path
+        .as_ref()
+        .and_then(|p| OpenOptions::new().create(true).append(true).open(p).ok())
+        .map(Stdio::from)
+        .unwrap_or_else(Stdio::null);
+    (stdout, stderr)
+}
+
+fn spawn_etcli_serve(app: &AppHandle) -> Option<Child> {
+    // Path A: bundled PyInstaller binary
+    if let Some(etcli) = locate_etcli_exe(app) {
+        log_line(&format!("etcli located: {:?}", etcli));
+        let work_dir = etcli.parent()?;
+        let (stdout, stderr) = open_log_for_serve();
+
+        let mut cmd = Command::new(&etcli);
+        cmd.current_dir(work_dir);
         cmd.arg("serve").arg("--port").arg("9100");
         cmd.env("PYTHONIOENCODING", "utf-8");
-        // Pin a stable working dir so the backend can locate user paths reliably
-        if let Some(home) = std::env::var_os("HOME") {
-            cmd.current_dir(&home);
-        }
+        cmd.stdin(Stdio::null()).stdout(stdout).stderr(stderr);
         #[cfg(target_os = "windows")]
         {
             use std::os::windows::process::CommandExt;
             const CREATE_NO_WINDOW: u32 = 0x08000000;
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
-        // Pipe backend logs to ~/Library/Logs/Murmur/backend.log so we can debug
-        // launch failures (PyInstaller bootloader errors, port-bind failures, etc.)
-        if let Some(home) = std::env::var_os("HOME") {
-            let log_dir = std::path::PathBuf::from(&home).join("Library/Logs/Murmur");
-            let _ = std::fs::create_dir_all(&log_dir);
-            let log_path = log_dir.join("backend.log");
-            if let Ok(f) = std::fs::OpenOptions::new()
-                .create(true).append(true).open(&log_path)
-            {
-                let dup = f.try_clone().ok();
-                cmd.stdout(Stdio::from(f));
-                if let Some(d) = dup { cmd.stderr(Stdio::from(d)); } else { cmd.stderr(Stdio::null()); }
-            } else {
-                cmd.stdout(Stdio::null()).stderr(Stdio::null());
-            }
-        } else {
-            cmd.stdout(Stdio::null()).stderr(Stdio::null());
-        }
-        return cmd.spawn().ok();
+        return match cmd.spawn() {
+            Ok(child) => { log_line(&format!("spawn OK pid={}", child.id())); Some(child) }
+            Err(e)    => { log_line(&format!("spawn err: {}", e));            None }
+        };
     }
 
-    // Dev fallback: launch `python3 cli/etcli.py serve`
-    let etcli = find_dev_etcli_py()?;
-    let cli_dir = etcli.parent()?;
+    // Path B: dev fallback — python3 cli/etcli.py serve
+    let etcli_py = locate_dev_etcli_py()?;
+    let cli_dir = etcli_py.parent()?;
+    log_line(&format!("dev fallback: python3 {:?}", etcli_py));
     let py = if cfg!(target_os = "windows") { "python" } else { "python3" };
+    let (stdout, stderr) = open_log_for_serve();
+
     let mut cmd = Command::new(py);
     cmd.current_dir(cli_dir);
-    cmd.arg(&etcli).arg("serve").arg("--port").arg("9100");
+    cmd.arg(&etcli_py).arg("serve").arg("--port").arg("9100");
     cmd.env("PYTHONIOENCODING", "utf-8");
+    cmd.stdin(Stdio::null()).stdout(stdout).stderr(stderr);
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    cmd.stdout(Stdio::null()).stderr(Stdio::null());
     cmd.spawn().ok()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let serve_child = spawn_serve();
-
     tauri::Builder::default()
-        .manage(ServeProcess(Mutex::new(serve_child)))
+        .manage(ServeProcess(Mutex::new(None)))
         .setup(|app| {
+            log_line("=== Murmur startup ===");
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
                         .level(log::LevelFilter::Info)
                         .build(),
                 )?;
+            }
+            let child = spawn_etcli_serve(app.handle());
+            if let Some(state) = app.try_state::<ServeProcess>() {
+                if let Ok(mut guard) = state.0.lock() {
+                    *guard = child;
+                }
             }
             Ok(())
         })

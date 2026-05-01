@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Murmur",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "identifier": "com.sgaofen.murmur",
   "build": {
     "frontendDist": "../dist",
@@ -28,7 +28,8 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["dmg", "app"],
+    "targets": "all",
+    "resources": ["etcli/**/*"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -36,9 +37,6 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": {
-      "../../cli/dist/etcli": "backend/etcli"
-    },
     "macOS": {
       "minimumSystemVersion": "11.0"
     }

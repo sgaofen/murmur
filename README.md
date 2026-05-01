@@ -182,7 +182,7 @@ cd murmur
 4.x 完整支持。3.x 不支持（数据库格式不同）。
 
 **Q: 我没装 Python / Node 也能用吗？**
-当前版本需要 Python 3.11+。Roadmap 里会用 PyInstaller 打成全自包含 exe，到时候真·零配置。
+不用装。Win 安装包已用 PyInstaller 把 Python 运行时 + 所有依赖（zstandard / cryptography / pycryptodome / 所有 native DLL）打进 MSI 里，下下来双击直接跑。开发模式才需要 Python 3.11+ 和 Node 18+。
 
 **Q: 能不能合伙人/家庭成员一起用同一份数据？**
 不能。每个微信账号是独立的，数据格式以 wxid 区分。每人各装各的。

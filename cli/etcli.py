@@ -40,6 +40,29 @@ def _flutter_prefs_path() -> Path:
     return Path(base) / "com.example/echotrace/shared_preferences.json"
 
 
+def _spawn_etcli_args(subcmd: str, *args: str) -> list:
+    """Build subprocess argv for invoking an etcli sub-task.
+
+    When frozen (PyInstaller etcli{.exe}), sys.executable IS the binary and
+    accepts these subcommands: refresh / extract-key / extract-key-mac / batch.
+    When dev mode (python etcli.py), we dispatch to the original .py scripts.
+    """
+    if getattr(sys, "frozen", False):
+        if subcmd == "batch":
+            return [sys.executable, "batch", "--", *args]
+        return [sys.executable, subcmd, *args]
+    cli_dir = Path(__file__).resolve().parent
+    if subcmd == "refresh":
+        return [sys.executable, str(cli_dir / "refresh.py"), *args]
+    if subcmd == "extract-key":
+        return [sys.executable, "-u", str(cli_dir / "extract_key_dll.py"), *args]
+    if subcmd == "extract-key-mac":
+        return [sys.executable, "-u", str(cli_dir / "extract_key_mac.py"), *args]
+    if subcmd == "batch":
+        return [sys.executable, str(cli_dir / "batch_analyze.py"), *args]
+    raise ValueError(f"unknown subcmd: {subcmd}")
+
+
 def discover_data_dir() -> Optional[Path]:
     """Find the decrypted-DB directory: env > config > Murmur layout > legacy echotrace.
 
@@ -540,6 +563,12 @@ _MENTIONS_CACHE: dict[str, tuple[float, dict]] = {}     # mentions(top_n,min_mc)
 _PAIR_STREAM: dict[str, dict] = {}    # pair_key → {running, output, error, started_at, finished_at, name_a, name_b, cli}
 _FRIEND_STREAM: dict[str, dict] = {}  # wxid → same shape as pair stream (single-friend invoke)
 _CACHE_TTL = 86400  # 1 day — caches are persisted to disk so a stale day-old cache is fine.
+
+# Build locks: SQLite + heavy Python construction is not safe to call from N threads concurrently
+# on the SAME EchoStore instance. Crashes the process (segfaults in C extensions). Serialize.
+import threading as _t
+_PACK_BUILD_LOCK = _t.Lock()
+_PAIR_BUILD_LOCK = _t.Lock()
 
 # Disk cache root: ~/Documents/Murmur/cache/<key>.json
 def _disk_cache_dir() -> Path:
@@ -1735,10 +1764,53 @@ def main(argv=None):
     sp.add_argument("--host", default="127.0.0.1")
     sp.add_argument("--export-dir", help="AI 分析包默认输出目录（默认 ~/Desktop/Murmur）")
 
+    sp = sub.add_parser("refresh", help="(PyInstaller) 调用 refresh.py 主函数解密")
+    sp.add_argument("--wxid", default=None)
+    sp.add_argument("--key", default=None)
+
+    sp = sub.add_parser("extract-key", help="(PyInstaller) 调用 extract_key_dll.py 抓 key")
+    sp.add_argument("--timeout", type=int, default=90)
+    sp.add_argument("--auto-restart", action="store_true")
+
+    sp = sub.add_parser("extract-key-mac", help="(PyInstaller) 调用 extract_key_mac.py 抓 key (macOS)")
+    sp.add_argument("rest", nargs=argparse.REMAINDER, help="所有参数原样传给 extract_key_mac")
+
+    sp = sub.add_parser("batch", help="(PyInstaller) 调用 batch_analyze.py 跑批量")
+    sp.add_argument("rest", nargs=argparse.REMAINDER, help="所有参数原样传给 batch_analyze")
+
     args = p.parse_args(argv)
 
     if args.cmd == "serve":
         return _run_server(args)
+
+    if args.cmd == "refresh":
+        import refresh as _refresh
+        rest = []
+        if args.wxid: rest += ["--wxid", args.wxid]
+        if args.key: rest += ["--key", args.key]
+        sys.argv = ["refresh"] + rest
+        return _refresh.main()
+
+    if args.cmd == "extract-key":
+        import extract_key_dll as _ekd
+        rest = ["--timeout", str(args.timeout)]
+        if args.auto_restart: rest.append("--auto-restart")
+        sys.argv = ["extract_key_dll"] + rest
+        return _ekd.main() if hasattr(_ekd, "main") else _ekd.run()
+
+    if args.cmd == "extract-key-mac":
+        import extract_key_mac as _ekm
+        rest = list(args.rest or [])
+        if rest and rest[0] == "--": rest = rest[1:]
+        sys.argv = ["extract_key_mac"] + rest
+        return _ekm.main()
+
+    if args.cmd == "batch":
+        import batch_analyze as _ba
+        rest = list(args.rest or [])
+        if rest and rest[0] == "--": rest = rest[1:]
+        sys.argv = ["batch_analyze"] + rest
+        return _ba.main()
 
     if args.cmd == "info":
         dd = Path(args.data_dir) if args.data_dir else discover_data_dir()
@@ -1821,19 +1893,6 @@ import subprocess
 import threading
 import time as _time
 
-
-def _spawn_helper_argv(name: str) -> list[str]:
-    """Build the argv to spawn a sibling helper script (refresh / extract_key_mac / etc.).
-
-    In PyInstaller frozen mode (sys.frozen is True), sys.executable is the bundled
-    `etcli` binary itself — we re-enter it via `--internal-script <name>`.
-
-    In dev mode it's the Python interpreter — call `python3 cli/<name>.py` as before.
-    """
-    cli_dir = Path(__file__).resolve().parent
-    if getattr(sys, "frozen", False):
-        return [sys.executable, "--internal-script", name]
-    return [sys.executable, "-u", str(cli_dir / f"{name}.py")]
 
 # Auto-derive friend cards (mirrors what the React app expects)
 
@@ -2578,10 +2637,12 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     mentions = disk_m["_payload"]
                     _MENTIONS_CACHE[mck] = (disk_m["_ts"], mentions)
                 else:
-                    mentions = extract_friend_mentions(self.store, top_n=50, min_mention_count=3)
+                    with _PAIR_BUILD_LOCK:
+                        mentions = extract_friend_mentions(self.store, top_n=50, min_mention_count=3)
                     _MENTIONS_CACHE[mck] = (_time.time(), mentions)
                     _disk_save(mck, mentions)
-            pack = build_pair_inference_pack(self.store, a, b, mentions=mentions)
+            with _PAIR_BUILD_LOCK:
+                pack = build_pair_inference_pack(self.store, a, b, mentions=mentions)
             payload = {"pack": pack, "a": a, "b": b, "size": len(pack)}
             _PAIR_PACK_CACHE[ck] = (_time.time(), payload)
             _disk_save(ck, payload)
@@ -2881,10 +2942,9 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             }, status=503)
 
         if path == "/api/refresh":
-            # Run the decrypt pipeline; reuse refresh.py via subprocess to keep things simple
-            cli_dir = Path(__file__).resolve().parent
+            # Run the decrypt pipeline; dispatches via etcli sub-task helper (frozen vs dev aware)
             t0 = _time.time()
-            r = subprocess.run(_spawn_helper_argv("refresh"),
+            r = subprocess.run(_spawn_etcli_args("refresh"),
                                capture_output=True, text=True, encoding="utf-8")
             dt = round((_time.time() - t0) * 1000)
             ok = r.returncode == 0
@@ -2921,12 +2981,13 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             body = self.rfile.read(length) if length else b"{}"
             opts = json.loads(body.decode("utf-8") or "{}")
             sample = int(opts.get("sample", 80))
-            pack = build_analysis_pack(self.store, wxid, sample_n=sample)
-            self.export_dir.mkdir(parents=True, exist_ok=True)
-            name = self.store.contact(wxid).display() or wxid
-            safe = re.sub(r'[<>:"/\\|?*]', "_", name)
-            out = self.export_dir / f"{safe}_AI分析包.md"
-            out.write_text(pack, encoding="utf-8")
+            with _PACK_BUILD_LOCK:
+                pack = build_analysis_pack(self.store, wxid, sample_n=sample)
+                self.export_dir.mkdir(parents=True, exist_ok=True)
+                name = self.store.contact(wxid).display() or wxid
+                safe = re.sub(r'[<>:"/\\|?*]', "_", name)
+                out = self.export_dir / f"{safe}_AI分析包.md"
+                out.write_text(pack, encoding="utf-8")
             return self._send_json({
                 "ok": True,
                 "path": str(out),
@@ -2950,22 +3011,21 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             log_dir = Path.home() / "Desktop" / "Murmur"
             log_dir.mkdir(parents=True, exist_ok=True)
             log_path = log_dir / f"batch_{int(_time.time())}.log"
-            cmd = _spawn_helper_argv("batch_analyze") + ["--cli", cli_name, "--parallel", "5"]
+            extra: list = ["--cli", cli_name, "--parallel", "5"]
             if mode == "all":
-                cmd += ["--top", "100", "--top-pairs", str(top_pairs), "--min-mentions", "2"]
+                extra += ["--top", "100", "--top-pairs", str(top_pairs), "--min-mentions", "2"]
             elif mode == "pairs-graph":
-                cmd += ["--pairs-only", "--pair-mode", "graph", "--top-pairs", str(top_pairs)]
+                extra += ["--pairs-only", "--pair-mode", "graph", "--top-pairs", str(top_pairs)]
             elif mode == "single-friend":
-                # Special: regenerate one friend by index. Falls back to top=1
                 wxid = opts.get("wxid")
                 if not wxid:
                     return self._send_json({"ok": False, "error": "wxid required for single-friend"}, 400)
-                # Use /api/agents/invoke pathway instead — it's synchronous + per-friend
                 return self._send_json({"ok": False, "error": "use /api/agents/invoke for single-friend"}, 400)
             else:  # top mode (default)
-                cmd += ["--top", str(top), "--top-pairs", str(top_pairs), "--min-mentions", "2"]
+                extra += ["--top", str(top), "--top-pairs", str(top_pairs), "--min-mentions", "2"]
             if force:
-                cmd.append("--force")
+                extra.append("--force")
+            cmd = _spawn_etcli_args("batch", *extra)
             env = os.environ.copy()
             env["PYTHONIOENCODING"] = "utf-8"
             try:
@@ -3328,15 +3388,6 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             opts = json.loads(body.decode("utf-8") or "{}")
             auto_restart = bool(opts.get("auto_restart", True))
             timeout = int(opts.get("timeout", 90))
-            cli_dir = Path(__file__).resolve().parent
-            # Pick the right extractor for the OS
-            if _paths.IS_MAC:
-                script_name = "extract_key_mac"
-                script = cli_dir / "extract_key_mac.py"
-            else:
-                script_name = "extract_key_dll"
-                script = cli_dir / "extract_key_dll.py"
-
             t0 = _time.time()
             if _paths.IS_MAC:
                 # macOS dance:
@@ -3379,19 +3430,15 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     encoding="utf-8",
                 )
 
-                # Build the elevated command (with paths properly quoted for shell + AS).
-                # In PyInstaller frozen mode, sys.executable IS the binary; re-enter
-                # via --internal-script. In dev, run the .py directly.
-                if getattr(sys, "frozen", False):
-                    inner_argv = [str(sys.executable), "--internal-script", script_name,
-                                  "--timeout", str(timeout),
-                                  "--salts", salts_path,
-                                  "--out-keys", keys_path]
-                else:
-                    inner_argv = [str(sys.executable), "-u", str(script),
-                                  "--timeout", str(timeout),
-                                  "--salts", salts_path,
-                                  "--out-keys", keys_path]
+                # Build the elevated command. _spawn_etcli_args handles both
+                # frozen mode (etcli extract-key-mac ...) and dev mode (python
+                # extract_key_mac.py ...). Quote each arg for shell + AppleScript.
+                inner_argv = _spawn_etcli_args(
+                    "extract-key-mac",
+                    "--timeout", str(timeout),
+                    "--salts", salts_path,
+                    "--out-keys", keys_path,
+                )
                 inner = " ".join(shlex.quote(a) for a in inner_argv)
                 inner_as = inner.replace("\\", "\\\\").replace('"', '\\"')
                 applescript = f'do shell script "{inner_as}" with administrator privileges'
@@ -3421,11 +3468,12 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 try: os.unlink(keys_path)
                 except OSError: pass
             else:
-                # Windows path: spawn extract_key_dll.py (or its frozen sibling).
-                # _spawn_helper_argv handles dev vs PyInstaller bundle correctly.
-                cmd = _spawn_helper_argv(script_name) + ["--timeout", str(timeout)]
+                # Windows path: spawn extract_key_dll via _spawn_etcli_args
+                # (handles dev vs PyInstaller frozen).
+                extra = ["--timeout", str(timeout)]
                 if auto_restart:
-                    cmd.append("--auto-restart")
+                    extra.append("--auto-restart")
+                cmd = _spawn_etcli_args("extract-key", *extra)
                 r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
                 stdout = r.stdout or ""
             ms = round((_time.time() - t0) * 1000)
