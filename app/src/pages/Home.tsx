@@ -292,14 +292,13 @@ export function HomePage({ dark = false, onOpenFriend }: Props) {
         minHeight: '100vh', display: 'flex', flexDirection: 'column',
         alignItems: 'center', justifyContent: 'center', padding: 24, gap: 16,
       }}>
-        <div className="et-h2" style={{ color: 'var(--et-ink)' }}>没法连接到数据后端</div>
+        <div className="et-h2" style={{ color: 'var(--et-ink)' }}>后端没起来</div>
         <div className="et-meta" style={{ color: 'var(--et-mute)', maxWidth: 520, textAlign: 'center' }}>
-          请在 Murmur 目录下启动后端：<br/>
-          <code style={{ background: 'var(--et-paper-2)', padding: '4px 8px', borderRadius: 4, marginTop: 8, display: 'inline-block' }}>
-            {navigator.platform.toLowerCase().includes('mac') || navigator.userAgent.toLowerCase().includes('mac')
-              ? 'bash start-mac.sh'
-              : 'start-windows.bat'}
-          </code>
+          Murmur 应该自动启动 etcli.exe 作为后端。如果没起，请：<br/>
+          1. 完全退出 Murmur 重启<br/>
+          2. 还不行就看日志 <code style={{ background: 'var(--et-paper-2)', padding: '2px 6px', borderRadius: 4 }}>~/Documents/Murmur/logs/serve.log</code><br/>
+          3. 开发模式可手动跑 <code style={{ background: 'var(--et-paper-2)', padding: '2px 6px', borderRadius: 4 }}>{navigator.userAgent.toLowerCase().includes('mac') ? 'bash start-mac.sh' : 'start-windows.bat'}</code><br/>
+          4. 把日志贴 issue 给作者 sgaofen
         </div>
         <div className="et-meta" style={{ color: 'var(--et-faint)' }}>{error}</div>
       </div>

@@ -2574,12 +2574,25 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     "self_wxid": None,
                     "version": "0.1",
                     "bootstrap": True,
+                    "needs_onboarding": True,
+                    "reason": "no decrypted data — run extract-key + refresh to bootstrap",
                 })
             return self._send_json({
                 "data_dir": str(self.store.dir),
                 "self_wxid": self.store.me,
                 "version": "0.1",
             })
+
+        # Onboarding gate: data-needing endpoints return 503 until store is ready.
+        # Endpoints that work without a store stay above this gate.
+        if path == "/api/diagnose" or path == "/api/agents":
+            pass  # these don't need store, fall through to their handlers
+        elif self.store is None:
+            return self._send_json({
+                "error": "onboarding_required",
+                "message": "解密数据未准备好。请先抓 key 再解密。",
+                "needs_onboarding": True,
+            }, status=503)
         if path == "/api/agents":
             return self._send_json(_detect_local_agents())
         if path == "/api/graph":
@@ -2932,13 +2945,15 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         url = urllib.parse.urlparse(self.path)
         path = url.path
 
-        # Bootstrap mode: only the onboarding endpoints work without decrypted data.
-        _NO_STORE_POST = {"/api/refresh", "/api/save-key", "/api/extract-key",
-                          "/api/open-folder", "/api/resign-wechat", "/api/open-fda"}
-        if self.store is None and path not in _NO_STORE_POST:
+        # Bootstrap endpoints that work even when store is None (no decrypted data yet)
+        # Mac onboarding adds a few extra (resign-wechat, open-fda, open-folder); keep them whitelisted.
+        BOOTSTRAP_POSTS = {"/api/refresh", "/api/save-key", "/api/extract-key",
+                           "/api/open-folder", "/api/resign-wechat", "/api/open-fda"}
+        if self.store is None and path not in BOOTSTRAP_POSTS:
             return self._send_json({
                 "error": "no_decrypted_data",
-                "message": "Backend is in bootstrap mode — provide a key via /api/save-key + /api/refresh first.",
+                "message": "解密数据未准备好。请先抓 key 再解密。",
+                "needs_onboarding": True,
             }, status=503)
 
         if path == "/api/refresh":
@@ -2952,9 +2967,12 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             if ok:
                 if self.store is None:
                     # Bootstrap mode: this was the first decrypt — instantiate store now
-                    new_dir = discover_data_dir()
-                    if new_dir and new_dir.exists():
-                        _MurmurAPIHandler.store = EchoStore(new_dir)
+                    try:
+                        new_dir = discover_data_dir()
+                        if new_dir and new_dir.exists():
+                            _MurmurAPIHandler.store = EchoStore(new_dir)
+                    except Exception as e:
+                        sys.stderr.write(f"[refresh] post-decrypt store init failed: {e}\n")
                 else:
                     self.store._contacts = None
                     self.store._sessions = None
@@ -4462,14 +4480,17 @@ def _detect_local_agents() -> list[dict]:
 
 
 def _run_server(args) -> int:
-    # Lazy: load store once at startup. If no decrypted data exists yet, start
-    # in "bootstrap mode" — only serves /api/info, /api/diagnose, /api/save-key,
-    # /api/extract-key, /api/refresh, /api/agents so the onboarding dialog can
-    # decrypt for the first time. Other endpoints return 503 until store loads.
+    # Bootstrap-mode-aware: if no decrypted data, start server anyway with store=None
+    # so the onboarding endpoints (/api/info, /api/diagnose, /api/save-key,
+    # /api/extract-key, /api/refresh, /api/agents) can guide the user to decrypt.
+    # Other endpoints return 503 until store loads.
     data_dir = Path(args.data_dir) if args.data_dir else discover_data_dir()
     store: Optional[EchoStore] = None
     if data_dir and data_dir.exists():
-        store = EchoStore(data_dir)
+        try:
+            store = EchoStore(data_dir)
+        except Exception as e:
+            sys.stderr.write(f"[etcli serve] EchoStore init failed: {e} — starting in bootstrap mode\n")
     else:
         sys.stderr.write(
             "[etcli serve] no decrypted data found — running in bootstrap mode "

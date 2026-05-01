@@ -1,5 +1,6 @@
 // Backend bridge — real fetch from etcli serve.
-// Start the backend with:  python3 cli/etcli.py serve --port 9100   (or `bash start-mac.sh` / `start-windows.bat`)
+// In production: Tauri shell auto-spawns the bundled etcli.exe on startup.
+// In dev: run `python3 cli/etcli.py serve --port 9100` (or `bash start-mac.sh` / `start-windows.bat`).
 import type { Friend, FriendStats, HomeSummary, Moment } from './types';
 
 const BASE = (import.meta.env?.VITE_ETCLI_URL as string) || 'http://localhost:9100';
