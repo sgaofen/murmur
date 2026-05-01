@@ -12,14 +12,25 @@ echo "  ║      Murmur 微语 · 你的微信故事          ║"
 echo "  ╚════════════════════════════════════════╝"
 echo ""
 
-# --- check python ---
-if ! command -v python3 > /dev/null; then
-    echo "[X] 没找到 python3"
-    echo "    安装：brew install python@3.11"
+# --- pick Python (require 3.11+; system python3 on macOS is often 3.9) ---
+PY=""
+for cand in python3.13 python3.12 python3.11 python3; do
+    if command -v "$cand" > /dev/null 2>&1; then
+        ver=$("$cand" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)
+        major=${ver%%.*}; minor=${ver##*.}
+        if [ "$major" = "3" ] && [ "$minor" -ge 11 ] 2>/dev/null; then
+            PY="$cand"
+            break
+        fi
+    fi
+done
+if [ -z "$PY" ]; then
+    echo "[X] 没找到 Python 3.11+"
+    echo "    安装：brew install python@3.12"
     read -n 1
     exit 1
 fi
-echo "[OK] Python found ($(python3 --version))"
+echo "[OK] Python found ($($PY --version) at $(command -v $PY))"
 
 # --- check node ---
 if ! command -v node > /dev/null; then
@@ -31,9 +42,9 @@ fi
 echo "[OK] Node found ($(node --version))"
 
 # --- install python deps ---
-if ! python3 -c "import zstandard, cryptography" 2>/dev/null; then
+if ! $PY -c "import zstandard, cryptography" 2>/dev/null; then
     echo "[...] 装 Python 依赖..."
-    python3 -m pip install -r requirements.txt
+    $PY -m pip install --user -r requirements.txt
 fi
 echo "[OK] Python deps ready"
 
@@ -56,7 +67,7 @@ fi
 
 # --- launch ---
 echo "[...] 启动后端..."
-(cd cli && python3 etcli.py serve --port 9100) > /tmp/murmur-backend.log 2>&1 &
+(cd cli && $PY etcli.py serve --port 9100) > /tmp/murmur-backend.log 2>&1 &
 BACKEND_PID=$!
 sleep 2
 

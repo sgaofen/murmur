@@ -1,5 +1,5 @@
 // Backend bridge — real fetch from etcli serve.
-// Start the backend with:  python C:\Users\YY\murmur\cli\etcli.py serve --port 9100
+// Start the backend with:  python3 cli/etcli.py serve --port 9100   (or `bash start-mac.sh` / `start-windows.bat`)
 import type { Friend, FriendStats, HomeSummary, Moment } from './types';
 
 const BASE = (import.meta.env?.VITE_ETCLI_URL as string) || 'http://localhost:9100';
@@ -26,6 +26,10 @@ export interface Diagnose {
     can_extract_image_key: boolean;
     has_wechat_installed: boolean;
     has_wechat_data: boolean;
+    sip_enabled?: boolean | null;
+    weixin_running?: boolean | null;
+    wechat_hardened?: boolean | null;
+    tcc_blocked?: boolean | null;
   };
   profiles: Array<{
     wxid: string;
@@ -150,6 +154,24 @@ export async function saveKey(key: string): Promise<{ ok: boolean; path?: string
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ key }),
+  });
+}
+
+export async function resignWechat(opts: { relaunch?: boolean } = {}): Promise<{
+  ok: boolean; ms?: number; log?: string[]; error?: string; stderr?: string; next_steps?: string;
+}> {
+  return j('/api/resign-wechat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ relaunch: opts.relaunch ?? true }),
+  });
+}
+
+export async function openFullDiskAccess(): Promise<{ ok: boolean; error?: string }> {
+  return j('/api/open-fda', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
   });
 }
 

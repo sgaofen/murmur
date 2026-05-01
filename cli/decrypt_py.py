@@ -47,15 +47,28 @@ SQLITE_HEADER = b"SQLite format 3\x00"  # 16 bytes
 
 
 def _derive_keys(key_bytes: bytes, salt: bytes) -> tuple[bytes, bytes]:
-    """Returns (aes_key, hmac_key)."""
+    """Password mode: PBKDF2 the password to get AES key, then derive HMAC key."""
     aes_key = hashlib.pbkdf2_hmac("sha512", key_bytes, salt, KEY_ITER, KEY_SIZE)
     mac_salt = bytes(b ^ 0x3a for b in salt)
     hmac_key = hashlib.pbkdf2_hmac("sha512", aes_key, mac_salt, HMAC_KEY_ITER, KEY_SIZE)
     return aes_key, hmac_key
 
 
-def decrypt_db(src_path: Path, dst_path: Path, key_hex: str) -> None:
-    """Decrypt one .db file. Raises ValueError on bad key / corruption."""
+def _hmac_key_from_aes(aes_key: bytes, salt: bytes) -> bytes:
+    """Raw-AES-key mode: skip PBKDF2 on aes_key (it's already the AES key);
+    derive only the HMAC key from it."""
+    mac_salt = bytes(b ^ 0x3a for b in salt)
+    return hashlib.pbkdf2_hmac("sha512", aes_key, mac_salt, HMAC_KEY_ITER, KEY_SIZE)
+
+
+def decrypt_db(src_path: Path, dst_path: Path, key_hex: str, *, pre_derived: bool = False) -> None:
+    """Decrypt one .db file. Raises ValueError on bad key / corruption.
+
+    Args:
+        pre_derived: If False (default), `key_hex` is a password — apply PBKDF2.
+                     If True, `key_hex` is already the per-DB derived AES key
+                     (e.g., extracted from WCDB memory cache on macOS).
+    """
     if len(key_hex) != 64:
         raise ValueError(f"key must be 64 hex chars, got {len(key_hex)}")
     try:
@@ -70,7 +83,11 @@ def decrypt_db(src_path: Path, dst_path: Path, key_hex: str) -> None:
         raise ValueError(f"{src_path} size {len(raw)} not a multiple of {PAGE_SIZE}")
 
     salt = raw[:SALT_SIZE]
-    aes_key, hmac_key = _derive_keys(key_bytes, salt)
+    if pre_derived:
+        aes_key = key_bytes
+        hmac_key = _hmac_key_from_aes(aes_key, salt)
+    else:
+        aes_key, hmac_key = _derive_keys(key_bytes, salt)
 
     n_pages = len(raw) // PAGE_SIZE
     out = bytearray()
@@ -120,8 +137,9 @@ def decrypt_db(src_path: Path, dst_path: Path, key_hex: str) -> None:
 
 
 def decrypt_directory(src_root: Path, dst_root: Path, key_hex: str,
-                       db_glob: str = "*.db") -> dict:
-    """Decrypt every .db under src_root, mirroring layout into dst_root."""
+                       db_glob: str = "*.db", *, pre_derived: bool = False) -> dict:
+    """Decrypt every .db under src_root, mirroring layout into dst_root.
+    `pre_derived` forwarded to decrypt_db()."""
     src_root = src_root.resolve()
     dst_root = dst_root.resolve()
     decrypted = []
@@ -130,14 +148,54 @@ def decrypt_directory(src_root: Path, dst_root: Path, key_hex: str,
         if "_fts" in src.name or src.suffix == "-shm" or src.suffix == "-wal":
             continue
         rel = src.relative_to(src_root)
-        # Flatten: many WeChat dbs sit in subdirs (session/session.db). We move them all
-        # under dst_root flat (matches existing Murmur layout).
         dst = dst_root / src.name
         try:
-            decrypt_db(src, dst, key_hex)
+            decrypt_db(src, dst, key_hex, pre_derived=pre_derived)
             decrypted.append({"src": str(rel), "dst": dst.name, "size": dst.stat().st_size})
         except Exception as e:
             failed.append({"src": str(rel), "error": str(e)})
+    return {"decrypted": decrypted, "failed": failed,
+            "total": len(decrypted), "errors": len(failed)}
+
+
+def decrypt_directory_per_db(src_root: Path, dst_root: Path, *,
+                              keys_by_name: dict[str, str] | None = None,
+                              keys_by_salt: dict[str, str] | None = None) -> dict:
+    """Decrypt every .db under src_root using per-DB raw AES keys.
+
+    `keys_by_name` maps relative db path (e.g. "session/session.db") to a
+    64-hex AES key. `keys_by_salt` maps the 32-hex salt of page-1 to a key
+    (used as fallback when the relative-path key isn't in the map).
+    """
+    keys_by_name = keys_by_name or {}
+    keys_by_salt = keys_by_salt or {}
+    src_root = src_root.resolve()
+    dst_root = dst_root.resolve()
+    decrypted = []
+    failed = []
+    for src in src_root.rglob("*.db"):
+        if "_fts" in src.name or src.suffix == "-shm" or src.suffix == "-wal":
+            continue
+        rel = src.relative_to(src_root)
+        rel_str = str(rel).replace("\\", "/")
+        # Look up: by name first, then by salt
+        key_hex = keys_by_name.get(rel_str)
+        if not key_hex:
+            try:
+                with open(src, "rb") as f:
+                    salt_hex = f.read(SALT_SIZE).hex()
+                key_hex = keys_by_salt.get(salt_hex)
+            except OSError:
+                pass
+        if not key_hex:
+            failed.append({"src": rel_str, "error": "no key for this DB (run extract_key_mac.py with WeChat fully loaded)"})
+            continue
+        dst = dst_root / src.name
+        try:
+            decrypt_db(src, dst, key_hex, pre_derived=True)
+            decrypted.append({"src": rel_str, "dst": dst.name, "size": dst.stat().st_size})
+        except Exception as e:
+            failed.append({"src": rel_str, "error": str(e)})
     return {"decrypted": decrypted, "failed": failed,
             "total": len(decrypted), "errors": len(failed)}
 

@@ -120,6 +120,7 @@ export function GraphView({ data, dark = false, selected, onSelect, onSelectEdge
   const dragRef = useRef<{ x: number; y: number; rotX: number; rotY: number; panX: number; panY: number; mode: 'rotate' | 'pan' } | null>(null);
 
   const [hover, setHover] = useState<string | null>(null);
+  const [hoverEdge, setHoverEdge] = useState<{ source: string; target: string } | null>(null);
   const [tick, setTick] = useState(0);
 
   // Auto-rotate (paused when user interacts OR a panel is open — so the edge/node
@@ -191,17 +192,93 @@ export function GraphView({ data, dark = false, selected, onSelect, onSelectEdge
     dragRef.current = { x: e.clientX, y: e.clientY, rotX, rotY, panX: pan.x, panY: pan.y, mode: isPan ? 'pan' : 'rotate' };
   }
   function handlePointerMove(e: ReactPointerEvent<SVGSVGElement>) {
-    if (!dragging || !dragRef.current) return;
-    const dx = e.clientX - dragRef.current.x;
-    const dy = e.clientY - dragRef.current.y;
-    if (dragRef.current.mode === 'rotate') {
-      setRotY(dragRef.current.rotY + dx * 0.005);
-      // Clamp pitch to avoid flipping
-      const newRotX = dragRef.current.rotX + dy * 0.005;
-      setRotX(Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05, newRotX)));
-    } else {
-      setPan({ x: dragRef.current.panX + dx, y: dragRef.current.panY + dy });
+    if (dragging && dragRef.current) {
+      const dx = e.clientX - dragRef.current.x;
+      const dy = e.clientY - dragRef.current.y;
+      if (dragRef.current.mode === 'rotate') {
+        setRotY(dragRef.current.rotY + dx * 0.005);
+        const newRotX = dragRef.current.rotX + dy * 0.005;
+        setRotX(Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05, newRotX)));
+      } else {
+        setPan({ x: dragRef.current.panX + dx, y: dragRef.current.panY + dy });
+      }
+      return;
     }
+    // Not dragging — update node/edge hover preview so user can SEE what their
+    // click would select before committing. Hit-tested in screen coords using
+    // the same logic as handlePointerUp.
+    const svg = e.currentTarget as SVGSVGElement;
+    const rect = svg.getBoundingClientRect();
+    const sx = (e.clientX - rect.left) * (W / rect.width);
+    const sy = (e.clientY - rect.top) * (H / rect.height);
+
+    // 1. Try nearest node first (priority over edges)
+    let bestNodeId: string | null = null;
+    let bestNodeDist = Infinity;
+    for (const n of projNodes) {
+      const r = Math.max(16, n.size * n.proj.depth + 10);
+      const d = Math.hypot(n.proj.x - sx, n.proj.y - sy);
+      if (d < r && d < bestNodeDist) { bestNodeDist = d; bestNodeId = n.id; }
+    }
+    if (bestNodeId !== hover) setHover(bestNodeId);
+
+    // 2. If no node hovered, find nearest edge.
+    if (bestNodeId) {
+      if (hoverEdge) setHoverEdge(null);
+      return;
+    }
+    const HIT_TOLERANCE = 14;
+    let bestEdge: { source: string; target: string } | null = null;
+    let bestEdgeScore = Infinity;
+    for (const eg of data.edges) {
+      // When a node is selected, only edges connected to it are RENDERED, so
+      // hover preview must agree with what's visible.
+      if (selected && eg.source !== selected && eg.target !== selected) continue;
+      const a = projById[eg.source];
+      const b = projById[eg.target];
+      if (!a || !b) continue;
+      const isSelfEdge = eg.source === 'self' || eg.target === 'self';
+      const dxe = b.proj.x - a.proj.x;
+      const dye = b.proj.y - a.proj.y;
+      const len = Math.hypot(dxe, dye) || 1;
+      const nSamples = Math.max(8, Math.min(80, Math.round(len / 3)));
+      let minD = Infinity;
+      if (isSelfEdge) {
+        for (let i = 0; i <= nSamples; i++) {
+          const t = i / nSamples;
+          const px = a.proj.x + dxe * t, py = a.proj.y + dye * t;
+          const d = Math.hypot(px - sx, py - sy);
+          if (d < minD) minD = d;
+        }
+      } else {
+        const mx = (a.proj.x + b.proj.x) / 2;
+        const my = (a.proj.y + b.proj.y) / 2;
+        const bow = Math.min(28, len * 0.12);
+        let nx = -dye / len, ny = dxe / len;
+        if (nx * (mx - W / 2) + ny * (my - H / 2) < 0) { nx = -nx; ny = -ny; }
+        const cx = mx + nx * bow, cy = my + ny * bow;
+        for (let i = 0; i <= nSamples; i++) {
+          const t = i / nSamples;
+          const it = 1 - t;
+          const px = it * it * a.proj.x + 2 * it * t * cx + t * t * b.proj.x;
+          const py = it * it * a.proj.y + 2 * it * t * cy + t * t * b.proj.y;
+          const d = Math.hypot(px - sx, py - sy);
+          if (d < minD) minD = d;
+        }
+      }
+      if (minD <= HIT_TOLERANCE && minD < bestEdgeScore) {
+        bestEdgeScore = minD;
+        bestEdge = { source: eg.source, target: eg.target };
+      }
+    }
+    const sameEdge = bestEdge && hoverEdge
+      && bestEdge.source === hoverEdge.source && bestEdge.target === hoverEdge.target;
+    if (!sameEdge) setHoverEdge(bestEdge);
+  }
+
+  function handlePointerLeave() {
+    setHover(null);
+    setHoverEdge(null);
   }
   function handlePointerUp(e: ReactPointerEvent<SVGSVGElement>) {
     setDragging(false);
@@ -349,6 +426,7 @@ export function GraphView({ data, dark = false, selected, onSelect, onSelectEdge
            onPointerMove={handlePointerMove}
            onPointerUp={handlePointerUp}
            onPointerCancel={handlePointerUp}
+           onPointerLeave={handlePointerLeave}
            onWheel={handleWheel}
            onContextMenu={(e) => e.preventDefault()}>
         <defs>
@@ -389,6 +467,7 @@ export function GraphView({ data, dark = false, selected, onSelect, onSelectEdge
           if (!a || !b) return null;
           const isSelfEdge = e.source === 'self' || e.target === 'self';
           const isHighlight = !!selected && (e.source === selected || e.target === selected);
+          const isHoverEdge = !!hoverEdge && hoverEdge.source === e.source && hoverEdge.target === e.target;
           const styleByType: Record<string, { stroke: string; width: number; opMul: number; dash: string | null }> = {
             private:      { stroke: '#FF6B47',                                width: 1.2, opMul: 0.5,  dash: e.dashed ? '2 4' : null },
             co_group:     { stroke: dark ? '#5A7A99' : '#1A2B4A',              width: 0.8, opMul: 0.32, dash: '1 3' },
@@ -401,15 +480,19 @@ export function GraphView({ data, dark = false, selected, onSelect, onSelectEdge
           };
           const s = styleByType[e.type] || styleByType.co_group;
           const baseOp = e.weight * s.opMul + 0.05;
-          // When something is selected, FULLY HIDE non-related edges (not just dim)
-          if (selected && !isHighlight) return null;
-          const op = isHighlight ? Math.min(1, baseOp * 2.5) : baseOp;
+          // When a node is selected, drop non-related edges to a faint hint level
+          // (was previously hidden entirely — user couldn't hover to compare).
+          // Hovered edges always pop above the dim layer.
+          let op = isHoverEdge ? 1 : (isHighlight ? Math.min(1, baseOp * 2.5) : baseOp);
+          if (selected && !isHighlight && !isHoverEdge) op = baseOp * 0.18;
+          const widthMul = isHoverEdge ? 2.4 : (isHighlight ? 1.8 : 1);
           if (isSelfEdge) {
             return (
               <line key={i}
                 x1={a.proj.x} y1={a.proj.y} x2={b.proj.x} y2={b.proj.y}
-                stroke={s.stroke} strokeOpacity={op}
-                strokeWidth={(s.width * Math.max(0.4, e.weight)) * (isHighlight ? 1.8 : 1)}
+                stroke={isHoverEdge ? '#FFC857' : s.stroke}
+                strokeOpacity={op}
+                strokeWidth={(s.width * Math.max(0.4, e.weight)) * widthMul}
                 strokeDasharray={s.dash || undefined} />
             );
           }
@@ -427,8 +510,9 @@ export function GraphView({ data, dark = false, selected, onSelect, onSelectEdge
           return (
             <path key={i}
               d={`M${a.proj.x},${a.proj.y} Q${cx},${cy} ${b.proj.x},${b.proj.y}`}
-              stroke={s.stroke} strokeOpacity={op}
-              strokeWidth={(s.width * Math.max(0.5, e.weight)) * (isHighlight ? 2 : 1)}
+              stroke={isHoverEdge ? '#FFC857' : s.stroke}
+              strokeOpacity={op}
+              strokeWidth={(s.width * Math.max(0.5, e.weight)) * (isHoverEdge ? 2.6 : (isHighlight ? 2 : 1))}
               strokeDasharray={s.dash || undefined}
               fill="none" strokeLinecap="round" />
           );
@@ -470,6 +554,10 @@ export function GraphView({ data, dark = false, selected, onSelect, onSelectEdge
               {isSel && !n.is_self && (
                 <circle cx={n.proj.x} cy={n.proj.y} r={r * 3.2} fill="url(#sel-glow)" />
               )}
+              {isHov && !isSel && !n.is_self && (
+                <circle cx={n.proj.x} cy={n.proj.y} r={r + 6}
+                  fill="none" stroke="#FFC857" strokeWidth="2" opacity="0.85" />
+              )}
               {n.bridge && (
                 <circle cx={n.proj.x} cy={n.proj.y} r={r + 2}
                   fill="none" stroke="#E8B57A" strokeWidth="1.4" opacity="0.85" />
@@ -500,7 +588,7 @@ export function GraphView({ data, dark = false, selected, onSelect, onSelectEdge
         })}
       </svg>
 
-      {hover && projById[hover] && !selected && (
+      {hover && projById[hover] && hover !== selected && (
         <NodeTooltip node={projById[hover]} dark={dark} />
       )}
 

@@ -17,6 +17,7 @@ import platform
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 
 IS_WINDOWS = sys.platform.startswith("win")
@@ -101,31 +102,72 @@ def _is_wxid_dir(p: Path) -> bool:
     return p.is_dir() and p.name.startswith("wxid_") and (p / "db_storage").exists()
 
 
+def _safe_listdir(p: Path, timeout_s: float = 1.5) -> Optional[list[Path]]:
+    """Listdir with a thread-based timeout. macOS TCC can BLOCK iterdir on
+    ~/Library/Containers/<other-app> while waiting for user consent — without
+    ever raising. We run in a daemon thread and bail out on timeout."""
+    import threading
+    result: dict = {"entries": None, "err": None}
+    def worker():
+        try:
+            result["entries"] = list(p.iterdir())
+        except Exception as e:
+            result["err"] = e
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    t.join(timeout_s)
+    if t.is_alive():
+        # Hung on TCC — return None so caller knows to skip
+        return None
+    if result["err"] is not None:
+        return None
+    return result["entries"]
+
+
+_LAST_TCC_BLOCKED: bool = False  # set by discover_wechat_profiles
+
+
 def discover_wechat_profiles() -> list[WeChatProfile]:
-    """Find all WeChat accounts whose data is on disk."""
+    """Find all WeChat accounts whose data is on disk.
+
+    Returns a list of profiles. ALSO sets module-level `_LAST_TCC_BLOCKED`
+    when at least one candidate hit a TCC consent block — detect_capabilities
+    surfaces this so the UI can prompt the user for Full Disk Access.
+    """
+    global _LAST_TCC_BLOCKED
+    _LAST_TCC_BLOCKED = False
     candidates = (_windows_xwechat_search_paths() if IS_WINDOWS
                   else _mac_xwechat_search_paths() if IS_MAC
                   else [])
     profiles: list[WeChatProfile] = []
     plat = "windows" if IS_WINDOWS else "macos" if IS_MAC else "linux"
+    import re as _re
     for root in candidates:
-        if not root.exists():
+        try:
+            if not root.exists():
+                continue
+        except (PermissionError, OSError):
+            _LAST_TCC_BLOCKED = True
             continue
-        # On Windows: root contains wxid_xxx subdirs
-        # On Mac: similar layout under the container
-        for sub in root.iterdir():
-            if _is_wxid_dir(sub):
-                wxid_full = sub.name
-                # Strip trailing _xxxx hex suffix (echotrace convention)
-                import re
-                wxid_short = re.sub(r"_[0-9a-f]+$", "", wxid_full)
-                profiles.append(WeChatProfile(
-                    wxid=wxid_full,
-                    wxid_short=wxid_short,
-                    encrypted_root=sub / "db_storage",
-                    cache_root=sub,
-                    platform=plat,
-                ))
+        entries = _safe_listdir(root)
+        if entries is None:
+            _LAST_TCC_BLOCKED = True
+            continue  # TCC-blocked or hung
+        for sub in entries:
+            try:
+                if not _is_wxid_dir(sub):
+                    continue
+            except (PermissionError, OSError):
+                continue
+            wxid_full = sub.name
+            wxid_short = _re.sub(r"_[0-9a-f]+$", "", wxid_full)
+            profiles.append(WeChatProfile(
+                wxid=wxid_full,
+                wxid_short=wxid_short,
+                encrypted_root=sub / "db_storage",
+                cache_root=sub,
+                platform=plat,
+            ))
     return profiles
 
 
@@ -228,6 +270,67 @@ class Capabilities:
     has_wechat_installed: bool
     has_wechat_data: bool
     notes: list[str]
+    sip_enabled: Optional[bool] = None  # macOS only: None on Win, True/False on Mac
+    weixin_running: Optional[bool] = None  # whether the GUI process is alive
+    wechat_hardened: Optional[bool] = None  # macOS only: True if hardened runtime still set
+    tcc_blocked: Optional[bool] = None  # macOS only: True if ~/Library/Containers/<wechat> listdir blocks/fails
+                                         # — common for ad-hoc-signed .app without Full Disk Access
+
+
+def _check_sip_enabled() -> Optional[bool]:
+    """Mac only: True if SIP enabled, False if disabled, None on error/non-Mac."""
+    if not IS_MAC:
+        return None
+    try:
+        import subprocess as _sp
+        out = _sp.check_output(["csrutil", "status"], text=True, stderr=_sp.DEVNULL)
+        if "disabled" in out.lower():
+            return False
+        if "enabled" in out.lower():
+            return True
+    except Exception:
+        pass
+    return None
+
+
+def _check_wechat_hardened() -> Optional[bool]:
+    """Mac only: True if WeChat's main executable has the hardened-runtime flag
+    (which AMFI uses to gate task_for_pid), False if cleared, None on error.
+
+    We check the main exec (`Contents/MacOS/WeChat`), not the bundle wrapper —
+    that's what AMFI looks at when deciding whether to permit debugger attach.
+    """
+    if not IS_MAC:
+        return None
+    main_exec = Path("/Applications/WeChat.app/Contents/MacOS/WeChat")
+    if not main_exec.exists():
+        return None
+    try:
+        import subprocess as _sp
+        r = _sp.run(["codesign", "-d", "-v", str(main_exec)],
+                    capture_output=True, text=True, timeout=5)
+        blob = (r.stdout + "\n" + r.stderr).lower()
+        return "(runtime)" in blob
+    except Exception:
+        return None
+
+
+def _check_weixin_running() -> Optional[bool]:
+    """True if the WeChat/Weixin GUI process is alive."""
+    try:
+        import subprocess as _sp
+        if IS_MAC:
+            for name in ("WeChat", "Weixin"):
+                r = _sp.run(["pgrep", "-x", name], capture_output=True, text=True)
+                if r.returncode == 0 and r.stdout.strip():
+                    return True
+            return False
+        if IS_WINDOWS:
+            r = _sp.run(["tasklist", "/fi", "imagename eq Weixin.exe"], capture_output=True, text=True)
+            return "Weixin.exe" in r.stdout
+    except Exception:
+        return None
+    return None
 
 
 def detect_capabilities() -> Capabilities:
@@ -239,14 +342,38 @@ def detect_capabilities() -> Capabilities:
     # Decryption uses pure-Python (decrypt_py.py) when go_decrypt.dll is unavailable,
     # so it works on every platform — as long as the user has a SQLCipher key.
     can_decrypt = True
-    # Memory scan to extract the key automatically still needs Windows API (wx_key.dll).
-    # On Mac/Linux the user has to paste the key in manually for now.
-    can_extract = IS_WINDOWS
+
+    sip = _check_sip_enabled()
+    weixin_running = _check_weixin_running()
+    hardened = _check_wechat_hardened() if IS_MAC else None
+
+    # Memory scan to extract the key:
+    #   - Windows: always works via wx_key.dll
+    #   - macOS:
+    #       (a) ad-hoc-signed WeChat (hardened runtime cleared): task_for_pid permitted
+    #           regardless of SIP — this is the recommended path
+    #       (b) hardened-runtime WeChat: only works with SIP off (rare, requires reboot)
+    #   - Linux: WeChat has no Linux client
+    if IS_WINDOWS:
+        can_extract = has_install
+    elif IS_MAC:
+        # Either: WeChat is already ad-hoc signed → can attach right now
+        # Or:     SIP is off → can attach even with hardened runtime (after sudo)
+        can_extract = bool(weixin_running) and (hardened is False or sip is False)
+    else:
+        can_extract = False
     can_extract_img = IS_WINDOWS
 
     if IS_MAC:
-        notes.append("macOS 现在能直接解密微信数据库（纯 Python 实现）—— 但需要你手动提供 SQLCipher 密钥（64 位 hex）")
-        notes.append("自动抓密钥仍需 Windows DLL；在 Mac 上你可以走 lldb 或在另一台 Win 机器抓出来粘进来")
+        notes.append("macOS 能直接解密微信数据库（纯 Python 实现）。")
+        if _LAST_TCC_BLOCKED:
+            notes.append("Murmur 没有「完全磁盘访问」权限 —— 系统已阻止读取微信数据。请在「系统设置 → 隐私与安全性 → 完全磁盘访问」给 Murmur 打勾后重启 Murmur。")
+        if hardened is False:
+            notes.append("WeChat.app 已是 ad-hoc 签名（hardened runtime 已清掉）—— 可直接抓密钥。")
+        elif hardened is True:
+            notes.append("WeChat.app 还带 hardened runtime — 点「重签名」按钮后即可自动抓（不需要关 SIP）。")
+        if not weixin_running:
+            notes.append("微信未在运行 — 抓密钥需要先打开微信并登录、点开几个对话让 WCDB 派生 key。")
     if IS_LINUX:
         notes.append("Linux 不在当前支持范围（微信本身没有原生 Linux 客户端）")
     if not has_data:
@@ -256,12 +383,16 @@ def detect_capabilities() -> Capabilities:
 
     return Capabilities(
         can_decrypt_db=can_decrypt and has_data,
-        can_extract_key=can_extract and has_install,
+        can_extract_key=can_extract,
         can_extract_image_key=can_extract_img and has_install,
         can_open_native_folder=True,
         has_wechat_installed=has_install,
         has_wechat_data=has_data,
         notes=notes,
+        sip_enabled=sip,
+        weixin_running=weixin_running,
+        wechat_hardened=hardened,
+        tcc_blocked=_LAST_TCC_BLOCKED if IS_MAC else None,
     )
 
 
