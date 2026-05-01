@@ -1,46 +1,87 @@
 # Windows 上手指南
 
-> 全程约 2 分钟。需要：登录过的微信 + Python 3.11 + Node.js（开发模式）
+> 全程 **2-5 分钟**。**不需要装 Python / Node**（v0.2.0 的 MSI 自包含 Python runtime）。
 
 ---
 
-## 第一次启动 — 三步
+## 第一次启动 — 完整流程
 
-### 1. 装依赖（一次）
+### 0. 准备
 
-如果你有：
-- ✅ **Python 3.11+** （命令行 `python --version` 验证）
-- ✅ **Node.js 18+** （`node --version`）
+确认你的微信状态：
 
-直接跳到第 2 步。否则装一下：
-- Python: https://www.python.org/downloads/ （**勾选 Add Python to PATH**）
-- Node: https://nodejs.org/ （选 LTS）
+- ✅ **微信 4.x 已安装并登录过** —— Murmur 不会替你装微信
+- ✅ **此刻微信正在运行**（任务栏看得到，或者托盘里）—— 这一步很关键，下面解释
 
-### 2. 下载 + 解压
+不需要装任何东西。下面这些都是**可选**的：
 
-从 [Releases](https://github.com/sgaofen/murmur/releases) 下载：
-- **方式 A（推荐）**: `Murmur_x.x.x_x64-setup.exe` — 双击安装，桌面会有 Murmur 图标
-- **方式 B（开发者）**: 克隆源码 `git clone https://github.com/sgaofen/murmur.git`
+- Python / Node — 不需要（除非走开发模式）
+- Claude Code / Codex CLI — 想用 AI 关系档案才装
+- faster-whisper — 想转语音消息才装
 
-### 3. 运行
+### 1. 下载 + 装
 
-**方式 A**: 双击桌面 Murmur 图标即可。
+去 [Releases](https://github.com/sgaofen/murmur/releases/latest) 下：
 
-**方式 B**: 进项目根目录，双击 `start-windows.bat`。
+- **`Murmur_x.x.x_x64-setup.exe`** （推荐，约 22 MB）—— NSIS 安装器，双击装
+- 或 `Murmur_x.x.x_x64_en-US.msi` —— MSI 装包，IT 部署用
 
-第一次会自动 `pip install` + `npm install`，需要等 ~1 分钟联网下载依赖。
+> **避坑**：MSI 在某些 Win11 上装出 1603 错（Tauri MSI 已知问题），用 NSIS .exe 更稳。
+
+装完桌面 / 开始菜单会有「Murmur」图标，安装路径 `~/AppData/Local/Murmur/`。
+
+### 2. 启动 Murmur
+
+双击图标。第一次启动会走 onboarding：
+
+1. **检测系统**（自动）—— 找到你的微信安装位置 + 数据文件
+2. **欢迎页** —— 按「开始」
+3. **诊断结果** —— 你会看到几个 ✓：微信已安装、有数据、能抓 key
+
+### 3. 抓密钥 —— Win 路径的关键
+
+> Win 用 `wx_key.dll` 注入 hook 到正在跑的 Weixin.exe。Hook 等的是 **登录事件**：你下次登录微信时它会捕获主 key。
+
+Murmur 弹出引导 **「请按顺序做」**：
+
+1. **保持微信开着**（已登录状态）—— 别关
+2. 点 **「开始抓密钥」** —— Murmur 把 hook 装到当前 Weixin.exe 进程
+3. 看到 **「等待登录事件」** 提示后（通常 2-3 秒）：
+   - **去微信里手动「退出登录」**
+   - **再扫码 / 自动登录回来一次**（之前的 token 通常免密，几秒搞定）
+4. Hook 捕获主 key（一次成功）→ Murmur 自动保存到 `~/.murmur/config.json`
+
+**为什么要登出再登入？**因为 hook 等的是 WeChat 登录时把 key 派生到内存的瞬间。如果 WeChat 一直开着没动过，那个内存窗口已经过去了，hook 抓不到。
+
+### 4. 解密（自动）
+
+抓到 key 后 Murmur 自动跑 `go_decrypt.dll` 解密所有 14+ 个 SQLCipher v4 数据库到：
+
+```
+~/Documents/Murmur/decrypted/<wxid>/
+```
+
+5 年的微信数据约 30 秒 - 2 分钟（go_decrypt.dll 是 C 速度，比纯 Python 快 10x）。
+
+### 5. 进主界面
+
+完成。你应该看到首页年代记 + 朋友卡片。
 
 ---
 
-## 引导流程（自动）
+## 主界面用法速查
 
-1. **检测系统** — Murmur 自动找你的微信安装位置 + 数据文件
-2. **抓密钥** — 如果是首次：
-   - 点 "开始（30 秒）"
-   - **微信会自动重启** — 在弹出的微信窗口里点「登录」
-   - 30 秒内你能看到 "✓ 一切就绪"
-3. **解密** — 自动用 `go_decrypt.dll` 解密所有数据库到 `~/Documents/Murmur/decrypted/`
-4. **进入主界面**
+| 想看 | 怎么进 |
+|---|---|
+| **首页年代记** | 启动后默认页 —— 月度热度曲线 / Top 朋友 / 总览 |
+| **朋友档案** | 首页朋友卡片 → 点开 |
+| **离线信号矩阵** | 朋友档案右栏 —— 关系层级 / 持续年 / 线下证据 / 朋友圈双向 / 深夜比 / 通话次数（全离线） |
+| **关系网络** | 顶部 chrome 「🌌 关系网」按钮 —— 3D 旋转图，点节点看 mini 关系网，点连线看朋友间互动证据 |
+| **AI 关系档案** | 朋友档案 → 「📖 让 claude/codex 分析」（需先装 CLI）|
+| **批量分析关系** | 关系网页面右上「🤖 批量分析关系」—— 一次跑完 Top 10/20/40 对朋友间的 AI 关系档案 |
+| **双人年代记** | 朋友档案 → 「💑 双人年代记」 |
+| **离线表格视图** | 首页顶部「📊 表格」—— 多维信号矩阵，可导出 CSV |
+| **隐私模式** | 右下角 🔓 按钮 —— 真名变「朋友 AB」「群 1」，录视频用 |
 
 ---
 
@@ -48,67 +89,127 @@
 
 | 内容 | 路径 |
 |---|---|
-| 解密后的微信数据库 | `~/Documents/Murmur/decrypted/wxid_xxx/` |
+| 解密后的 SQLite DB | `~/Documents/Murmur/decrypted/<wxid>/` |
 | AI 分析报告 | `~/Desktop/Murmur/agent_reports/{friends,pairs}/` |
-| 语音转写 | `~/Desktop/Murmur/voice_transcripts/{wxid}/` |
-| 缓存（图统计等）| `~/Documents/Murmur/cache/` |
-| SQLCipher 密钥 | `~/.murmur/config.json`（明文，**机密**）|
+| 缓存（图统计、首页摘要等）| `~/Documents/Murmur/cache/` |
+| **SQLCipher 主密钥** | `~/.murmur/config.json` （明文 64-hex，**机密**）|
+| 后端日志 | `~/Documents/Murmur/logs/{tauri-shell,serve}.log` |
 
-**全本地，不联网。** 如果不想留任何痕迹，删除上面所有目录即可。
+**完全清掉痕迹**：
+
+```powershell
+Remove-Item -Recurse -Force "$env:USERPROFILE\.murmur"
+Remove-Item -Recurse -Force "$env:USERPROFILE\Documents\Murmur"
+Remove-Item -Recurse -Force "$env:USERPROFILE\Desktop\Murmur"
+```
+
+加上从开始菜单卸载 Murmur，所有痕迹都没了。
 
 ---
 
-## 可选 AI 增强
+## 可选：装 AI CLI
 
-想看 AI 写的关系档案？装其中一个：
+想看 AI 写的关系档案 / 用「批量分析关系」功能，装其中一个：
 
 ```powershell
-# Claude Code（Anthropic）
+# Claude Code（推荐）
 npm install -g @anthropic-ai/claude-code
 
-# 或 Codex CLI（OpenAI）
+# 或 Codex CLI
 npm install -g @openai/codex
 ```
 
-第一次跑 `claude` 或 `codex` 会让你登录账号。装好后 Murmur 会自动检测，每个朋友档案页有「🤖 让 claude 分析」按钮。
+第一次跑 `claude` 或 `codex` 命令会让你登录账号 / 设 API key。装好后 Murmur 自动检测，每个朋友档案页 + 关系网批量按钮会自动可用。
 
-**注意**：用 AI 分析时，对话样本（每个朋友最多 80 条消息）会上传到 Anthropic / OpenAI 服务器（这是 AI CLI 的正常行为，与 Murmur 无关）。介意的话不装就行，离线信号矩阵也能看出关系层级。
-
----
-
-## 可选语音转写
-
-```powershell
-pip install faster-whisper
-winget install Gyan.FFmpeg
-```
-
-然后 `python cli\transcribe_voice.py` 把已有的 mp3 转成文字。约 30-60 分钟（CPU）/ 5 分钟（GPU）。
+**隐私提示**：用 AI 分析时，对话样本（每个朋友 ≤80 条）会经 CLI 上传到 Anthropic / OpenAI 服务器。介意的话不装就行 —— 离线信号矩阵已经能看出 70% 的关系深度。
 
 ---
 
 ## 故障排除
 
-### "找不到微信数据"
-- 确认你登录过微信
-- Murmur 会找：`D:/Documents/xwechat_files`、`~/Documents/xwechat_files`、`~/OneDrive/Documents/xwechat_files`
-- 如果你的微信数据在别的盘，设环境变量：`set MURMUR_WECHAT_ROOT=E:/path/to/xwechat_files`
+### Q：onboarding 一直「等待登录事件」抓不到 key
 
-### "抓密钥失败 timeout"
-- 微信版本变了，wx_key.dll 可能不兼容
-- 临时方案：手动从内存抓 key 然后粘贴进 onboarding 的「Mac 模式」（Win 上也能用粘贴）
+**最常见原因**：你点了「开始」之后**没去微信里登出再登入**。
 
-### "Failed to fetch / 连接错误"
-- 后端 etcli serve 死了
-- 重启：关闭所有 cmd 窗口，重新双击 `start-windows.bat`
+复盘：Win 上 hook 等的是登录事件。如果 WeChat 已经登录在跑、你只是放着不动，hook 永远不触发。
 
-### 端口 9100 被占用
-- 改 `cli/etcli.py serve --port 9101` 然后改 `app/.env` 加 `VITE_ETCLI_URL=http://localhost:9101`
+**修法**：在等待页保持开着，去微信 → 我 → 设置 → 退出登录 → 重新扫码 / 自动登录 → 回 Murmur，30 秒内会看到 ✓。
+
+### Q：「后端没起来 / Failed to fetch」
+
+后端 etcli.exe 死了。看日志：
+
+```powershell
+Get-Content "$env:USERPROFILE\Documents\Murmur\logs\serve.log" -Tail 30
+Get-Content "$env:USERPROFILE\Documents\Murmur\logs\tauri-shell.log"
+```
+
+最简单：完全退出 Murmur（任务管理器看），重新打开。
+
+### Q：Murmur 装上了但启动后白屏
+
+99% 是 etcli.exe 启动失败。看 `tauri-shell.log` 里：
+
+- `etcli located: ...` 后面跟着 `spawn err: ...` —— PyInstaller bundle 损坏，重装一次
+- `locate_etcli_exe FAILED` —— MSI 没把后端装进去（重新下 .exe 装）
+
+### Q：MSI 装出 1603 错
+
+Tauri MSI 在某些 Win11 已知不稳。下 NSIS `.exe` 替代。
+
+### Q：找不到微信数据
+
+Murmur 默认找：
+- `D:/Documents/xwechat_files/`
+- `~/Documents/xwechat_files/`
+- `~/OneDrive/Documents/xwechat_files/`
+
+如果你的微信数据在别处，设环境变量：
+
+```powershell
+[Environment]::SetEnvironmentVariable("MURMUR_WECHAT_ROOT", "E:/path/to/xwechat_files", "User")
+```
+
+然后重启 Murmur。
+
+### Q：抓 key 后解密了一些 DB，但有些朋友打不开
+
+不太可能 —— Win 是单 master key，要么全解开要么一个都没解开。如果真出现，先看 `serve.log` 末尾报错。
+
+### Q：端口 9100 被占用
+
+Murmur 写死 9100。如果有别的服务占用：
+
+```powershell
+# 找占用方
+Get-NetTCPConnection -LocalPort 9100 -State Listen
+# 看 OwningProcess，决定要不要 kill
+```
 
 ---
 
 ## 隐私模式（录视频用）
 
-右下角有个「🔓 隐私模式：关」按钮。点一下变「🔒 开」，所有朋友名变成「朋友 AB」「朋友 CD」格式（按 wxid 哈希稳定映射），群名变成「群 1」「群 5」等。
+右下角浮动按钮「🔓 隐私模式：关」—— 点一下变 **「🔒 开」**：
 
-适合录演示视频、截图、给朋友看不暴露具体人。
+- 朋友显示名 → 「朋友 AB」「朋友 CD」（按 wxid 哈希稳定映射，刷新不变）
+- 群名 → 「群 1」「群 5」
+- wxid → 「wxid_NNNN」短哈希
+
+适合录演示视频、截图发小红书、给朋友看不暴露真实联系人。
+
+> 注意：AI 报告 `.md` 里**不会自动脱敏**（已经写到磁盘了），只在 UI 显示时遮蔽。
+
+---
+
+## 进阶：开发模式
+
+想改代码 / 调试，从源码跑：
+
+```powershell
+git clone https://github.com/sgaofen/murmur.git
+cd murmur
+.\start-windows.bat
+```
+
+需要：Python 3.11+ + Node.js 18+。第一次会自动 `pip install -r requirements.txt` + `npm install`，约 1 分钟联网下载。
