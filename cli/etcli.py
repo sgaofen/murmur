@@ -3085,10 +3085,12 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             if pid:
                 try:
                     if sys.platform.startswith("win"):
-                        # tasklist
+                        # tasklist returns "<exe>","<pid>",...  Check that ANY exe with this PID exists
+                        # (could be python.exe in dev mode, or etcli.exe in PyInstaller bundle).
                         r = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
-                                            capture_output=True, text=True, encoding="utf-8")
-                        running = "python" in (r.stdout or "").lower()
+                                            capture_output=True, text=True, encoding="utf-8", errors="replace")
+                        out = (r.stdout or "").lower()
+                        running = ("python" in out) or ("etcli" in out)
                     else:
                         os.kill(pid, 0)
                         running = True

@@ -193,12 +193,7 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
     return () => { stop = true; };
   }, [batch]);
 
-  async function startGraphBatch(top_pairs: number) {
-    if (agents.length === 0) {
-      alert('没检测到本地 claude / codex CLI。\n\n安装其一：\n  npm install -g @anthropic-ai/claude-code\n  npm install -g @openai/codex');
-      return;
-    }
-    const cli = agents[0].cli as 'claude' | 'codex';
+  async function startGraphBatch(top_pairs: number, cli: 'claude' | 'codex') {
     try {
       const r = await startBatch({ cli, mode: 'pairs-graph', top: 0, top_pairs });
       if (!r.ok || !r.pid || !r.log_path) {
@@ -991,11 +986,16 @@ function BatchAnalysisPanel({
   agents: LocalAgent[];
   batch: { pid: number; log_path: string } | null;
   status: { running: boolean; n_friends: number; n_pairs: number; log_tail: string } | null;
-  onLaunch: (top_pairs: number) => void;
+  onLaunch: (top_pairs: number, cli: 'claude' | 'codex') => void;
   onClose: () => void;
 }) {
   const running = !!batch && !!status?.running;
   const done = !!batch && status && !status.running;
+  const claudeAgent = agents.find(a => a.cli === 'claude');
+  const codexAgent = agents.find(a => a.cli === 'codex');
+  const [selectedCli, setSelectedCli] = useState<'claude' | 'codex'>(
+    claudeAgent ? 'claude' : codexAgent ? 'codex' : 'claude'
+  );
   return (
     <div style={{
       position: 'absolute', top: 64, right: 28, zIndex: 7, width: 380,
@@ -1025,17 +1025,25 @@ function BatchAnalysisPanel({
               borderRadius: 8, fontSize: 12, lineHeight: 1.6,
             }}>
               没装 claude / codex CLI，AI 分析跑不了。装其一：<br/>
-              <code style={{ background: 'rgba(0,0,0,0.2)', padding: '1px 5px', borderRadius: 3 }}>npm install -g @anthropic-ai/claude-code</code>
+              <code style={{ background: 'rgba(0,0,0,0.2)', padding: '1px 5px', borderRadius: 3 }}>npm install -g @anthropic-ai/claude-code</code><br/>
+              <code style={{ background: 'rgba(0,0,0,0.2)', padding: '1px 5px', borderRadius: 3 }}>npm install -g @openai/codex</code>
             </div>
           ) : (
             <>
+              <div style={{ fontSize: 11, color: dark ? 'rgba(244,236,218,0.55)' : 'rgba(26,43,74,0.55)', marginBottom: 6 }}>
+                选 AI（已检测到 {agents.length} 个）：
+              </div>
+              <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
+                <CliPick label="claude" sub="Anthropic" available={!!claudeAgent} selected={selectedCli === 'claude'} onClick={() => setSelectedCli('claude')} dark={dark} />
+                <CliPick label="codex" sub="OpenAI" available={!!codexAgent} selected={selectedCli === 'codex'} onClick={() => setSelectedCli('codex')} dark={dark} />
+              </div>
               <div style={{ fontSize: 11, color: dark ? 'rgba(244,236,218,0.55)' : 'rgba(26,43,74,0.55)', marginBottom: 8 }}>
-                用本地 <strong>{agents[0].cli}</strong> 跑。已有报告会跳过（除非删掉重新跑）。
+                已有报告自动跳过；想全部重跑去 Reports 页面删 pairs/ 目录。
               </div>
               <div style={{ display: 'grid', gap: 8 }}>
-                <BatchOption label="Top 10 对" sub="约 10 分钟" onClick={() => onLaunch(10)} />
-                <BatchOption label="Top 20 对" sub="约 20 分钟" onClick={() => onLaunch(20)} primary />
-                <BatchOption label="Top 40 对" sub="约 40 分钟" onClick={() => onLaunch(40)} />
+                <BatchOption label="Top 10 对" sub="约 10 分钟" onClick={() => onLaunch(10, selectedCli)} />
+                <BatchOption label="Top 20 对" sub="约 20 分钟" onClick={() => onLaunch(20, selectedCli)} primary />
+                <BatchOption label="Top 40 对" sub="约 40 分钟" onClick={() => onLaunch(40, selectedCli)} />
               </div>
             </>
           )}
@@ -1086,6 +1094,24 @@ function BatchAnalysisPanel({
         </div>
       )}
     </div>
+  );
+}
+
+function CliPick({ label, sub, available, selected, onClick, dark }: {
+  label: string; sub: string; available: boolean; selected: boolean; onClick: () => void; dark: boolean;
+}) {
+  return (
+    <button onClick={available ? onClick : undefined} disabled={!available} style={{
+      all: 'unset', flex: 1, cursor: available ? 'pointer' : 'not-allowed',
+      padding: '8px 10px', textAlign: 'center', borderRadius: 6,
+      background: selected ? 'var(--et-orange)' : (dark ? 'rgba(244,236,218,0.08)' : 'rgba(26,43,74,0.05)'),
+      color: selected ? '#fff' : (available ? 'inherit' : (dark ? 'rgba(244,236,218,0.4)' : 'rgba(26,43,74,0.4)')),
+      border: selected ? 'none' : `0.5px solid ${dark ? 'rgba(244,236,218,0.18)' : 'rgba(26,43,74,0.15)'}`,
+      opacity: available ? 1 : 0.55,
+    }}>
+      <div style={{ fontWeight: 600, fontSize: 12 }}>{label}</div>
+      <div style={{ fontSize: 10, opacity: 0.75, marginTop: 1 }}>{available ? sub : '未装'}</div>
+    </button>
   );
 }
 
