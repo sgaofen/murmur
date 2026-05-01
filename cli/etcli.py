@@ -2960,7 +2960,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             # Run the decrypt pipeline; dispatches via etcli sub-task helper (frozen vs dev aware)
             t0 = _time.time()
             r = subprocess.run(_spawn_etcli_args("refresh"),
-                               capture_output=True, text=True, encoding="utf-8")
+                               capture_output=True, text=True, encoding="utf-8", errors="replace")
             dt = round((_time.time() - t0) * 1000)
             ok = r.returncode == 0
             # Reload store + flush every cache so the new data shows immediately
@@ -3492,7 +3492,9 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 if auto_restart:
                     extra.append("--auto-restart")
                 cmd = _spawn_etcli_args("extract-key", *extra)
-                r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+                # errors="replace" so CP936/GBK output (taskkill, registry strings, Chinese paths)
+                # doesn't crash the reader thread with UnicodeDecodeError on bytes like 0xb4.
+                r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
                 stdout = r.stdout or ""
             ms = round((_time.time() - t0) * 1000)
             # Parse output. Two flavours:
