@@ -27,6 +27,7 @@ export interface GraphEdge {
   source: string;
   target: string;
   type: 'private' | 'co_group' | 'co_active' | 'mention' | 'dm_inferred' | 'mutual_reply' | 'close_pair' | 'moments_cross';
+  raw_weight?: number;
   weight: number;
   dashed?: boolean;
   meta?: Record<string, any>;
@@ -507,14 +508,17 @@ export function GraphView({ data, dark = false, selected, selectedEdge = null, o
           const widthMul = isSelectedEdge ? 3.4 : (isHoverEdge ? 2.4 : (isHighlight ? 1.8 : 1));
           const edgeStroke = (isHoverEdge || isSelectedEdge) ? '#FFC857' : s.stroke;
           const edgeFilter = isSelectedEdge ? 'url(#edge-selected-glow)' : undefined;
+          const edgeDash = isSelectedEdge ? undefined : (s.dash || undefined);
           if (isSelfEdge) {
+            const strokeWidth = (s.width * Math.max(0.4, e.weight)) * widthMul;
             return (
               <line key={i}
                 x1={a.proj.x} y1={a.proj.y} x2={b.proj.x} y2={b.proj.y}
                 stroke={edgeStroke}
                 strokeOpacity={op}
-                strokeWidth={(s.width * Math.max(0.4, e.weight)) * widthMul}
-                strokeDasharray={s.dash || undefined}
+                strokeWidth={isSelectedEdge ? Math.max(strokeWidth, 5.5) : strokeWidth}
+                strokeDasharray={edgeDash}
+                strokeLinecap="round"
                 filter={edgeFilter} />
             );
           }
@@ -529,13 +533,14 @@ export function GraphView({ data, dark = false, selected, selectedEdge = null, o
           const cxFromMid = mx - W / 2, cyFromMid = my - H / 2;
           if (nx * cxFromMid + ny * cyFromMid < 0) { nx = -nx; ny = -ny; }
           const cx = mx + nx * bow, cy = my + ny * bow;
+          const strokeWidth = (s.width * Math.max(0.5, e.weight)) * (isSelectedEdge ? 3.6 : (isHoverEdge ? 2.6 : (isHighlight ? 2 : 1)));
           return (
             <path key={i}
               d={`M${a.proj.x},${a.proj.y} Q${cx},${cy} ${b.proj.x},${b.proj.y}`}
               stroke={edgeStroke}
               strokeOpacity={op}
-              strokeWidth={(s.width * Math.max(0.5, e.weight)) * (isSelectedEdge ? 3.6 : (isHoverEdge ? 2.6 : (isHighlight ? 2 : 1)))}
-              strokeDasharray={s.dash || undefined}
+              strokeWidth={isSelectedEdge ? Math.max(strokeWidth, 5.5) : strokeWidth}
+              strokeDasharray={edgeDash}
               fill="none" strokeLinecap="round"
               filter={edgeFilter} />
           );

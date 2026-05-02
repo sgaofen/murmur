@@ -125,6 +125,7 @@ function layoutNodes(graph: BackendGraph): GraphData {
          : e.type === 'mention' ? 'mention'
          : e.type === 'moments_cross' ? 'moments_cross'
          : 'co_group') as GraphEdge['type'],
+    raw_weight: e.weight,
     weight: Math.min(1, Math.max(0.05, e.weight / 30)),
     moments_cross: e.moments_cross,
     mention_count: e.mention_count,
@@ -241,7 +242,6 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
   }
   function selectEdge(edge: GraphEdge | null) {
     setSelectedEdge(edge);
-    if (edge) setSelected(null);
   }
   function nameOf(id: string): string {
     const real = backendNodes.find(n => n.id === id)?.name || id;
@@ -353,7 +353,7 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
         />
       )}
       {/* Side panel for selected node */}
-      {selectedNode && !selectedNode.is_self && (
+      {selectedNode && !selectedNode.is_self && !selectedEdge && (
         <SidePanel node={selectedNode} onClose={() => setSelected(null)}
                    onOpenFriend={() => onOpenFriend?.(selectedNode.id)}
                    onSelectPeer={(peerWxid) => {
@@ -733,6 +733,7 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
   const isSelfEdge = edge.source === 'self' || edge.target === 'self';
   const meta = EDGE_LABEL[edge.type] || EDGE_LABEL.co_group;
   const otherName = edge.source === 'self' ? bName : aName;
+  const rawWeight = Math.max(0, Math.round(edge.raw_weight ?? edge.weight));
 
   useEffect(() => {
     setPack(null);
@@ -856,13 +857,13 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
         <div style={{ marginTop: 18, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
           {/* Always-visible interaction breakdown — every dimension at once */}
           {isSelfEdge && edge.type === 'private' && (
-            <Stat label="你们的私聊消息" value={`${edge.weight} 条`} />
+            <Stat label="你们的私聊消息" value={`${rawWeight.toLocaleString()} 条`} />
           )}
-          {!isSelfEdge && edge.type === 'mutual_reply' && (
-            <Stat label="群里互相搭话" value={`${edge.weight} 次`} />
+          {!isSelfEdge && edge.type === 'co_active' && (
+            <Stat label="群里互相搭话" value={`${rawWeight.toLocaleString()} 次`} />
           )}
-          {!isSelfEdge && edge.type !== 'mutual_reply' && edge.weight > 1 && (
-            <Stat label="互动信号强度" value={`${Math.round(edge.weight)}`} />
+          {!isSelfEdge && edge.type !== 'co_active' && rawWeight > 1 && (
+            <Stat label="互动信号强度" value={`${rawWeight.toLocaleString()}`} />
           )}
           {!!edge.moments_cross && (
             <Stat label="朋友圈互动" value={`${edge.moments_cross} 次`} />

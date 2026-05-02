@@ -152,12 +152,31 @@ function YearCard({ y, maxMsgs, friendName }: { y: YearData; maxMsgs: number; fr
         <Cell label="深夜聊天" value={`${y.late_night_pct}%`} sub={`${y.late_night_msgs} 条 23-4 点`} />
       </div>
 
+      {!!y.top_words?.length && (
+        <div style={{ marginTop: 16 }}>
+          <div className="et-eyebrow" style={{ fontSize: 9, color: accent }}>这一年的高频词</div>
+          <div style={{ marginTop: 8, display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+            {y.top_words.slice(0, 10).map(w => (
+              <span key={w.word} style={{
+                display: 'inline-flex', alignItems: 'baseline', gap: 5,
+                padding: '5px 9px', borderRadius: 999,
+                background: 'var(--et-paper-2)', border: '0.5px solid var(--et-line-2)',
+                color: 'var(--et-ink-soft)', fontSize: 12,
+              }}>
+                <span>{w.word}</span>
+                <span className="et-num" style={{ fontSize: 10, color: 'var(--et-mute)' }}>{w.count}</span>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Signature quote */}
       {y.signature && (
         <div style={{ marginTop: 22, padding: '14px 18px',
           background: 'var(--et-paper-2)', borderLeft: `2px solid ${accent}`,
           borderRadius: '0 8px 8px 0' }}>
-          <div className="et-eyebrow" style={{ fontSize: 9, color: accent }}>这一年的代表对话</div>
+          <div className="et-eyebrow" style={{ fontSize: 9, color: accent }}>这一年的代表片段</div>
           <div className="et-serif" style={{ marginTop: 6, fontSize: 14.5, lineHeight: 1.65,
             color: 'var(--et-ink-soft)' }}>
             「{y.signature.text}」
@@ -165,6 +184,11 @@ function YearCard({ y, maxMsgs, friendName }: { y: YearData; maxMsgs: number; fr
           <div className="et-meta" style={{ marginTop: 6, fontSize: 10, color: 'var(--et-faint)' }}>
             — {y.signature.from} · {y.signature.date}
           </div>
+          {y.signature.reason && (
+            <div className="et-meta" style={{ marginTop: 4, fontSize: 10, color: 'var(--et-mute)' }}>
+              选择依据：{y.signature.reason}
+            </div>
+          )}
         </div>
       )}
 

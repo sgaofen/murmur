@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Avatar } from '../components/Avatar';
 import { MessageCard } from '../components/MessageCard';
 import { RingChart } from '../components/RingChart';
@@ -347,7 +347,7 @@ function ReportViewerOverlay({ relPath, friendName, onClose }: {
   }, [relPath]);
   return (
     <div onClick={onClose} style={{
-      position: 'absolute', inset: 0, zIndex: 30,
+      position: 'fixed', inset: 0, zIndex: 1000,
       background: 'rgba(20,24,42,0.55)',
       display: 'flex', justifyContent: 'center', alignItems: 'flex-start',
       paddingTop: 40, paddingBottom: 40, overflowY: 'auto',
@@ -360,7 +360,7 @@ function ReportViewerOverlay({ relPath, friendName, onClose }: {
         boxShadow: 'var(--et-shadow-3)',
         padding: '32px 44px', position: 'relative',
       }}>
-        <button onClick={onClose} style={{
+        <button type="button" onClick={(e) => { e.stopPropagation(); onClose(); }} style={{
           all: 'unset', cursor: 'pointer', position: 'absolute', top: 14, right: 18,
           fontSize: 22, color: 'var(--et-mute)', lineHeight: 1, padding: 6,
         }}>×</button>
@@ -443,7 +443,7 @@ function MessagesDrawer({ open, friend, onClose }: { open: boolean; friend: Frie
 
   return (
     <div onClick={onClose} style={{
-      position: 'absolute', inset: 0, zIndex: 20,
+      position: 'fixed', inset: 0, zIndex: 1000,
       background: 'rgba(20,24,42,0.45)',
       display: 'flex', justifyContent: 'flex-end',
     }}>
@@ -451,7 +451,7 @@ function MessagesDrawer({ open, friend, onClose }: { open: boolean; friend: Frie
         width: 540, maxWidth: '92%',
         background: 'var(--et-paper)',
         boxShadow: 'var(--et-shadow-3)',
-        height: '100%', overflow: 'auto',
+        height: '100vh', overflow: 'auto',
         padding: '20px 24px',
       }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
@@ -459,7 +459,7 @@ function MessagesDrawer({ open, friend, onClose }: { open: boolean; friend: Frie
             <div className="et-eyebrow">完整聊天记录</div>
             <div className="et-h2" style={{ marginTop: 4, color: 'var(--et-ink)' }}>和 {displayName(friend.id, friend.name)} 的对话</div>
           </div>
-          <button onClick={onClose} style={{ all: 'unset', cursor: 'pointer', padding: 8, color: 'var(--et-mute)' }}>×</button>
+          <button type="button" aria-label="Close messages" onClick={(e) => { e.stopPropagation(); onClose(); }} style={{ all: 'unset', cursor: 'pointer', padding: 8, color: 'var(--et-mute)' }}>×</button>
         </div>
         {loading && <div className="et-meta" style={{ textAlign: 'center', padding: 40 }}>加载中…</div>}
         {!loading && msgs && (
@@ -661,7 +661,12 @@ function FriendTabs({ tab, setTab }: { tab: FriendTab; setTab: (t: FriendTab) =>
 }
 
 function ChatTabRedirect({ onOpen, friend }: { onOpen: () => void; friend: Friend }) {
-  useEffect(() => { onOpen(); }, [onOpen]);
+  const openedFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (openedFor.current === friend.id) return;
+    openedFor.current = friend.id;
+    onOpen();
+  }, [friend.id, onOpen]);
   return (
     <div style={{ padding: 60, textAlign: 'center' }}>
       <div className="et-meta">
