@@ -44,12 +44,12 @@
 ### 🪟 Windows
 **保持微信登录状态** → 启动 Murmur → onboarding 让你点「开始抓密钥」→ Hook 装到正在跑的 Weixin.exe → **你去微信里手动登出再登录一次** → Hook 捕获主 key → 自动解密 → 进主界面
 
-详见 **[Windows 上手指南](docs/ONBOARDING_WINDOWS.md)**。
+详见 **[Windows 上手指南](docs/ONBOARDING_WINDOWS.md)**。Windows 解密路线取舍见 **[Windows 解密路线研究](docs/WINDOWS_DECRYPTION_RESEARCH.md)**。
 
 ### 🍎 macOS
 启动 Murmur → onboarding 引导你给完全磁盘访问 + 给 WeChat 重签名 → **去 WeChat 里点 5+ 个对话 + 翻朋友圈**（让 WCDB 把 key 派生到内存）→ 回 Murmur 点「开始自动抓取」→ 系统弹密码框 → 扫内存匹配 14 个 DB 的 key → 自动解密 → 进主界面
 
-详见 **[macOS 上手指南](docs/ONBOARDING_MAC.md)**。
+下载后的拖拽安装与 Terminal 命令见 **[macOS Release 安装打开教程](docs/MAC_RELEASE_INSTALL.md)**；完整解密流程见 **[macOS 上手指南](docs/ONBOARDING_MAC.md)**。
 
 ---
 
