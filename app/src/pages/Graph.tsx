@@ -778,11 +778,20 @@ const EDGE_LABEL: Record<string, { label: string; tone: string }> = {
   moments_cross: { label: '朋友圈互动（不经你）', tone: '#D17545' },
 };
 
+function pairEvidenceErrorMessage(e: any): string {
+  const msg = e?.message || String(e);
+  if (msg.includes('no_direct_pair_evidence') || msg.includes('共同群/共同出现') || msg.includes('422')) {
+    return '这条线目前只有共群/共同出现等弱信号，还没有互相回复、名字提及或朋友圈互动这类直接证据。为避免分析串，暂不生成 AI 朋友间关系报告。';
+  }
+  return msg;
+}
+
 function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
   edge: GraphEdge; aName: string; bName: string; onClose: () => void;
   onOpenFriend?: (id: string) => void;
 }) {
   const [pack, setPack] = useState<string | null>(null);
+  const [packError, setPackError] = useState<string | null>(null);
   const [packLoading, setPackLoading] = useState(false);
   const [aiReport, setAIReport] = useState<{ available: boolean; path?: string; short?: string } | null>(null);
   const [showFullReport, setShowFullReport] = useState(false);
@@ -804,6 +813,7 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
   useEffect(() => {
     let cancelled = false;
     setPack(null);
+    setPackError(null);
     setAIReport(null);
     setFullReport(null);
     setShowFullReport(false);
@@ -831,7 +841,7 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
     setPackLoading(true);
     getPairPack(edge.source, edge.target)
       .then(r => { if (!cancelled) setPack(r.pack); })
-      .catch(() => { /* no pair pack available */ })
+      .catch(e => { if (!cancelled) setPackError(pairEvidenceErrorMessage(e)); })
       .finally(() => { if (!cancelled) setPackLoading(false); });
     findPairReport(edge.source, edge.target).then(r => { if (!cancelled) setAIReport(r); }).catch(() => { /* no saved pair report */ });
     return () => { cancelled = true; };
@@ -907,7 +917,7 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
         }
       }, 2000);
     } catch (e: any) {
-      setAnalyzeErr(e?.message || String(e));
+      setAnalyzeErr(pairEvidenceErrorMessage(e));
       setAnalyzing('error');
     }
   }
@@ -1120,6 +1130,15 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
           <div style={{ marginTop: 18 }}>
             <div className="et-eyebrow">关系证据 / 数据样本</div>
             {packLoading && <div className="et-meta" style={{ marginTop: 8 }}>正在拉取证据…</div>}
+            {packError && (
+              <div className="et-serif" style={{
+                marginTop: 8, padding: '12px 14px', borderRadius: 8,
+                background: 'var(--et-paper-2)', border: '0.5px dashed var(--et-line-2)',
+                fontSize: 13, lineHeight: 1.65, color: 'var(--et-mute)',
+              }}>
+                {packError}
+              </div>
+            )}
             {pack && (
               <article className="murmur-md" style={{
                 marginTop: 8, padding: '12px 14px', borderRadius: 8,
@@ -1163,7 +1182,7 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
                 background: 'var(--et-paper-2)', border: '0.5px dashed var(--et-line-2)',
               }}>
                 <div className="et-serif" style={{ fontSize: 13.5, color: 'var(--et-mute)', lineHeight: 1.6 }}>
-                  这对朋友还没让 AI 推断过。
+                  {packError || '这对朋友还没让 AI 推断过。'}
                 </div>
                 {analyzing === 'running' && (
                   <div style={{ marginTop: 10 }}>
@@ -1195,7 +1214,7 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
                     失败：{analyzeErr.slice(0, 120)}
                   </div>
                 )}
-                {analyzing !== 'running' && (
+                {!packError && analyzing !== 'running' && (
                   <div style={{ marginTop: 10, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                     {agents.length === 0 ? (
                       <span className="et-meta" style={{ color: 'var(--et-faint)', fontSize: 11 }}>

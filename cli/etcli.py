@@ -724,6 +724,73 @@ def _disk_clear() -> None:
         pass
 
 
+def _graph_cache_key(scope: str, min_private: int, recent_days: int,
+                     top_n: int, show_clusters: bool) -> str:
+    # v3 adds the direct-evidence gate for pair packs/reports. Keep it separate
+    # from older graph caches so stale co-group-only edges cannot pass as evidence.
+    return f"graph_v3:{scope}:{min_private}:{recent_days}:{top_n}:{show_clusters}"
+
+
+def get_relationship_graph_cached(store: EchoStore, *,
+                                  scope: str = "all",
+                                  min_private: int = 10,
+                                  recent_days: int = 365,
+                                  top_n: int = 600,
+                                  show_clusters: bool = False) -> dict:
+    ck = _graph_cache_key(scope, min_private, recent_days, top_n, show_clusters)
+    cached = _GRAPH_CACHE.get(ck)
+    if cached and (_time.time() - cached[0]) < _CACHE_TTL:
+        return cached[1]
+    disk = _disk_load(ck)
+    if disk and (_time.time() - disk["_ts"]) < _CACHE_TTL:
+        _GRAPH_CACHE[ck] = (disk["_ts"], disk["_payload"])
+        return disk["_payload"]
+    with _STORE_READ_LOCK:
+        graph = build_relationship_graph(
+            store, scope=scope, min_private=min_private,
+            recent_days=recent_days, top_n=top_n, show_clusters=show_clusters,
+        )
+    _GRAPH_CACHE[ck] = (_time.time(), graph)
+    _disk_save(ck, graph)
+    return graph
+
+
+def pair_direct_evidence(store: EchoStore, wxid_a: str, wxid_b: str) -> dict:
+    """Return direct A<->B evidence. Co-presence in groups alone is intentionally not enough."""
+    pair = {wxid_a, wxid_b}
+    graph = get_relationship_graph_cached(store, scope="all", top_n=600)
+    contacts = store.contacts()
+    ca = contacts.get(wxid_a)
+    cb = contacts.get(wxid_b)
+    direct_edges = []
+    weak_edges = []
+    for e in graph.get("edges", []):
+        if {e.get("source"), e.get("target")} != pair:
+            continue
+        if e.get("source") == "self" or e.get("target") == "self":
+            continue
+        et = e.get("type")
+        has_direct_meta = (e.get("mention_count") or 0) >= 1 or (e.get("moments_cross") or 0) >= 1
+        if et in {"mutual_reply", "mention", "moments_cross"} or has_direct_meta:
+            direct_edges.append(e)
+        else:
+            weak_edges.append(e)
+    return {
+        "ok": bool(direct_edges),
+        "a": wxid_a,
+        "b": wxid_b,
+        "name_a": (ca.display() if ca else wxid_a),
+        "name_b": (cb.display() if cb else wxid_b),
+        "direct_edges": direct_edges,
+        "weak_edges": weak_edges,
+        "message": (
+            "找到直接证据"
+            if direct_edges
+            else "没有找到直接关系证据；共同群/共同出现不能证明两人认识，已拒绝生成 AI 关系推断。"
+        ),
+    }
+
+
 def get_sns_signals_cached(store: EchoStore) -> dict:
     """Returns wxid → {you_liked_them, you_commented_them, they_liked_you, they_commented_you, they_posted_count}.
     Cached for 5 minutes since this scans 3896 timeline entries."""
@@ -3049,21 +3116,10 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             recent_days = int(qs.get("recent_days", [365])[0])
             top_n = int(qs.get("top_n", [100])[0])
             show_clusters = qs.get("show_clusters", ["false"])[0] != "false"
-            ck = f"graph_v2:{scope}:{min_private}:{recent_days}:{top_n}:{show_clusters}"
-            cached = _GRAPH_CACHE.get(ck)
-            if cached and (_time.time() - cached[0]) < _CACHE_TTL:
-                return self._send_json(cached[1])
-            disk = _disk_load(ck)
-            if disk and (_time.time() - disk["_ts"]) < _CACHE_TTL:
-                _GRAPH_CACHE[ck] = (disk["_ts"], disk["_payload"])
-                return self._send_json(disk["_payload"])
-            with _STORE_READ_LOCK:
-                payload = build_relationship_graph(
-                    self.store, scope=scope, min_private=min_private,
-                    recent_days=recent_days, top_n=top_n, show_clusters=show_clusters,
-                )
-            _GRAPH_CACHE[ck] = (_time.time(), payload)
-            _disk_save(ck, payload)
+            payload = get_relationship_graph_cached(
+                self.store, scope=scope, min_private=min_private,
+                recent_days=recent_days, top_n=top_n, show_clusters=show_clusters,
+            )
             return self._send_json(payload)
         if path == "/api/friend-mentions":
             top_n = int(qs.get("top_n", [50])[0])
@@ -3083,6 +3139,13 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             b = qs.get("b", [""])[0]
             if not a or not b:
                 return self._send_json({"error": "a and b required"}, 400)
+            evidence = pair_direct_evidence(self.store, a, b)
+            if not evidence["ok"]:
+                return self._send_json({
+                    "error": "no_direct_pair_evidence",
+                    "message": evidence["message"],
+                    "evidence": evidence,
+                }, 422)
             ck = "pairpack_v3_" + "__".join(sorted([a, b]))
             cached = _PAIR_PACK_CACHE.get(ck)
             if cached and (_time.time() - cached[0]) < _CACHE_TTL:
@@ -3365,15 +3428,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 if disk and (_time.time() - disk["_ts"]) < _CACHE_TTL:
                     _CONN_CACHE[wxid] = (disk["_ts"], disk["_payload"])
                     return self._send_json(disk["_payload"])
-                # Reuse the cached "all" graph if we already built it
-                ck_all = "graph_v2:all:10:365:600:False"
-                gcache = _GRAPH_CACHE.get(ck_all)
-                if gcache and (_time.time() - gcache[0]) < _CACHE_TTL:
-                    graph = gcache[1]
-                else:
-                    with _STORE_READ_LOCK:
-                        graph = build_relationship_graph(self.store, scope="all", top_n=600)
-                    _GRAPH_CACHE[ck_all] = (_time.time(), graph)
+                graph = get_relationship_graph_cached(self.store, scope="all", top_n=600)
                 connections = []
                 for e in graph["edges"]:
                     other = None
@@ -3668,6 +3723,14 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             b = opts.get("b")
             if not a or not b:
                 return self._send_json({"ok": False, "error": "a, b required"}, 400)
+            evidence = pair_direct_evidence(self.store, a, b)
+            if not evidence["ok"]:
+                return self._send_json({
+                    "ok": False,
+                    "error": evidence["message"],
+                    "code": "no_direct_pair_evidence",
+                    "evidence": evidence,
+                }, 422)
             agent = next((x for x in _detect_local_agents() if x["cli"] == cli_name), None)
             if not agent:
                 return self._send_json({"ok": False, "error": f"{cli_name} not installed"}, 404)
@@ -4419,6 +4482,22 @@ def build_pair_inference_pack(store: EchoStore, wxid_a: str, wxid_b: str,
         f"> 你是观察者。下方是关于这两个人的所有可证据，请推断**他们之间是什么关系**。\n",
     ]
 
+    evidence = pair_direct_evidence(store, wxid_a, wxid_b)
+    parts.append("## 直接证据门槛\n")
+    if evidence["ok"]:
+        parts.append("> 已找到至少一种直接证据，因此允许生成关系推断。直接证据包括：群内互相回复、你和一方聊到另一方、朋友圈互赞/互评。\n")
+        for e in evidence["direct_edges"][:6]:
+            bits = [f"类型={e.get('type')}", f"权重={e.get('weight')}"]
+            if e.get("mention_count"):
+                bits.append(f"提及={e.get('mention_count')}")
+            if e.get("shared_group_count"):
+                bits.append(f"共同群={e.get('shared_group_count')}")
+            if e.get("moments_cross"):
+                bits.append(f"朋友圈互动={e.get('moments_cross')}")
+            parts.append("- " + "；".join(bits))
+    else:
+        parts.append("> **没有直接证据。不要推断他们认识。** 如果你仍看到这个包，结论必须是「证据不足」。\n")
+
     # Mentions data. Always rescan this exact pair so long-tail friends are not missed
     # by the global top-N mention cache used for graph ranking.
     try:
@@ -5148,10 +5227,8 @@ def _run_server(args) -> int:
             return  # bootstrap mode — nothing to pre-warm
         try:
             t0 = _time.time()
-            for ck, scope, top_n in [
-                ("graph_v2:private:10:365:100:False", "private", 100),
-                ("graph_v2:all:10:365:600:False", "all", 600),
-            ]:
+            for scope, top_n in [("private", 100), ("all", 600)]:
+                ck = _graph_cache_key(scope, 10, 365, top_n, False)
                 disk = _disk_load(ck)
                 if disk:
                     _GRAPH_CACHE[ck] = (disk["_ts"], disk["_payload"])
