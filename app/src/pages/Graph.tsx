@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import { GraphView } from '../components/extras/GraphView';
 import type { GraphData, GraphNode, GraphEdge, GraphCluster } from '../components/extras/GraphView';
-import { getFriend, getPairPack, findPairReport, getReport, getFriendConnections, invokeAgent, getAgents, invokePairAgent, getPairStream, startBatch, getBatchStatus } from '../data/api';
-import type { LocalAgent } from '../data/api';
+import { API_BASE, getFriend, getPairPack, findPairReport, getReport, getFriendConnections, invokeAgent, getAgents, invokePairAgent, getPairStream, startBatch, getBatchStatus } from '../data/api';
+import type { BatchStatus, LocalAgent } from '../data/api';
 import type { FriendConnection } from '../data/api';
 import type { Friend, FriendStats } from '../data/types';
 import { mdToHtml, MURMUR_MD_CSS } from '../utils/markdown';
@@ -170,7 +170,7 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
   // Batch analysis state
   const [agents, setAgents] = useState<LocalAgent[]>([]);
   const [batch, setBatch] = useState<{ pid: number; log_path: string; pids?: number[]; log_paths?: string[] } | null>(null);
-  const [batchStatus, setBatchStatusState] = useState<{ running: boolean; n_friends: number; n_pairs: number; log_tail: string } | null>(null);
+  const [batchStatus, setBatchStatusState] = useState<BatchStatus | null>(null);
   const [batchPanelOpen, setBatchPanelOpen] = useState(false);
 
   // Load agents once
@@ -186,7 +186,9 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
         const s = await getBatchStatus(batch.pid, batch.log_path, batch.pids, batch.log_paths);
         setBatchStatusState(s);
         if (!s.running) return;
-      } catch {}
+      } catch {
+        // Keep polling; transient backend misses are expected while agents start.
+      }
       setTimeout(tick, 5000);
     };
     tick();
@@ -201,7 +203,14 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
         return;
       }
       setBatch({ pid: r.pid, log_path: r.log_path, pids: r.pids, log_paths: r.log_paths });
-      setBatchStatusState({ running: true, n_friends: 0, n_pairs: 0, log_tail: '启动中…' });
+      setBatchStatusState({
+        running: true,
+        n_friends: 0,
+        n_pairs: 0,
+        pairs_done: 0,
+        pairs_total: cli === 'both' ? top_pairs * 2 : top_pairs,
+        log_tail: '启动中…',
+      });
       setBatchPanelOpen(true);
     } catch (e: any) {
       alert('错误：' + (e?.message || e));
@@ -211,8 +220,7 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
   useEffect(() => {
     setLoading(true);
     setData(null);
-    const BASE = (import.meta.env?.VITE_ETCLI_URL as string) || 'http://127.0.0.1:9100';
-    fetch(`${BASE}/api/graph?scope=private&top_n=${topN}`)
+    fetch(`${API_BASE}/api/graph?scope=private&top_n=${topN}`)
       .then(r => r.json())
       .then((bg: BackendGraph) => {
         setBackendNodes(bg.nodes);
@@ -273,6 +281,7 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
         data={data}
         dark={dark}
         selected={selected}
+        selectedEdge={selectedEdge}
         onSelect={selectNode}
         onSelectEdge={selectEdge}
         autoRotate={autoRotate}
@@ -325,7 +334,7 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
               : (dark ? '#F4ECDA' : '#1A2B4A'),
             fontWeight: batch && batchStatus?.running ? 600 : 500,
           }} title="一次跑完关系网里所有重要朋友对的 AI 分析">
-            🤖 批量分析关系{batch && batchStatus?.running ? ` (${batchStatus.n_pairs} 已完成)` : ''}
+            🤖 批量分析关系{batch && batchStatus?.running ? ` (${batchStatus.pairs_done ?? batchStatus.n_pairs} 已完成)` : ''}
           </button>
           <button onClick={() => setDark(d => !d)} style={chromeBtn(dark)}>
             {dark ? '☼ 亮' : '☾ 暗'}
@@ -986,13 +995,22 @@ function BatchAnalysisPanel({
   dark: boolean;
   agents: LocalAgent[];
   batch: { pid: number; log_path: string; pids?: number[]; log_paths?: string[] } | null;
-  status: { running: boolean; n_friends: number; n_pairs: number; log_tail: string } | null;
+  status: BatchStatus | null;
   onLaunch: (top_pairs: number, cli: 'claude' | 'codex' | 'both', parallel: number) => void;
   onReset: () => void;
   onClose: () => void;
 }) {
   const running = !!batch && !!status?.running;
   const done = !!batch && status && !status.running;
+  const friendDone = status?.friends_done ?? status?.n_friends ?? 0;
+  const friendTotal = status?.friends_total ?? 0;
+  const pairDone = status?.pairs_done ?? status?.n_pairs ?? 0;
+  const pairTotal = status?.pairs_total ?? 0;
+  const friendProgress = friendTotal > 0 ? `${friendDone}/${friendTotal}` : String(friendDone);
+  const pairProgress = pairTotal > 0 ? `${pairDone}/${pairTotal}` : String(pairDone);
+  const issueText = status && (status.crashed || (status.failures || 0) > 0 || (status.skipped || 0) > 0)
+    ? ` · ${status.crashed ? '异常退出 · ' : ''}失败 ${status.failures || 0} · 跳过 ${status.skipped || 0}`
+    : '';
   const claudeAgent = agents.find(a => a.cli === 'claude');
   const codexAgent = agents.find(a => a.cli === 'codex');
   const [selectedCli, setSelectedCli] = useState<'claude' | 'codex' | 'both'>(
@@ -1072,9 +1090,9 @@ function BatchAnalysisPanel({
           }}>
             <div style={{ fontSize: 18, animation: 'spin 1.4s linear infinite' }}>⏳</div>
             <div>
-              <div style={{ fontWeight: 600, fontSize: 13 }}>正在跑 · {status.n_pairs} 对完成</div>
+              <div style={{ fontWeight: 600, fontSize: 13 }}>正在跑 · 朋友 {friendProgress} · 朋友间报告 {pairProgress}{issueText}</div>
               <div style={{ fontSize: 11, color: dark ? 'rgba(244,236,218,0.65)' : 'rgba(26,43,74,0.65)' }}>
-                关掉这个面板没事，跑在后台
+                关掉这个面板没事，跑在后台{status.last_stage ? ` · ${status.last_stage}` : ''}
               </div>
             </div>
           </div>
@@ -1091,21 +1109,21 @@ function BatchAnalysisPanel({
         <div>
           <div style={{
             padding: '10px 12px',
-            background: status.n_pairs > 0
+            background: pairDone > 0
               ? (dark ? 'rgba(78,176,109,0.16)' : 'rgba(78,176,109,0.12)')
               : (dark ? 'rgba(255,107,71,0.16)' : 'rgba(255,107,71,0.10)'),
-            border: `0.5px solid ${status.n_pairs > 0
+            border: `0.5px solid ${pairDone > 0
               ? (dark ? 'rgba(78,176,109,0.4)' : 'rgba(78,176,109,0.3)')
               : (dark ? 'rgba(255,107,71,0.4)' : 'rgba(255,107,71,0.3)')}`,
             borderRadius: 8, marginBottom: 10, fontSize: 13,
           }}>
-            {status.n_pairs > 0
-              ? <>✓ 跑完了 · {status.n_pairs} 对关系档案已落盘</>
+            {pairDone > 0
+              ? <>✓ 跑完了 · 本次 {pairProgress} 份朋友间关系档案已完成{issueText}</>
               : <>⚠ 跑完了但 0 份报告 — 看 <code style={{ fontSize: 10 }}>~/Desktop/Murmur/agent_reports/_errors.txt</code> 排错</>
             }
           </div>
           <div style={{ fontSize: 11, color: dark ? 'rgba(244,236,218,0.6)' : 'rgba(26,43,74,0.6)', marginBottom: 10 }}>
-            报告路径：<code style={{ fontSize: 10 }}>~/Desktop/Murmur/agent_reports/pairs/</code>
+            报告路径：<code style={{ fontSize: 10 }}>{status.reports_root || '~/Desktop/Murmur/agent_reports'}/pairs/</code>
           </div>
           <div style={{ display: 'flex', gap: 6 }}>
             <button onClick={onReset} style={{

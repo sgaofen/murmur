@@ -68,6 +68,13 @@ interface Projected extends GraphNode {
   proj: { x: number; y: number; depth: number };
 }
 
+function sameEdge(a: { source: string; target: string } | null | undefined,
+                  b: { source: string; target: string } | null | undefined) {
+  if (!a || !b) return false;
+  return (a.source === b.source && a.target === b.target)
+    || (a.source === b.target && a.target === b.source);
+}
+
 // Project 3D → 2D with rotations on Y (yaw) and X (pitch) axes,
 // plus zoom (scales perspective f) and pan (offset).
 function project(
@@ -100,13 +107,14 @@ interface Props {
   data: GraphData;
   dark?: boolean;
   selected: string | null;
+  selectedEdge?: GraphEdge | null;
   onSelect: (id: string | null) => void;
   onSelectEdge?: (edge: GraphEdge | null) => void;
   autoRotate?: boolean;
   height?: number;
 }
 
-export function GraphView({ data, dark = false, selected, onSelect, onSelectEdge, autoRotate = true, height = 820 }: Props) {
+export function GraphView({ data, dark = false, selected, selectedEdge = null, onSelect, onSelectEdge, autoRotate = true, height = 820 }: Props) {
   const privacy = usePrivacy();
   void privacy;  // re-render when privacy toggle flips (used in label render below)
   const W = 1240, H = height;
@@ -126,7 +134,7 @@ export function GraphView({ data, dark = false, selected, onSelect, onSelectEdge
   // Auto-rotate (paused when user interacts OR a panel is open — so the edge/node
   // they clicked doesn't drift away while reading the side panel)
   useEffect(() => {
-    if (!autoRotate || userInteracted || selected) return;
+    if (!autoRotate || userInteracted || selected || selectedEdge) return;
     let raf = 0;
     const loop = (t: number) => {
       setRotY(t * 0.00008);
@@ -134,7 +142,7 @@ export function GraphView({ data, dark = false, selected, onSelect, onSelectEdge
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, [autoRotate, userInteracted, selected]);
+  }, [autoRotate, userInteracted, selected, selectedEdge]);
 
   // Keyboard nav: arrows = rotate, WASD = pan, +/- = zoom
   useEffect(() => {
@@ -271,9 +279,7 @@ export function GraphView({ data, dark = false, selected, onSelect, onSelectEdge
         bestEdge = { source: eg.source, target: eg.target };
       }
     }
-    const sameEdge = bestEdge && hoverEdge
-      && bestEdge.source === hoverEdge.source && bestEdge.target === hoverEdge.target;
-    if (!sameEdge) setHoverEdge(bestEdge);
+    if (!sameEdge(bestEdge, hoverEdge)) setHoverEdge(bestEdge);
   }
 
   function handlePointerLeave() {
@@ -394,8 +400,13 @@ export function GraphView({ data, dark = false, selected, onSelect, onSelectEdge
 
   const edgeOrder: Record<string, number> = { private: 0, co_group: 1, co_active: 2, mention: 3, moments_cross: 4, dm_inferred: 5, mutual_reply: 6, close_pair: 7 };
   const sortedEdges = useMemo(
-    () => [...data.edges].sort((a, b) => (edgeOrder[a.type] ?? 0) - (edgeOrder[b.type] ?? 0)),
-    [data.edges]
+    () => [...data.edges].sort((a, b) => {
+      const aSelected = sameEdge(a, selectedEdge) ? 1 : 0;
+      const bSelected = sameEdge(b, selectedEdge) ? 1 : 0;
+      if (aSelected !== bSelected) return aSelected - bSelected;
+      return (edgeOrder[a.type] ?? 0) - (edgeOrder[b.type] ?? 0);
+    }),
+    [data.edges, selectedEdge]
   );
 
   return (
@@ -439,6 +450,13 @@ export function GraphView({ data, dark = false, selected, onSelect, onSelectEdge
             <stop offset="0%" stopColor="#FF6B47" stopOpacity="0.5" />
             <stop offset="100%" stopColor="#FF6B47" stopOpacity="0" />
           </radialGradient>
+          <filter id="edge-selected-glow" x="-30%" y="-30%" width="160%" height="160%">
+            <feGaussianBlur stdDeviation="3" result="blur" />
+            <feMerge>
+              <feMergeNode in="blur" />
+              <feMergeNode in="SourceGraphic" />
+            </feMerge>
+          </filter>
         </defs>
 
         {/* Cluster halos */}
@@ -467,7 +485,8 @@ export function GraphView({ data, dark = false, selected, onSelect, onSelectEdge
           if (!a || !b) return null;
           const isSelfEdge = e.source === 'self' || e.target === 'self';
           const isHighlight = !!selected && (e.source === selected || e.target === selected);
-          const isHoverEdge = !!hoverEdge && hoverEdge.source === e.source && hoverEdge.target === e.target;
+          const isHoverEdge = sameEdge(e, hoverEdge);
+          const isSelectedEdge = sameEdge(e, selectedEdge);
           const styleByType: Record<string, { stroke: string; width: number; opMul: number; dash: string | null }> = {
             private:      { stroke: '#FF6B47',                                width: 1.2, opMul: 0.5,  dash: e.dashed ? '2 4' : null },
             co_group:     { stroke: dark ? '#5A7A99' : '#1A2B4A',              width: 0.8, opMul: 0.32, dash: '1 3' },
@@ -483,17 +502,20 @@ export function GraphView({ data, dark = false, selected, onSelect, onSelectEdge
           // When a node is selected, drop non-related edges to a faint hint level
           // (was previously hidden entirely — user couldn't hover to compare).
           // Hovered edges always pop above the dim layer.
-          let op = isHoverEdge ? 1 : (isHighlight ? Math.min(1, baseOp * 2.5) : baseOp);
-          if (selected && !isHighlight && !isHoverEdge) op = baseOp * 0.18;
-          const widthMul = isHoverEdge ? 2.4 : (isHighlight ? 1.8 : 1);
+          let op = (isHoverEdge || isSelectedEdge) ? 1 : (isHighlight ? Math.min(1, baseOp * 2.5) : baseOp);
+          if (selected && !isHighlight && !isHoverEdge && !isSelectedEdge) op = baseOp * 0.18;
+          const widthMul = isSelectedEdge ? 3.4 : (isHoverEdge ? 2.4 : (isHighlight ? 1.8 : 1));
+          const edgeStroke = (isHoverEdge || isSelectedEdge) ? '#FFC857' : s.stroke;
+          const edgeFilter = isSelectedEdge ? 'url(#edge-selected-glow)' : undefined;
           if (isSelfEdge) {
             return (
               <line key={i}
                 x1={a.proj.x} y1={a.proj.y} x2={b.proj.x} y2={b.proj.y}
-                stroke={isHoverEdge ? '#FFC857' : s.stroke}
+                stroke={edgeStroke}
                 strokeOpacity={op}
                 strokeWidth={(s.width * Math.max(0.4, e.weight)) * widthMul}
-                strokeDasharray={s.dash || undefined} />
+                strokeDasharray={s.dash || undefined}
+                filter={edgeFilter} />
             );
           }
           // Curve for friend-friend edges
@@ -510,11 +532,12 @@ export function GraphView({ data, dark = false, selected, onSelect, onSelectEdge
           return (
             <path key={i}
               d={`M${a.proj.x},${a.proj.y} Q${cx},${cy} ${b.proj.x},${b.proj.y}`}
-              stroke={isHoverEdge ? '#FFC857' : s.stroke}
+              stroke={edgeStroke}
               strokeOpacity={op}
-              strokeWidth={(s.width * Math.max(0.5, e.weight)) * (isHoverEdge ? 2.6 : (isHighlight ? 2 : 1))}
+              strokeWidth={(s.width * Math.max(0.5, e.weight)) * (isSelectedEdge ? 3.6 : (isHoverEdge ? 2.6 : (isHighlight ? 2 : 1)))}
               strokeDasharray={s.dash || undefined}
-              fill="none" strokeLinecap="round" />
+              fill="none" strokeLinecap="round"
+              filter={edgeFilter} />
           );
         })}
 

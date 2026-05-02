@@ -1,16 +1,18 @@
 {
   "name": "app",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.2.6",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
+    "backend:bundle": "node scripts/bundle-backend.mjs",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "npm run backend:bundle && node scripts/tauri-build.mjs",
+    "tauri:build:dmg": "npm run backend:bundle && node scripts/tauri-build.mjs app,dmg"
   },
   "dependencies": {
     "react": "^19.2.5",

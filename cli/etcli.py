@@ -569,6 +569,7 @@ _MENTIONS_CACHE: dict[str, tuple[float, dict]] = {}     # mentions(top_n,min_mc)
 _FRIEND_MOMENTS_CONTEXT_CACHE: dict[str, tuple[float, dict]] = {}
 _PAIR_STREAM: dict[str, dict] = {}    # pair_key → {running, output, error, started_at, finished_at, name_a, name_b, cli}
 _FRIEND_STREAM: dict[str, dict] = {}  # wxid → same shape as pair stream (single-friend invoke)
+_BATCH_PROCS: dict[int, object] = {}  # pid → child batch process, so status can reap it reliably.
 _CACHE_TTL = 86400  # 1 day — caches are persisted to disk so a stale day-old cache is fine.
 
 # Build locks: SQLite + heavy Python construction is not safe to call from N threads concurrently
@@ -586,6 +587,82 @@ def _disk_cache_dir() -> Path:
 
 def _safe_filename(s: str) -> str:
     return re.sub(r'[<>:"/\\|?*]', "_", s)[:80]
+
+def _agent_workspace_root() -> Path:
+    override = os.environ.get("MURMUR_AGENT_WORKDIR")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / "Desktop" / "Murmur"
+
+def _agent_reports_root() -> Path:
+    override = os.environ.get("MURMUR_AGENT_REPORTS_DIR")
+    if override:
+        return Path(override).expanduser()
+    return _agent_workspace_root() / "agent_reports"
+
+def _codex_model_args() -> list[str]:
+    model = os.environ.get("MURMUR_CODEX_MODEL", "gpt-5.2").strip()
+    return ["-m", model] if model else []
+
+def _codex_cmd_args(agent_path: str) -> list[str]:
+    return [agent_path, "exec", "--skip-git-repo-check", "--ephemeral", *_codex_model_args(), "-"]
+
+def _batch_progress_from_log(log_text: str) -> dict:
+    progress = {
+        "friends_done": 0,
+        "friends_total": 0,
+        "pairs_done": 0,
+        "pairs_total": 0,
+        "failures": 0,
+        "skipped": 0,
+        "last_stage": "",
+        "crashed": False,
+    }
+    seen_terminal: set[tuple[str, int, str]] = set()
+    saw_traceback = False
+    for raw in log_text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("Traceback ") or line.startswith("[X]") or "ConnectionRefusedError" in line:
+            saw_traceback = True
+            progress["last_stage"] = line
+        if "Phase 1:" in line or "Phase 2:" in line or line.startswith("[DONE]"):
+            progress["last_stage"] = line
+
+        m = re.search(r"\[(F|P)\s+(\d+)/(\d+)\]\s+(.+)", line)
+        if not m:
+            continue
+        kind, idx_s, total_s, rest = m.groups()
+        idx = int(idx_s)
+        total = int(total_s)
+        done_key = "friends_done" if kind == "F" else "pairs_done"
+        total_key = "friends_total" if kind == "F" else "pairs_total"
+        progress[total_key] = max(progress[total_key], total)
+        progress["last_stage"] = line
+
+        terminal = None
+        if re.search(r"\bOK\b", rest):
+            terminal = "OK"
+        elif re.search(r"\bSKIP\b", rest):
+            terminal = "SKIP"
+        elif re.search(r"\bFAIL\b", rest) or " err:" in rest or "failed:" in rest:
+            terminal = "FAIL"
+
+        if terminal:
+            key = (kind, idx, terminal)
+            if key not in seen_terminal:
+                seen_terminal.add(key)
+                if terminal == "SKIP":
+                    progress["skipped"] += 1
+                elif terminal == "FAIL":
+                    progress["failures"] += 1
+            progress[done_key] = max(progress[done_key], idx)
+    if saw_traceback:
+        progress["crashed"] = True
+        if progress["failures"] == 0:
+            progress["failures"] = 1
+    return progress
 
 def _disk_load(key: str) -> dict | None:
     """Try to load a cached payload from disk. Returns None if not present or stale."""
@@ -2414,12 +2491,12 @@ def all_friends(store: EchoStore, kind: str = "all", q: str = "") -> list[dict]:
 
 
 def find_ai_report_for(wxid: str) -> dict | None:
-    """Look in ~/Desktop/Murmur/agent_reports/friends/ for a report tagged with this wxid.
+    """Look in the agent reports friends dir for a report tagged with this wxid.
 
     Reports start with: > wxid: `wxid_xxx`  (frontmatter line). Returns metadata + first
     ~600 chars of body (after frontmatter) for use as a "summary card".
     """
-    reports_root = Path.home() / "Desktop" / "Murmur" / "agent_reports" / "friends"
+    reports_root = _agent_reports_root() / "friends"
     if not reports_root.exists():
         return None
     for p in reports_root.iterdir():
@@ -2877,25 +2954,32 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 return re.sub(r'[<>:"/\\|?*\s]+', "_", s)[:80]
 
             target = {_safe(name_a), _safe(name_b)}
-            pairs_root = Path.home() / "Desktop" / "Murmur" / "agent_reports" / "pairs"
+            pairs_root = _agent_reports_root() / "pairs"
             if pairs_root.exists():
                 for p in pairs_root.iterdir():
                     if p.suffix.lower() != ".md":
-                        continue
-                    # stem = "XX_<safeA>__<safeB>" — strip the "XX_" index prefix
-                    stem = p.stem
-                    after_idx = stem.split("_", 1)[1] if "_" in stem else stem
-                    parts = after_idx.split("__")
-                    if len(parts) < 2:
-                        continue
-                    # Optional third part is an agent suffix (__claude/__codex)
-                    # used by parallel multi-agent batch runs.
-                    if {parts[0], parts[1]} != target:
                         continue
                     try:
                         content = p.read_text(encoding="utf-8", errors="replace")
                     except OSError:
                         continue
+                    ids = set(re.findall(r"> wxid_[ab]: `([^`]+)`", content))
+                    if ids:
+                        if ids != {a, b}:
+                            continue
+                    else:
+                        # Legacy reports (pre wxid frontmatter) fall back to the deterministic
+                        # filename. Body matching is deliberately forbidden to avoid A↔B returning
+                        # A↔C just because B is mentioned in the prose.
+                        stem = p.stem
+                        after_idx = stem.split("_", 1)[1] if "_" in stem else stem
+                        parts = after_idx.split("__")
+                        if len(parts) < 2:
+                            continue
+                        # Optional third part is an agent suffix (__claude/__codex)
+                        # used by parallel multi-agent batch runs.
+                        if {parts[0], parts[1]} != target:
+                            continue
                     idx = content.find("\n---\n")
                     body = content[idx + 5:].lstrip() if idx > 0 else content
                     payload = {
@@ -2912,7 +2996,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             return self._send_json(payload)
         if path == "/api/reports":
             # List all generated agent reports (friends + pairs).
-            reports_root = Path.home() / "Desktop" / "Murmur" / "agent_reports"
+            reports_root = _agent_reports_root()
             out = {"friends": [], "pairs": [], "root": str(reports_root)}
             if reports_root.exists():
                 fr = reports_root / "friends"
@@ -2942,7 +3026,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         if path.startswith("/api/report/"):
             # Serve a single report's markdown content
             rel = urllib.parse.unquote(path[len("/api/report/"):])
-            reports_root = Path.home() / "Desktop" / "Murmur" / "agent_reports"
+            reports_root = _agent_reports_root()
             target = (reports_root / rel).resolve()
             try:
                 # Path traversal guard
@@ -3231,17 +3315,21 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
 
         if path == "/api/agents/batch":
             # Launch batch_analyze.py as a subprocess. Returns immediately with the PID.
-            # Body: {cli: 'claude', mode: 'top'|'all'|'pairs-graph', top: 20, top_pairs: 30, force: false}
+            # Body: {cli, mode, top, top_pairs, pair_mode, sample, parallel, force}
             length = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(length) if length else b"{}"
             opts = json.loads(body.decode("utf-8") or "{}")
             cli_name = opts.get("cli", "claude")
             mode = opts.get("mode", "top")
+            pair_mode = opts.get("pair_mode", "graph")
+            if pair_mode not in ("graph", "mention"):
+                pair_mode = "graph"
             top = int(opts.get("top", 20))
             top_pairs = int(opts.get("top_pairs", 20))
+            sample = max(1, min(int(opts.get("sample", 80)), 500))
             parallel = max(1, min(int(opts.get("parallel", 5)), 10))
             force = bool(opts.get("force", False))
-            log_dir = Path.home() / "Desktop" / "Murmur"
+            log_dir = _agent_workspace_root()
             log_dir.mkdir(parents=True, exist_ok=True)
             if cli_name in ("both", "all", "claude+codex"):
                 installed = {a["cli"] for a in _detect_local_agents()}
@@ -3250,9 +3338,10 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     return self._send_json({"ok": False, "error": "both requested but claude/codex are not both installed"})
             else:
                 cli_names = [cli_name]
-            extra_base: list = ["--parallel", str(parallel)]
+            extra_base: list = ["--parallel", str(parallel), "--sample", str(sample)]
             if mode == "all":
-                extra_base += ["--top", "100", "--top-pairs", str(top_pairs), "--min-mentions", "2"]
+                pair_arg = top_pairs if top_pairs >= 0 else 0
+                extra_base += ["--top", "0", "--top-pairs", str(pair_arg), "--min-mentions", "2", "--pair-mode", "graph"]
             elif mode == "pairs-graph":
                 extra_base += ["--pairs-only", "--pair-mode", "graph", "--top-pairs", str(top_pairs)]
             elif mode == "single-friend":
@@ -3261,7 +3350,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     return self._send_json({"ok": False, "error": "wxid required for single-friend"}, 400)
                 return self._send_json({"ok": False, "error": "use /api/agents/invoke for single-friend"}, 400)
             else:  # top mode (default)
-                extra_base += ["--top", str(top), "--top-pairs", str(top_pairs), "--min-mentions", "2"]
+                extra_base += ["--top", str(top), "--top-pairs", str(top_pairs), "--min-mentions", "2", "--pair-mode", pair_mode]
             if force:
                 extra_base.append("--force")
             if len(cli_names) > 1:
@@ -3272,7 +3361,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             # Run from a writable user dir, NOT the bundle's read-only Resources
             # dir (cli_dir resolves into _internal/ when frozen). codex/claude
             # spawn child sessions in cwd → fail if cwd isn't writable.
-            batch_cwd = Path.home() / "Desktop" / "Murmur"
+            batch_cwd = _agent_workspace_root()
             try: batch_cwd.mkdir(parents=True, exist_ok=True)
             except OSError: batch_cwd = Path.home()
             try:
@@ -3289,6 +3378,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                             cwd=str(batch_cwd),
                             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform.startswith("win") else 0,
                         )
+                    _BATCH_PROCS[proc.pid] = proc
                     procs.append(proc)
                     cmds.append(cmd)
                     log_paths.append(str(log_path))
@@ -3318,6 +3408,12 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             log_paths = opts.get("log_paths") or ([] if not log_path else [log_path])
 
             def _pid_running(one_pid: int) -> bool:
+                proc = _BATCH_PROCS.get(one_pid)
+                if proc is not None:
+                    running_now = proc.poll() is None
+                    if not running_now:
+                        _BATCH_PROCS.pop(one_pid, None)
+                    return running_now
                 try:
                     if sys.platform.startswith("win"):
                         # tasklist returns "<exe>","<pid>",...  Check that ANY exe with this PID exists
@@ -3334,17 +3430,34 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
 
             running = any(_pid_running(one_pid) for one_pid in pids)
             log_tail = ""
+            progress = {
+                "friends_done": 0,
+                "friends_total": 0,
+                "pairs_done": 0,
+                "pairs_total": 0,
+                "failures": 0,
+                "skipped": 0,
+                "last_stage": "",
+                "crashed": False,
+            }
             for lp in log_paths:
                 p = Path(lp)
                 if p.exists():
                     try:
                         label = p.stem.replace("batch_", "")
-                        tail = p.read_text(encoding="utf-8", errors="replace")[-1800:]
+                        log_text = p.read_text(encoding="utf-8", errors="replace")
+                        one_progress = _batch_progress_from_log(log_text)
+                        for k in ("friends_done", "friends_total", "pairs_done", "pairs_total", "failures", "skipped"):
+                            progress[k] += int(one_progress.get(k, 0) or 0)
+                        progress["crashed"] = bool(progress["crashed"] or one_progress.get("crashed"))
+                        if one_progress.get("last_stage"):
+                            progress["last_stage"] = f"{label}: {one_progress['last_stage']}"
+                        tail = log_text[-1800:]
                         log_tail += (("\n\n" if log_tail else "") + f"===== {label} =====\n" + tail)
                     except OSError:
                         pass
             # Snapshot current report counts
-            reports_root = Path.home() / "Desktop" / "Murmur" / "agent_reports"
+            reports_root = _agent_reports_root()
             n_friends = 0
             n_pairs = 0
             if reports_root.exists():
@@ -3357,6 +3470,8 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             return self._send_json({
                 "running": running, "n_friends": n_friends, "n_pairs": n_pairs,
                 "log_tail": log_tail,
+                "reports_root": str(reports_root),
+                **progress,
             })
 
         if path == "/api/agents/invoke-pair":
@@ -3409,7 +3524,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     state["stage"] = f"running {cli_name}"
                     use_shell = sys.platform.startswith("win") and agent_path.lower().endswith((".cmd", ".bat", ".ps1"))
                     cmd_args = ([agent_path, "--print"] if cli_name == "claude" else
-                                 [agent_path, "exec", "--skip-git-repo-check", "-"] if cli_name == "codex" else
+                                 _codex_cmd_args(agent_path) if cli_name == "codex" else
                                  [agent_path])
                     t_start = _time.time()
 
@@ -3422,7 +3537,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     # Run agent from a writable user dir, NOT the bundled .app's
                     # read-only Resources dir (where etcli's own cwd may live).
                     # codex creates session dirs in cwd → fails if cwd isn't writable.
-                    _agent_cwd = Path.home() / "Desktop" / "Murmur"
+                    _agent_cwd = _agent_workspace_root()
                     try: _agent_cwd.mkdir(parents=True, exist_ok=True)
                     except OSError: _agent_cwd = Path.home()
                     proc = subprocess.Popen(
@@ -3444,7 +3559,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     if rc == 0 and len(output) > 100:
                         clean_output = _clean_agent_output(cli_name, output)
                         state["output"] = clean_output
-                        pairs_root = Path.home() / "Desktop" / "Murmur" / "agent_reports" / "pairs"
+                        pairs_root = _agent_reports_root() / "pairs"
                         pairs_root.mkdir(parents=True, exist_ok=True)
                         safe_a = re.sub(r'[<>:"/\\|?*\s]+', "_", name_a)[:80] or a
                         safe_b = re.sub(r'[<>:"/\\|?*\s]+', "_", name_b)[:80] or b
@@ -3454,6 +3569,8 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                         md = (
                             f"# {name_a} ↔ {name_b} 关系推断\n\n"
                             f"> 由 {cli_name} 生成 · 用时 {elapsed}s · 触发：app 内点击\n\n"
+                            f"> wxid_a: `{a}`\n"
+                            f"> wxid_b: `{b}`\n\n"
                             f"---\n\n{clean_output}\n"
                         )
                         (pairs_root / fname).write_text(md, encoding="utf-8")
@@ -3557,7 +3674,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     if cli_name == "claude":
                         cmd_args = [agent_path, "--print"]
                     elif cli_name == "codex":
-                        cmd_args = [agent_path, "exec", "--skip-git-repo-check", "-"]
+                        cmd_args = _codex_cmd_args(agent_path)
                     else:
                         cmd_args = [agent_path]
 
@@ -3570,7 +3687,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     # Run agent from a writable user dir, NOT the bundled .app's
                     # read-only Resources dir (where etcli's own cwd may live).
                     # codex creates session dirs in cwd → fails if cwd isn't writable.
-                    _agent_cwd = Path.home() / "Desktop" / "Murmur"
+                    _agent_cwd = _agent_workspace_root()
                     try: _agent_cwd.mkdir(parents=True, exist_ok=True)
                     except OSError: _agent_cwd = Path.home()
                     proc = subprocess.Popen(
@@ -3593,7 +3710,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                         # Strip agent banners before saving and before the UI renders final output.
                         clean_output = _clean_agent_output(cli_name, output)
                         state["output"] = clean_output
-                        reports_root = Path.home() / "Desktop" / "Murmur" / "agent_reports" / "friends"
+                        reports_root = _agent_reports_root() / "friends"
                         reports_root.mkdir(parents=True, exist_ok=True)
                         safe_full = re.sub(r'[<>:"/\\|?*\s]+', "_", name)[:80] or wxid
                         report_file = reports_root / f"{safe_full}.md"
@@ -4326,7 +4443,7 @@ def extract_friend_mentions(store: EchoStore, top_n: int = 50,
         # Use a simple score (msgs) as proxy for "important enough to consider"
         candidates.append((s.username, c.display() or s.username, cnt))
     candidates.sort(key=lambda x: -x[2])
-    top = candidates[:top_n]
+    top = candidates if top_n <= 0 else candidates[:top_n]
     top_wxids = {x[0] for x in top}
 
     # Step 2: Build name -> wxid map (multiple names possible per wxid)
@@ -4730,7 +4847,8 @@ def build_relationship_graph(store: EchoStore, *,
     self_node = next((n for n in nodes if n.get("is_self")), None)
     other_nodes = [n for n in nodes if not n.get("is_self")]
     other_nodes.sort(key=lambda n: -n.get("combined_score", 0))
-    other_nodes = other_nodes[:top_n]
+    if top_n > 0:
+        other_nodes = other_nodes[:top_n]
     nodes = ([self_node] if self_node else []) + other_nodes
 
     # Drop edges to filtered-out nodes
