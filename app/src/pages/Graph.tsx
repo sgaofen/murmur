@@ -409,6 +409,10 @@ function SidePanel({ node, onClose, onOpenFriend, onSelectPeer }: {
   const [analyzeError, setAnalyzeError] = useState<string | null>(null);
 
   useEffect(() => {
+    getAgents().then(setAgents).catch(() => { /* no local agents available */ });
+  }, []);
+
+  useEffect(() => {
     setDetail(null);
     setReportContent(null);
     setShowFullReport(false);
@@ -418,7 +422,6 @@ function SidePanel({ node, onClose, onOpenFriend, onSelectPeer }: {
     setAnalyzeError(null);
     getFriend(node.id).then(setDetail).catch(() => {});
     getFriendConnections(node.id).then(r => setConnections(r.connections)).catch(() => setConnections([]));
-    if (agents.length === 0) getAgents().then(setAgents).catch(() => {});
   }, [node.id]);
 
   async function runAnalysis(cli: string) {
@@ -731,9 +734,14 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
   const [analyzeErr, setAnalyzeErr] = useState<string | null>(null);
   const [stream, setStream] = useState<{ output: string; stage: string; elapsed: number } | null>(null);
   const isSelfEdge = edge.source === 'self' || edge.target === 'self';
+  const selfFriendId = edge.source === 'self' ? edge.target : edge.source;
   const meta = EDGE_LABEL[edge.type] || EDGE_LABEL.co_group;
   const otherName = edge.source === 'self' ? bName : aName;
   const rawWeight = Math.max(0, Math.round(edge.raw_weight ?? edge.weight));
+
+  useEffect(() => {
+    getAgents().then(setAgents).catch(() => { /* no local agents available */ });
+  }, []);
 
   useEffect(() => {
     setPack(null);
@@ -742,15 +750,19 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
     setShowFullReport(false);
     setAnalyzing('idle');
     setAnalyzeErr(null);
-    if (isSelfEdge) return;
+    if (isSelfEdge) {
+      getFriend(selfFriendId)
+        .then(d => setAIReport(d.aiReport || { available: false }))
+        .catch(() => setAIReport({ available: false }));
+      return;
+    }
     setPackLoading(true);
     getPairPack(edge.source, edge.target)
       .then(r => setPack(r.pack))
-      .catch(() => {})
+      .catch(() => { /* no pair pack available */ })
       .finally(() => setPackLoading(false));
-    findPairReport(edge.source, edge.target).then(setAIReport).catch(() => {});
-    if (agents.length === 0) getAgents().then(setAgents).catch(() => {});
-  }, [edge.source, edge.target, isSelfEdge]);
+    findPairReport(edge.source, edge.target).then(setAIReport).catch(() => { /* no saved pair report */ });
+  }, [edge.source, edge.target, isSelfEdge, selfFriendId]);
 
   async function runPairAnalysis(cli: string) {
     setAnalyzing('running');
@@ -788,8 +800,45 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
               setStream(null);
             }
           }
-        } catch {}
+        } catch {
+          // Keep polling; stream endpoints can briefly race with process startup.
+        }
       }, 2000);
+    } catch (e: any) {
+      setAnalyzeErr(e?.message || String(e));
+      setAnalyzing('error');
+    }
+  }
+
+  async function runSelfAnalysis(cli: string) {
+    setAnalyzing('running');
+    setAnalyzeErr(null);
+    try {
+      const r = await invokeAgent({ cli, wxid: selfFriendId });
+      if (!r.ok) {
+        setAnalyzeErr(r.error || 'failed to queue');
+        setAnalyzing('error');
+        return;
+      }
+      const startedAt = Date.now();
+      const pollId = setInterval(async () => {
+        if (Date.now() - startedAt > 5 * 60 * 1000) {
+          clearInterval(pollId);
+          setAnalyzeErr('5 分钟还没完成');
+          setAnalyzing('error');
+          return;
+        }
+        try {
+          const updated = await getFriend(selfFriendId);
+          if (updated.aiReport?.available) {
+            clearInterval(pollId);
+            setAIReport(updated.aiReport);
+            setAnalyzing('idle');
+          }
+        } catch {
+          // Report may not be visible until the writer flushes it.
+        }
+      }, 5000);
     } catch (e: any) {
       setAnalyzeErr(e?.message || String(e));
       setAnalyzing('error');
@@ -803,7 +852,9 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
       const r = await getReport(aiReport.path);
       setFullReport(r.content);
       setShowFullReport(true);
-    } catch {}
+    } catch {
+      // Full report preview is optional; keep the side panel usable if it fails.
+    }
   }
 
   return (
@@ -825,18 +876,28 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
       <div style={{ flex: 1, overflow: 'auto', padding: '22px 24px' }}>
         <div className="et-eyebrow">关系连线</div>
         <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 12, fontSize: 18, fontWeight: 600 }}>
-          {!isSelfEdge && onOpenFriend && (
+          {onOpenFriend && (
             <div style={{ position: 'absolute', right: 24, marginTop: -4, display: 'flex', gap: 6 }}>
-              <button onClick={() => onOpenFriend(edge.source)} style={{
-                all: 'unset', cursor: 'pointer', padding: '3px 8px', borderRadius: 6,
-                background: 'var(--et-paper-2)', border: '0.5px solid var(--et-line-2)',
-                fontSize: 10, color: 'var(--et-mute)',
-              }}>📓 看 {aName.length > 8 ? aName.slice(0, 8) + '…' : aName}</button>
-              <button onClick={() => onOpenFriend(edge.target)} style={{
-                all: 'unset', cursor: 'pointer', padding: '3px 8px', borderRadius: 6,
-                background: 'var(--et-paper-2)', border: '0.5px solid var(--et-line-2)',
-                fontSize: 10, color: 'var(--et-mute)',
-              }}>📓 看 {bName.length > 8 ? bName.slice(0, 8) + '…' : bName}</button>
+              {isSelfEdge ? (
+                <button onClick={() => onOpenFriend(selfFriendId)} style={{
+                  all: 'unset', cursor: 'pointer', padding: '3px 8px', borderRadius: 6,
+                  background: 'var(--et-paper-2)', border: '0.5px solid var(--et-line-2)',
+                  fontSize: 10, color: 'var(--et-mute)',
+                }}>📓 完整档案</button>
+              ) : (
+                <>
+                  <button onClick={() => onOpenFriend(edge.source)} style={{
+                    all: 'unset', cursor: 'pointer', padding: '3px 8px', borderRadius: 6,
+                    background: 'var(--et-paper-2)', border: '0.5px solid var(--et-line-2)',
+                    fontSize: 10, color: 'var(--et-mute)',
+                  }}>📓 看 {aName.length > 8 ? aName.slice(0, 8) + '…' : aName}</button>
+                  <button onClick={() => onOpenFriend(edge.target)} style={{
+                    all: 'unset', cursor: 'pointer', padding: '3px 8px', borderRadius: 6,
+                    background: 'var(--et-paper-2)', border: '0.5px solid var(--et-line-2)',
+                    fontSize: 10, color: 'var(--et-mute)',
+                  }}>📓 看 {bName.length > 8 ? bName.slice(0, 8) + '…' : bName}</button>
+                </>
+              )}
             </div>
           )}
           {isSelfEdge ? (
@@ -876,6 +937,102 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
           )}
           {edge.type === 'close_pair' && <Stat label="近距离对" value="是" />}
         </div>
+
+        {isSelfEdge && (
+          <div style={{ marginTop: 18 }}>
+            <div className="et-eyebrow">你们的关系档案</div>
+            <div style={{
+              marginTop: 8, padding: '14px 16px', borderRadius: 10,
+              background: 'var(--et-paper-2)', border: '0.5px solid var(--et-line-2)',
+            }}>
+              <div className="et-serif" style={{ fontSize: 13.5, color: 'var(--et-ink-soft)', lineHeight: 1.6 }}>
+                这条线代表你和 {otherName} 的一对一关系。完整分析会合并私聊、共群、朋友圈和时间线。
+              </div>
+              <div style={{ marginTop: 10, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                {onOpenFriend && (
+                  <button onClick={() => onOpenFriend(selfFriendId)} style={{
+                    all: 'unset', cursor: 'pointer',
+                    padding: '7px 14px', borderRadius: 8,
+                    background: 'var(--et-ink)', color: 'var(--et-paper)',
+                    fontSize: 12, fontWeight: 600,
+                  }}>📓 打开完整人物档案</button>
+                )}
+                {aiReport?.available && (
+                  <button onClick={viewFullReport} style={{
+                    all: 'unset', cursor: 'pointer',
+                    padding: '7px 14px', borderRadius: 8,
+                    background: 'var(--et-orange)', color: '#fff',
+                    fontSize: 12, fontWeight: 600,
+                  }}>📖 阅读 AI 关系报告</button>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {isSelfEdge && (
+          <div style={{ marginTop: 18 }}>
+            <div className="et-eyebrow">AI 关系报告</div>
+            {aiReport?.available ? (
+              <>
+                <div className="et-serif" style={{
+                  marginTop: 8, padding: '12px 14px', borderRadius: 10,
+                  background: 'var(--et-orange-soft)', border: '0.5px solid var(--et-orange-2)',
+                  fontSize: 13, lineHeight: 1.7, color: 'var(--et-ink-soft)',
+                  maxHeight: 180, overflow: 'hidden', position: 'relative',
+                }}>
+                  {aiReport.short
+                    ?.replace(/^#[^\n]*\n+/, '').replace(/^>[^\n]*\n+/gm, '')
+                    .replace(/^---+\n+/m, '').replace(/^#{1,6}\s+/gm, '')
+                    .replace(/\*\*([^*]+)\*\*/g, '$1').trim().slice(0, 260)}…
+                </div>
+                <button onClick={viewFullReport} style={{
+                  all: 'unset', cursor: 'pointer', marginTop: 8,
+                  padding: '6px 14px', borderRadius: 8,
+                  background: 'var(--et-ink)', color: 'var(--et-paper)',
+                  fontSize: 12, fontWeight: 600,
+                }}>📖 阅读完整报告</button>
+              </>
+            ) : (
+              <div style={{
+                marginTop: 8, padding: '14px 16px', borderRadius: 10,
+                background: 'var(--et-paper-2)', border: '0.5px dashed var(--et-line-2)',
+              }}>
+                <div className="et-serif" style={{ fontSize: 13.5, color: 'var(--et-mute)', lineHeight: 1.6 }}>
+                  还没让 AI 分析过你和 {otherName} 的关系。
+                </div>
+                {analyzing === 'running' && (
+                  <div className="et-meta" style={{ marginTop: 10, color: 'var(--et-orange-2)' }}>
+                    ⏳ 正在分析…一般 2-3 分钟
+                  </div>
+                )}
+                {analyzing === 'error' && analyzeErr && (
+                  <div className="et-meta" style={{ marginTop: 10, color: 'var(--et-rose)' }}>
+                    失败：{analyzeErr.slice(0, 120)}
+                  </div>
+                )}
+                {analyzing !== 'running' && (
+                  <div style={{ marginTop: 10, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                    {agents.length === 0 ? (
+                      <span className="et-meta" style={{ color: 'var(--et-faint)', fontSize: 11 }}>
+                        没检测到 claude/codex CLI
+                      </span>
+                    ) : (
+                      agents.map(a => (
+                        <button key={a.cli} onClick={() => runSelfAnalysis(a.cli)} style={{
+                          all: 'unset', cursor: 'pointer',
+                          padding: '6px 12px', borderRadius: 8,
+                          background: 'var(--et-orange)', color: '#fff',
+                          fontSize: 12, fontWeight: 600,
+                        }}>🤖 让 {a.name} 分析这段关系</button>
+                      ))
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
 
         {!isSelfEdge && (
           <div style={{ marginTop: 18 }}>

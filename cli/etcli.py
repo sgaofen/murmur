@@ -476,7 +476,14 @@ STOPWORDS.update("这个 那个 一下 还是 就是 没有 什么 怎么 为啥
 STOP_CHARS = set("的了是我你他她也都在就不和与这那一个有没啊吧呀嗯哦嘛呢吗哈呜哇噢哎唉哟唔嗷嘿哼啦喔把被让给从向对跟比又再才还但而或因所以之上下里外中后前时日年月来去到过")
 NON_TEXT = re.compile(r"\[[^\]]+\]")
 URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
-YEARBOOK_CACHE_VERSION = 4
+YEARBOOK_CACHE_VERSION = 5
+YEARBOOK_QUOTE_KEYS = (
+    "vulnerability_quotes",
+    "offline_quotes",
+    "lifecycle_quotes",
+    "apology_quotes",
+    "care_quotes",
+)
 
 
 def _ts_to_dt(ts: int):
@@ -2843,6 +2850,12 @@ def friend_yearbook(store: EchoStore, wxid: str) -> dict:
         sns_all = {}
 
     me = store.me or "self"
+
+    def yearbook_sender_id(m: Message) -> str:
+        if m.sender_wxid == "self" or m.sender_wxid == me or m.sender_name == "你":
+            return "self"
+        return m.sender_wxid or wxid
+
     years_data = []
     for year in sorted(by_year.keys()):
         ymsgs = by_year[year]
@@ -2881,6 +2894,7 @@ def friend_yearbook(store: EchoStore, wxid: str) -> dict:
                     out.append({
                         "date": _ts_to_dt(x.create_time).strftime("%Y-%m-%d"),
                         "from": x.sender_name,
+                        "from_id": yearbook_sender_id(x),
                         "text": (x.text or "")[:160],
                     })
                     if len(out) >= limit:
@@ -2979,6 +2993,7 @@ def friend_yearbook(store: EchoStore, wxid: str) -> dict:
             signature = {
                 "date": _ts_to_dt(sig_m.create_time).strftime("%Y-%m-%d"),
                 "from": sig_m.sender_name,
+                "from_id": yearbook_sender_id(sig_m),
                 "text": sig_m.text[:240],
                 "terms": terms,
                 "reason": reason,
@@ -3037,7 +3052,17 @@ def _yearbook_cache_current(payload: dict | None) -> bool:
     if payload.get("schema_version") != YEARBOOK_CACHE_VERSION:
         return False
     years = payload.get("years") or []
-    return all("top_words" in y for y in years)
+    for y in years:
+        if "top_words" not in y:
+            return False
+        for key in YEARBOOK_QUOTE_KEYS:
+            for q in y.get(key) or []:
+                if not isinstance(q, dict) or not q.get("from_id"):
+                    return False
+        sig = y.get("signature")
+        if sig and (not isinstance(sig, dict) or not sig.get("from_id")):
+            return False
+    return True
 
 
 def friend_moments(store: EchoStore, wxid: str, n: int = 4) -> list[dict]:

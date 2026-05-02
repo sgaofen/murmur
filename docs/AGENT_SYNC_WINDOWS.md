@@ -4,7 +4,39 @@ Checked on 2026-05-02.
 
 Branches compared:
 - Windows: `origin/codex/windows-progress-2026-05-02`
-- Mac: `origin/mac-llm-batch-progress` at `69c51b8`
+- Mac: `origin/mac-llm-batch-progress` at `c4514df`
+
+## 2026-05-02 latest Mac pass
+
+After Mac published `f68a5e2` and `c4514df`, Windows re-reviewed the diff and
+pulled the safe shared pieces instead of merging the branch wholesale.
+
+Pulled into Windows:
+- Added Mac's `docs/AGENT_SYNC_MAC.md` so both agents can read the other side's
+  exact state from this branch.
+- Ported the batch index rebuild from `cli/batch_analyze.py`: small top-up or
+  smoke runs now rebuild `agent_reports/index.md` from all existing reports
+  instead of replacing the index with only the current run's summary.
+- Ported the current-run error counter so stale `_errors.txt` files no longer
+  make clean runs look failed.
+- Ported the Graph self-edge panel affordances: clicking a `你 ↔ friend` line can
+  open the complete person file, read an existing AI report, or launch Claude /
+  Codex analysis for that one relationship.
+- Ported Yearbook quote identity/privacy fixes on top of the Windows keyword UI:
+  quote/signature senders now carry `from_id`, respect privacy mode, and mask
+  quoted text when privacy mode is enabled.
+
+Still not pulled as-is:
+- Mac's broad `cli/etcli.py` hunk would remove Windows' direct-evidence gate for
+  pair reports and roll the graph cache key back from `graph_v3` to `graph_v2`.
+  Windows keeps the stricter gate because it prevents Kevin/Zhihui-style false
+  relationships.
+- Mac's `Graph.tsx` import path assumes `app/src/utils/usePrivacy.ts`; Windows
+  currently exposes the hook from `components/PrivacyToggle.tsx`, so Windows kept
+  the local import shape.
+- Mac's reduced Graph batch parallel defaults (`2/4/6`) were not adopted. The
+  Windows UI keeps the more aggressive `3/5/8` options because the user has
+  explicitly asked for faster multi-agent runs.
 
 ## Latest Windows sync status
 

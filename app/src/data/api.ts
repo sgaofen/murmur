@@ -226,13 +226,13 @@ export interface YearData {
   late_night_msgs: number;
   late_night_pct: number;
   calls: number;
-  vulnerability_quotes: Array<{ date: string; from: string; text: string }>;
-  offline_quotes: Array<{ date: string; from: string; text: string }>;
-  lifecycle_quotes: Array<{ date: string; from: string; text: string }>;
-  apology_quotes: Array<{ date: string; from: string; text: string }>;
-  care_quotes: Array<{ date: string; from: string; text: string }>;
+  vulnerability_quotes: Array<{ date: string; from: string; from_id?: string; text: string }>;
+  offline_quotes: Array<{ date: string; from: string; from_id?: string; text: string }>;
+  lifecycle_quotes: Array<{ date: string; from: string; from_id?: string; text: string }>;
+  apology_quotes: Array<{ date: string; from: string; from_id?: string; text: string }>;
+  care_quotes: Array<{ date: string; from: string; from_id?: string; text: string }>;
   top_words?: Array<{ word: string; count: number }>;
-  signature: { date: string; from: string; text: string; reason?: string; terms?: string[] } | null;
+  signature: { date: string; from: string; from_id?: string; text: string; reason?: string; terms?: string[] } | null;
 }
 
 export interface Yearbook {
