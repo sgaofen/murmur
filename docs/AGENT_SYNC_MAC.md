@@ -102,7 +102,7 @@ The current local development URLs are:
     - raw private message count,
     - "打开完整人物档案",
     - saved AI report preview/read button when available,
-    - Claude/Codex/Gemini local-agent analysis buttons when no report exists.
+    - Claude/Codex local-agent analysis buttons when no report exists.
   - Friend-friend edge panel still shows evidence pack previews, saved pair
     reports, live pair-agent streaming, and per-edge stats.
   - Graph batch panel supports `claude`, `codex`, or `both`, plus per-CLI
@@ -152,7 +152,7 @@ Mac absorbed these ideas manually rather than merging the Windows branch:
    `maskText()` so privacy mode still works.
 
    Code:
-   - `cli/etcli.py`: `YEARBOOK_CACHE_VERSION = 4`, `_word_counts()`,
+   - `cli/etcli.py`: `YEARBOOK_CACHE_VERSION = 5`, `_word_counts()`,
      scored `friend_yearbook()` signature selection.
    - `app/src/data/api.ts`: `YearData.top_words`, `signature.reason`,
      `signature.terms`.

@@ -4,7 +4,8 @@
     python extract_key_dll.py             # 自动找微信进程，30秒内抓 key
     python extract_key_dll.py --pid 12345 # 指定 pid
 
-不需要重启微信。微信只要登录完成即可。
+默认不重启微信：先把 hook 装到正在运行的 Weixin.exe/WeChat.exe，
+然后你手动退出登录再登录一次，hook 才能捕获登录事件里的主密钥。
 """
 from __future__ import annotations
 import argparse
@@ -82,20 +83,25 @@ def find_weixin_path_from_registry() -> str | None:
     candidates = [
         (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Tencent\Weixin", "InstallPath"),
         (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Tencent\Weixin", "InstallPath"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Tencent\WeChat", "InstallPath"),
+        (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Tencent\WeChat", "InstallPath"),
     ]
     for hive, sub, name in candidates:
         try:
             with winreg.OpenKey(hive, sub) as k:
                 v, _ = winreg.QueryValueEx(k, name)
                 if v:
-                    p = Path(v) / "Weixin.exe"
-                    if p.exists():
-                        return str(p)
+                    for exe in ("Weixin.exe", "WeChat.exe"):
+                        p = Path(v) / exe
+                        if p.exists():
+                            return str(p)
         except OSError:
             pass
     # Last resort: hard-coded common paths
     for cand in [r"C:\Program Files\Tencent\Weixin\Weixin.exe",
-                 r"C:\Program Files (x86)\Tencent\Weixin\Weixin.exe"]:
+                 r"C:\Program Files (x86)\Tencent\Weixin\Weixin.exe",
+                 r"C:\Program Files\Tencent\WeChat\WeChat.exe",
+                 r"C:\Program Files (x86)\Tencent\WeChat\WeChat.exe"]:
         if Path(cand).exists():
             return cand
     return None
@@ -107,7 +113,7 @@ def kill_weixin(pids: list[int]) -> bool:
         # Use taskkill /F so child processes also die
         subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True)
     # Also kill helpers (WeChatAppEx etc.) so they don't auto-restart parent
-    for helper in ["WeChatAppEx.exe", "Weixin.exe"]:
+    for helper in ["WeChatAppEx.exe", "Weixin.exe", "WeChat.exe"]:
         subprocess.run(["taskkill", "/F", "/IM", helper, "/T"], capture_output=True)
     # Wait for processes to actually die (up to 6s)
     for _ in range(60):
@@ -136,12 +142,16 @@ def launch_weixin(path: str) -> int | None:
 
 # ---------- wx_key.dll bindings ----------
 
-NATIVE_DIR = Path(__file__).resolve().parent / "native"
+try:
+    from paths import native_dir
+    NATIVE_DIR = native_dir()
+except Exception:
+    NATIVE_DIR = Path(__file__).resolve().parent / "native"
 
 
 class WxKey:
     def __init__(self):
-        os.add_dll_directory(str(NATIVE_DIR))
+        self._dll_dir_handle = os.add_dll_directory(str(NATIVE_DIR)) if hasattr(os, "add_dll_directory") else None
         self.dll = ctypes.WinDLL(str(NATIVE_DIR / "wx_key.dll"))
 
         # InitializeHook(uint32 pid) -> bool
@@ -270,11 +280,13 @@ def auto_restart_and_extract(timeout: int = 90) -> str | None:
 def validate_key_against_db(key_hex: str, db_path: str) -> bool:
     """Use go_decrypt.dll's ValidateKey to confirm key is correct."""
     try:
-        os.add_dll_directory(str(NATIVE_DIR))
+        dll_dir_handle = os.add_dll_directory(str(NATIVE_DIR)) if hasattr(os, "add_dll_directory") else None
         lib = ctypes.WinDLL(str(NATIVE_DIR / "go_decrypt.dll"))
         lib.ValidateKey.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
         lib.ValidateKey.restype = ctypes.c_int
-        return lib.ValidateKey(db_path.encode("utf-8"), key_hex.encode("utf-8")) == 1
+        ok = lib.ValidateKey(db_path.encode("utf-8"), key_hex.encode("utf-8")) == 1
+        _ = dll_dir_handle
+        return ok
     except Exception as e:
         print(f"[!] Could not validate (go_decrypt.dll): {e}")
         return False
@@ -335,11 +347,14 @@ def main():
 
     if args.save_to:
         import json, datetime
-        Path(args.save_to).write_text(json.dumps({
+        save_path = Path(args.save_to).expanduser()
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        save_path.write_text(json.dumps({
             "key": key,
+            "decrypt_key": key,
             "extracted_at": datetime.datetime.now().isoformat(),
         }, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"  saved to: {args.save_to}")
+        print(f"  saved to: {save_path}")
 
     return 0
 

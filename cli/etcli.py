@@ -470,7 +470,8 @@ STOPWORDS.update("这个 那个 一下 还是 就是 没有 什么 怎么 为啥
 STOP_CHARS = set("的了是我你他她也都在就不和与这那一个有没啊吧呀嗯哦嘛呢吗哈呜哇噢哎唉哟唔嗷嘿哼啦喔把被让给从向对跟比又再才还但而或因所以之上下里外中后前时日年月来去到过")
 NON_TEXT = re.compile(r"\[[^\]]+\]")
 URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
-YEARBOOK_CACHE_VERSION = 4
+APP_VERSION = "0.2.6"
+YEARBOOK_CACHE_VERSION = 5
 
 
 def _ts_to_dt(ts: int):
@@ -626,11 +627,17 @@ def _disk_cache_dir() -> Path:
     p.mkdir(parents=True, exist_ok=True)
     return p
 
+def _agent_workspace_root() -> Path:
+    override = os.environ.get("MURMUR_AGENT_WORKDIR")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / "Desktop" / "Murmur"
+
 def _agent_reports_root() -> Path:
     override = os.environ.get("MURMUR_AGENT_REPORTS_DIR")
     if override:
         return Path(override).expanduser()
-    return Path.home() / "Desktop" / "Murmur" / "agent_reports"
+    return _agent_workspace_root() / "agent_reports"
 
 def _codex_model_args() -> list[str]:
     model = os.environ.get("MURMUR_CODEX_MODEL", "gpt-5.2").strip()
@@ -2995,7 +3002,7 @@ def friend_moments(store: EchoStore, wxid: str, n: int = 4) -> list[dict]:
 
 class _MurmurAPIHandler(BaseHTTPRequestHandler):
     store: Optional[EchoStore] = None  # set by _run_server
-    export_dir: Path = Path.home() / "Desktop" / "Murmur"
+    export_dir: Path = _agent_workspace_root()
     _ALLOWED_DEV_ORIGINS = {
         ("http", "127.0.0.1", 5173),
         ("http", "localhost", 5173),
@@ -3108,7 +3115,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 return self._send_json({
                     "data_dir": None,
                     "self_wxid": None,
-                    "version": "0.1",
+                    "version": APP_VERSION,
                     "bootstrap": True,
                     "needs_onboarding": True,
                     "reason": "no decrypted data — run extract-key + refresh to bootstrap",
@@ -3116,7 +3123,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             return self._send_json({
                 "data_dir": str(self.store.dir),
                 "self_wxid": self.store.me,
-                "version": "0.1",
+                "version": APP_VERSION,
             })
 
         # Onboarding gate: data-needing endpoints return 503 until store is ready.
@@ -3571,7 +3578,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             sample = max(1, min(int(opts.get("sample", 80)), 500))
             parallel = max(1, min(int(opts.get("parallel", 5)), 10))
             force = bool(opts.get("force", False))
-            log_dir = Path.home() / "Desktop" / "Murmur"
+            log_dir = _agent_workspace_root()
             log_dir.mkdir(parents=True, exist_ok=True)
             if cli_name in ("both", "all", "claude+codex"):
                 installed = {a["cli"] for a in _detect_local_agents()}
@@ -3610,7 +3617,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             # Run from a writable user dir, NOT the bundle's read-only Resources
             # dir (cli_dir resolves into _internal/ when frozen). codex/claude
             # spawn child sessions in cwd → fail if cwd isn't writable.
-            batch_cwd = Path.home() / "Desktop" / "Murmur"
+            batch_cwd = _agent_workspace_root()
             try: batch_cwd.mkdir(parents=True, exist_ok=True)
             except OSError: batch_cwd = Path.home()
             try:
@@ -3792,7 +3799,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     # Run agent from a writable user dir, NOT the bundled .app's
                     # read-only Resources dir (where etcli's own cwd may live).
                     # codex creates session dirs in cwd → fails if cwd isn't writable.
-                    _agent_cwd = Path.home() / "Desktop" / "Murmur"
+                    _agent_cwd = _agent_workspace_root()
                     try: _agent_cwd.mkdir(parents=True, exist_ok=True)
                     except OSError: _agent_cwd = Path.home()
                     proc = subprocess.Popen(
@@ -3949,7 +3956,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     # Run agent from a writable user dir, NOT the bundled .app's
                     # read-only Resources dir (where etcli's own cwd may live).
                     # codex creates session dirs in cwd → fails if cwd isn't writable.
-                    _agent_cwd = Path.home() / "Desktop" / "Murmur"
+                    _agent_cwd = _agent_workspace_root()
                     try: _agent_cwd.mkdir(parents=True, exist_ok=True)
                     except OSError: _agent_cwd = Path.home()
                     proc = subprocess.Popen(
@@ -4382,7 +4389,7 @@ def _which(cli: str) -> str | None:
     On macOS / Linux, when running inside a launchd-spawned GUI .app, the
     inherited PATH is the bare `/usr/bin:/bin:/usr/sbin:/sbin` — it does NOT
     include common npm/yarn/pnpm install dirs like ~/.nvm/.../bin or
-    /opt/homebrew/bin. So shutil.which() misses claude/codex/gemini even
+    /opt/homebrew/bin. So shutil.which() misses claude/codex even
     when they're installed. We augment the search with the common dirs.
     """
     import shutil as _shutil
@@ -5181,13 +5188,10 @@ def build_relationship_graph(store: EchoStore, *,
 
 
 def _detect_local_agents() -> list[dict]:
-    """Detect installed AI CLI agents (Claude Code, Codex, etc.)."""
+    """Detect installed AI CLIs that Murmur can actually invoke safely."""
     candidates = [
         ("claude", "Claude Code", "anthropic"),
         ("codex", "Codex CLI", "openai"),
-        ("aider", "Aider", "various"),
-        ("ollama", "Ollama (local LLM)", "local"),
-        ("gemini", "Gemini CLI", "google"),
     ]
     found = []
     for cli, name, vendor in candidates:

@@ -113,9 +113,10 @@ def _wechat_root_env_paths() -> list[Path]:
         return []
     out: list[Path] = []
     for part in raw.split(os.pathsep):
-        p = Path(part).expanduser()
-        if p:
-            out.append(p)
+        part = part.strip().strip('"')
+        if not part:
+            continue
+        out.append(Path(os.path.expandvars(os.path.expanduser(part))))
     return out
 
 
@@ -264,6 +265,7 @@ def find_weixin_exe() -> Path | None:
             Path(r"C:\Program Files\Tencent\Weixin\Weixin.exe"),
             Path(r"C:\Program Files (x86)\Tencent\Weixin\Weixin.exe"),
             Path(r"C:\Program Files\Tencent\WeChat\WeChat.exe"),
+            Path(r"C:\Program Files (x86)\Tencent\WeChat\WeChat.exe"),
         ]:
             if cand.exists():
                 return cand
@@ -273,13 +275,16 @@ def find_weixin_exe() -> Path | None:
             for hive, sub in [
                 (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Tencent\Weixin"),
                 (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Tencent\Weixin"),
+                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Tencent\WeChat"),
+                (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Tencent\WeChat"),
             ]:
                 try:
                     with winreg.OpenKey(hive, sub) as k:
                         v, _ = winreg.QueryValueEx(k, "InstallPath")
-                        p = Path(v) / "Weixin.exe"
-                        if p.exists():
-                            return p
+                        for exe in ("Weixin.exe", "WeChat.exe"):
+                            p = Path(v) / exe
+                            if p.exists():
+                                return p
                 except OSError:
                     pass
         except ImportError:
@@ -361,8 +366,11 @@ def _check_weixin_running() -> Optional[bool]:
                     return True
             return False
         if IS_WINDOWS:
-            r = _sp.run(["tasklist", "/fi", "imagename eq Weixin.exe"], capture_output=True, text=True)
-            return "Weixin.exe" in r.stdout
+            for exe in ("Weixin.exe", "WeChat.exe"):
+                r = _sp.run(["tasklist", "/fi", f"imagename eq {exe}"], capture_output=True, text=True)
+                if exe.lower() in (r.stdout or "").lower():
+                    return True
+            return False
     except Exception:
         return None
     return None
@@ -390,7 +398,7 @@ def detect_capabilities() -> Capabilities:
     #       (b) hardened-runtime WeChat: only works with SIP off (rare, requires reboot)
     #   - Linux: WeChat has no Linux client
     if IS_WINDOWS:
-        can_extract = has_install
+        can_extract = has_install and bool(weixin_running)
     elif IS_MAC:
         # Either: WeChat is already ad-hoc signed → can attach right now
         # Or:     SIP is off → can attach even with hardened runtime (after sudo)
@@ -414,7 +422,9 @@ def detect_capabilities() -> Capabilities:
     if not has_data:
         notes.append("还没找到微信数据文件夹 — 你可能需要先在 Windows/Mac 上登录一次微信")
     if not has_install and IS_WINDOWS:
-        notes.append("没找到 Weixin.exe，「抓密钥」会失败 — 请确保微信已安装")
+        notes.append("没找到 Weixin.exe / WeChat.exe，「抓密钥」会失败 — 请确保微信已安装")
+    if IS_WINDOWS and has_install and not weixin_running:
+        notes.append("微信未在运行 — Windows 抓密钥前请先打开微信并保持已登录状态。")
 
     return Capabilities(
         can_decrypt_db=can_decrypt and has_data,

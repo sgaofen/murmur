@@ -1,6 +1,6 @@
 """batch_analyze.py — 用 Claude Code (或 Codex) 把每个朋友 + 每对关系都跑一遍
 
-输出: ~/Desktop/Murmur/agent_reports/（可用 MURMUR_AGENT_REPORTS_DIR 覆盖）
+输出: ~/Desktop/Murmur/agent_reports/（可用 MURMUR_AGENT_WORKDIR / MURMUR_AGENT_REPORTS_DIR 覆盖）
   - friends/<name>.md       每个朋友的关系档案 (基于私聊+群聊上下文+提及)
   - pairs/<a>__<b>.md       每对朋友间关系的推断
   - index.md                所有报告的索引
@@ -55,7 +55,14 @@ def _agent_reports_root() -> Path:
     override = os.environ.get("MURMUR_AGENT_REPORTS_DIR")
     if override:
         return Path(override).expanduser()
-    return Path.home() / "Desktop" / "Murmur" / "agent_reports"
+    return _agent_workspace_root() / "agent_reports"
+
+
+def _agent_workspace_root() -> Path:
+    override = os.environ.get("MURMUR_AGENT_WORKDIR")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / "Desktop" / "Murmur"
 
 
 def _codex_model_args() -> list[str]:
@@ -119,9 +126,9 @@ def call_agent(cli: str, agent_path: Path, prompt: str, timeout: int = 900) -> t
     else:
         cmd_args = [str(agent_path)]
 
-    # Always run agents from a writable user dir. ~/Desktop/Murmur exists
-    # because batch_analyze itself writes reports there; fall back to $HOME.
-    work_dir = Path.home() / "Desktop" / "Murmur"
+    # Always run agents from a writable user dir. In packaged apps, cwd may be
+    # read-only, so use the reports workspace; fall back to $HOME.
+    work_dir = _agent_workspace_root()
     try:
         work_dir.mkdir(parents=True, exist_ok=True)
     except OSError:
