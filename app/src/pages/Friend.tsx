@@ -357,7 +357,7 @@ function ReportViewerOverlay({ relPath, friendName, onClose }: {
   }, [relPath]);
   return (
     <div onClick={onClose} style={{
-      position: 'absolute', inset: 0, zIndex: 30,
+      position: 'fixed', inset: 0, zIndex: 1000,
       background: 'rgba(20,24,42,0.55)',
       display: 'flex', justifyContent: 'center', alignItems: 'flex-start',
       paddingTop: 40, paddingBottom: 40, overflowY: 'auto',
@@ -370,7 +370,7 @@ function ReportViewerOverlay({ relPath, friendName, onClose }: {
         boxShadow: 'var(--et-shadow-3)',
         padding: '32px 44px', position: 'relative',
       }}>
-        <button onClick={onClose} style={{
+        <button onClick={(e) => { e.stopPropagation(); onClose(); }} style={{
           all: 'unset', cursor: 'pointer', position: 'absolute', top: 14, right: 18,
           fontSize: 22, color: 'var(--et-mute)', lineHeight: 1, padding: 6,
         }}>×</button>
@@ -454,7 +454,7 @@ function MessagesDrawer({ open, friend, onClose }: { open: boolean; friend: Frie
 
   return (
     <div onClick={onClose} style={{
-      position: 'absolute', inset: 0, zIndex: 20,
+      position: 'fixed', inset: 0, zIndex: 1000,
       background: 'rgba(20,24,42,0.45)',
       display: 'flex', justifyContent: 'flex-end',
     }}>
@@ -470,7 +470,7 @@ function MessagesDrawer({ open, friend, onClose }: { open: boolean; friend: Frie
             <div className="et-eyebrow">完整聊天记录</div>
             <div className="et-h2" style={{ marginTop: 4, color: 'var(--et-ink)' }}>和 {displayName(friend.id, friend.name)} 的对话</div>
           </div>
-          <button onClick={onClose} style={{ all: 'unset', cursor: 'pointer', padding: 8, color: 'var(--et-mute)' }}>×</button>
+          <button onClick={(e) => { e.stopPropagation(); onClose(); }} style={{ all: 'unset', cursor: 'pointer', padding: 8, color: 'var(--et-mute)' }}>×</button>
         </div>
         {loading && <div className="et-meta" style={{ textAlign: 'center', padding: 40 }}>加载中…</div>}
         {!loading && msgs && (

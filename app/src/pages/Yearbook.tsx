@@ -45,6 +45,7 @@ export function YearbookPage({ friendId, onBack }: Props) {
 
   return (
     <div className="et-root" style={{ background: 'var(--et-bg)', minHeight: '100vh' }}>
+      <style>{YEARBOOK_KEYWORDS_CSS}</style>
       {/* Top bar */}
       <div style={{
         padding: '14px 28px', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -159,21 +160,7 @@ function YearCard({ y, maxMsgs, friendName }: { y: YearData; maxMsgs: number; fr
         <Cell label="深夜聊天" value={`${y.late_night_pct}%`} sub={`${y.late_night_msgs} 条 23-4 点`} />
       </div>
 
-      {/* Signature quote */}
-      {y.signature && (
-        <div style={{ marginTop: 22, padding: '14px 18px',
-          background: 'var(--et-paper-2)', borderLeft: `2px solid ${accent}`,
-          borderRadius: '0 8px 8px 0' }}>
-          <div className="et-eyebrow" style={{ fontSize: 9, color: accent }}>这一年的代表对话</div>
-          <div className="et-serif" style={{ marginTop: 6, fontSize: 14.5, lineHeight: 1.65,
-            color: 'var(--et-ink-soft)' }}>
-            「{maskText(y.signature.text)}」
-          </div>
-          <div className="et-meta" style={{ marginTop: 6, fontSize: 10, color: 'var(--et-faint)' }}>
-            — {displayName(y.signature.from_id, y.signature.from)} · {y.signature.date}
-          </div>
-        </div>
-      )}
+      <YearInsightModule year={y} />
 
       {/* Themed quotes */}
       {allQuotes.length > 0 && (
@@ -206,6 +193,100 @@ function YearCard({ y, maxMsgs, friendName }: { y: YearData; maxMsgs: number; fr
   );
 }
 
+function YearInsightModule({ year }: { year: YearData }) {
+  const hasWords = !!year.top_words?.length;
+  const hasSignature = !!year.signature;
+  if (!hasWords && !hasSignature) return null;
+  const both = hasWords && hasSignature;
+  return (
+    <section className="yb-keyword-module">
+      <div className={`yb-keyword-grid ${both ? '' : 'single'}`}>
+        {hasWords && (
+          <div className="yb-keyword-pane">
+            <div className="yb-module-head">
+              <div className="yb-eyebrow">这一年常聊</div>
+              <div className="yb-hint">top 8 · 词频</div>
+            </div>
+            <WordCloud words={year.top_words || []} />
+          </div>
+        )}
+        {both && <div className="yb-divider-v" />}
+        {hasSignature && (
+          <div className="yb-keyword-pane">
+            <div className="yb-module-head">
+              <div className="yb-eyebrow">算法选中的片段</div>
+              <div className="yb-hint">可复核，不当作全部</div>
+            </div>
+            <SignatureBlock sig={year.signature} />
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function WordCloud({ words }: { words: Array<{ word: string; count: number }> }) {
+  const top = words.slice(0, 8);
+  if (!top.length) return null;
+  return (
+    <div className="yb-word-cloud">
+      {top.map((w, i) => {
+        const t = 1 - (i / Math.max(top.length - 1, 1));
+        const size = 13 + Math.round(t * 9);
+        const weight = i < 2 ? 600 : (i < 4 ? 500 : 400);
+        const opacity = 0.55 + t * 0.45;
+        return (
+          <span
+            key={`${w.word}-${i}`}
+            className="yb-word"
+            title={`出现 ${w.count.toLocaleString()} 次`}
+            style={{
+              fontSize: size,
+              fontWeight: weight,
+              opacity,
+              color: i < 2 ? 'var(--et-ink)' : 'var(--et-ink-soft)',
+              borderBottom: i < 2 ? '1.5px solid var(--et-orange)' : 'none',
+              paddingBottom: i < 2 ? 1 : 0,
+            }}
+          >
+            {w.word}
+            <span className="yb-word-count">{w.count.toLocaleString()}</span>
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
+function SignatureBlock({ sig }: {
+  sig: { date: string; from: string; from_id?: string; text: string; reason?: string; terms?: string[] } | null;
+}) {
+  if (!sig) return null;
+  return (
+    <div className="yb-signature">
+      <div className="yb-signature-text">
+        <span className="yb-quote-mark">「</span>{maskText(sig.text)}<span className="yb-quote-mark close">」</span>
+      </div>
+      <div className="yb-signature-meta">
+        <span className="yb-meta-name">{displayName(sig.from_id, sig.from)}</span>
+        <span className="yb-meta-dot" />
+        <span className="yb-meta-date">{sig.date}</span>
+        {sig.reason && (
+          <>
+            <span className="yb-meta-dot" />
+            <span className="yb-reason">依据 · <b>{sig.reason}</b></span>
+          </>
+        )}
+        {!!sig.terms?.length && (
+          <span className="yb-term-wrap">
+            {sig.terms.slice(0, 3).map((t, i) => <span key={`${t}-${i}`} className="yb-term">{t}</span>)}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function Cell({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
     <div style={{
@@ -218,3 +299,187 @@ function Cell({ label, value, sub }: { label: string; value: string; sub?: strin
     </div>
   );
 }
+
+const YEARBOOK_KEYWORDS_CSS = `
+.yb-keyword-module {
+  margin-top: 20px;
+  padding: 18px 0 20px;
+  border-top: 0.5px solid var(--et-line);
+  border-bottom: 0.5px solid var(--et-line);
+}
+.yb-keyword-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.85fr) 1px minmax(0, 1.15fr);
+  gap: 24px;
+  align-items: stretch;
+}
+.yb-keyword-grid.single {
+  grid-template-columns: 1fr;
+}
+.yb-keyword-pane {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.yb-module-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.yb-eyebrow {
+  font-family: var(--et-sans);
+  font-weight: 600;
+  font-size: 10px;
+  letter-spacing: 0;
+  text-transform: uppercase;
+  color: var(--et-faint);
+}
+.yb-hint {
+  font-family: var(--et-sans);
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--et-faint);
+  white-space: nowrap;
+}
+.yb-divider-v {
+  width: 1px;
+  align-self: stretch;
+  background: linear-gradient(180deg, transparent, var(--et-line) 18%, var(--et-line) 82%, transparent);
+}
+.yb-word-cloud {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 14px;
+  row-gap: 8px;
+}
+.yb-word {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  font-family: var(--et-serif);
+  line-height: 1;
+  cursor: default;
+  transition: color 120ms ease;
+}
+.yb-word:hover {
+  color: var(--et-orange-2) !important;
+}
+.yb-word-count {
+  font-family: var(--et-mono);
+  font-size: 10px;
+  color: var(--et-faint);
+  align-self: flex-end;
+  padding-bottom: 2px;
+}
+.yb-signature {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.yb-signature-text {
+  font-family: var(--et-serif);
+  font-size: 15.5px;
+  line-height: 1.55;
+  color: var(--et-ink-soft);
+  font-weight: 400;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.yb-quote-mark {
+  color: var(--et-orange);
+  font-family: var(--et-serif);
+  font-weight: 600;
+  font-size: 28px;
+  line-height: 0;
+  vertical-align: -8px;
+  margin-right: 4px;
+}
+.yb-quote-mark.close {
+  margin-left: 2px;
+  margin-right: 0;
+}
+.yb-signature-meta {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  font-family: var(--et-sans);
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--et-mute);
+}
+.yb-meta-name {
+  color: var(--et-ink);
+  font-weight: 500;
+}
+.yb-meta-date {
+  font-family: var(--et-mono);
+}
+.yb-meta-dot {
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background: var(--et-faint);
+}
+.yb-reason {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--et-mono);
+  font-size: 10.5px;
+  color: var(--et-ink-soft);
+  padding: 3px 8px 3px 6px;
+  border-radius: 4px;
+  background: rgba(26,43,74,0.045);
+  border: 0.5px solid var(--et-line);
+}
+.yb-reason::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--et-orange);
+  flex-shrink: 0;
+  box-shadow: 0 0 0 2px rgba(255,107,71,0.18);
+}
+.yb-reason b {
+  font-weight: 600;
+  color: var(--et-ink);
+}
+.yb-term-wrap {
+  display: inline-flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.yb-term {
+  font-family: var(--et-mono);
+  font-size: 10.5px;
+  color: var(--et-orange-2);
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(255,107,71,0.08);
+}
+@media (max-width: 780px) {
+  .yb-keyword-grid {
+    grid-template-columns: 1fr;
+    gap: 16px;
+  }
+  .yb-divider-v {
+    width: auto;
+    height: 1px;
+    background: var(--et-line);
+  }
+  .yb-module-head {
+    align-items: flex-start;
+  }
+  .yb-signature-text {
+    font-size: 14.5px;
+    -webkit-line-clamp: 2;
+  }
+}
+`;

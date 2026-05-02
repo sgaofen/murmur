@@ -168,10 +168,13 @@ def cmd_run(args):
     summary: list[dict] = []
     summary_lock = Lock()
     err_lock = Lock()
+    error_count = 0
     t0 = time.time()
 
     def log_err(msg: str):
+        nonlocal error_count
         with err_lock:
+            error_count += 1
             with errors_log.open("a", encoding="utf-8") as f_err:
                 f_err.write(msg + "\n")
 
@@ -331,29 +334,61 @@ def cmd_run(args):
                 pass
 
     # === Phase 3: Index ===
+    # Rebuild from all existing report files, not only this run. Small top-up
+    # runs should not make old successful reports disappear from index.md.
     total_elapsed = time.time() - t0
+    def _report_label(p: Path) -> str:
+        try:
+            for line in p.read_text(encoding="utf-8", errors="replace").splitlines()[:8]:
+                line = line.strip()
+                if line.startswith("# "):
+                    return line[2:].strip()
+        except OSError:
+            pass
+        return p.stem
+
+    def _report_item(p: Path) -> dict:
+        st = p.stat()
+        return {
+            "path": p,
+            "label": _report_label(p),
+            "size": st.st_size,
+            "mtime": st.st_mtime,
+        }
+
+    all_friend_reports = sorted(
+        [_report_item(p) for p in friends_dir.glob("*.md")],
+        key=lambda item: item["mtime"],
+        reverse=True,
+    )
+    all_pair_reports = sorted(
+        [_report_item(p) for p in pairs_dir.glob("*.md")],
+        key=lambda item: item["mtime"],
+        reverse=True,
+    )
+    all_report_count = len(all_friend_reports) + len(all_pair_reports)
     index_lines = [
         "# Murmur 关系档案合集",
         "",
         f"由 {cli} 自动生成 · {datetime.now(CST).strftime('%Y-%m-%d %H:%M')} · "
-        f"耗时 {total_elapsed/60:.1f} 分钟 · 共 {len(summary)} 份报告",
+        f"本次新增/更新 {len(summary)} 份 · 当前目录共 {all_report_count} 份",
         "",
         "---",
         "",
         "## 个人档案",
         "",
     ]
-    friends_list = sorted([s for s in summary if s["type"] == "friend"],
-                            key=lambda s: -s.get("size", 0))
-    for s in friends_list:
-        rel = Path(s["out"]).relative_to(out_root).as_posix()
-        index_lines.append(f"- [{s['name']}]({rel}) — {s['size']//1000} KB · {s['elapsed']:.0f}s")
+    for item in all_friend_reports:
+        p = item["path"]
+        rel = p.relative_to(out_root).as_posix()
+        when = datetime.fromtimestamp(item["mtime"], CST).strftime("%m-%d %H:%M")
+        index_lines.append(f"- [{item['label']}]({rel}) — {item['size']//1000} KB · {when}")
     index_lines.extend(["", "## 朋友间关系推断", ""])
-    pair_list = sorted([s for s in summary if s["type"] == "pair"],
-                        key=lambda s: -s.get("size", 0))
-    for s in pair_list:
-        rel = Path(s["out"]).relative_to(out_root).as_posix()
-        index_lines.append(f"- [{s['a']} ↔ {s['b']}]({rel}) — {s['size']//1000} KB · {s['elapsed']:.0f}s")
+    for item in all_pair_reports:
+        p = item["path"]
+        rel = p.relative_to(out_root).as_posix()
+        when = datetime.fromtimestamp(item["mtime"], CST).strftime("%m-%d %H:%M")
+        index_lines.append(f"- [{item['label']}]({rel}) — {item['size']//1000} KB · {when}")
 
     (out_root / "index.md").write_text("\n".join(index_lines), encoding="utf-8")
     (out_root / "_summary.json").write_text(
@@ -361,8 +396,8 @@ def cmd_run(args):
     )
     print(f"\n[DONE] {len(summary)} reports in {total_elapsed/60:.1f} min")
     print(f"  → {out_root}/index.md")
-    if errors_log.exists():
-        print(f"  ⚠ errors logged to: {errors_log}")
+    if error_count:
+        print(f"  ⚠ {error_count} errors logged to: {errors_log}")
 
 
 def main():

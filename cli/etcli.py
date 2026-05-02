@@ -466,7 +466,11 @@ def relationship_dossier(store: EchoStore, username: str, sample_n: int = 50) ->
 
 # Light Chinese stopword list — kept short on purpose
 STOPWORDS = set("的 了 是 我 你 他 她 也 都 在 就 不 和 与 这 那 一 个 有 没 啊 吧 呀 嗯 哦 嘛 呢 吗 哈 呜 哇 噢 哎 唉 哟 唔 嗷 嘿 哼 啦 喔 等 把 被 让 给 从 向 对 跟 比 又 再 才 还 但 而 或 因 所 之 以 上 下 里 外 中 后 前 时 日 年 月 来 去 到 过 上 下 看 想 知 道 觉 得 说 讲 问 答 听 啥 那 这 谁 哪 哎 喂 哈 哈哈 嗯嗯 好 行 OK ok yes no 是 不是 可以 不行 不要 别 再 多 少 大 小 老 新 真 假 好的".split())
+STOPWORDS.update("这个 那个 一下 还是 就是 没有 什么 怎么 为啥 因为 然后 但是 现在 时候 感觉 确实 真的 知道 不知 我们 你们 他们 一个 今天 明天 昨天 哦哦 啧啧 看看 人家 不能 不会 应该 可能 还有 这么 那么 刚才 之前 之后 这里 那里 反正 okok okay yeah nope lol lmao".split())
+STOP_CHARS = set("的了是我你他她也都在就不和与这那一个有没啊吧呀嗯哦嘛呢吗哈呜哇噢哎唉哟唔嗷嘿哼啦喔把被让给从向对跟比又再才还但而或因所以之上下里外中后前时日年月来去到过")
 NON_TEXT = re.compile(r"\[[^\]]+\]")
+URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
+YEARBOOK_CACHE_VERSION = 4
 
 
 def _ts_to_dt(ts: int):
@@ -481,6 +485,28 @@ def _format_seconds(sec: int) -> str:
     if sec < 86400:
         return f"{sec // 3600}小时{(sec % 3600) // 60}分"
     return f"{sec // 86400}天{(sec % 86400) // 3600}小时"
+
+
+def _word_counts(texts: list[str]) -> Counter:
+    """Lightweight topic tokenizer: English words plus Chinese bigrams."""
+    cnt: Counter = Counter()
+    for t in texts:
+        t = URL_RE.sub(" ", NON_TEXT.sub(" ", t or ""))
+        tokens = re.findall(r"[\u4e00-\u9fff]+|[A-Za-z]{2,}", t)
+        for tk in tokens:
+            if re.fullmatch(r"[A-Za-z]{2,}", tk):
+                w = tk.lower()
+                if w not in STOPWORDS:
+                    cnt[w] += 1
+                continue
+            for i in range(len(tk) - 1):
+                bi = tk[i:i + 2]
+                if bi in STOPWORDS:
+                    continue
+                if bi[0] in STOP_CHARS or bi[-1] in STOP_CHARS:
+                    continue
+                cnt[bi] += 1
+    return cnt
 
 
 # ---------- Relationship-quality signal extraction ----------
@@ -575,6 +601,8 @@ _YEARBOOK_QUOTE_FIELDS = (
 
 def _yearbook_has_quote_ids(payload: dict) -> bool:
     """Reject pre-v0.2.6 yearbook caches that cannot drive privacy-safe UI labels."""
+    if payload.get("cache_version") != YEARBOOK_CACHE_VERSION:
+        return False
     for year in payload.get("years", []):
         for field in _YEARBOOK_QUOTE_FIELDS:
             for quote in year.get(field, []) or []:
@@ -984,8 +1012,8 @@ def local_analysis(store: EchoStore, username: str) -> dict:
                     cnt[bi] += 1
         return cnt
 
-    self_words = _words([m.text for m in text_self])
-    other_words = _words([m.text for m in text_other])
+    self_words = _word_counts([m.text for m in text_self])
+    other_words = _word_counts([m.text for m in text_other])
 
     # --- Date density: most active day, longest silence ---
     by_day = Counter(_ts_to_dt(m.create_time).date().isoformat() for m in msgs)
@@ -2638,7 +2666,7 @@ def friend_yearbook(store: EchoStore, wxid: str) -> dict:
     name = contact.display() or wxid
     msgs = list(store.messages(wxid, text_only=True))
     if not msgs:
-        return {"wxid": wxid, "name": name, "years": [], "total_msgs": 0}
+        return {"cache_version": YEARBOOK_CACHE_VERSION, "wxid": wxid, "name": name, "years": [], "total_msgs": 0}
 
     # Group by year
     by_year: dict[int, list[Message]] = {}
@@ -2704,19 +2732,96 @@ def friend_yearbook(store: EchoStore, wxid: str) -> dict:
         apology_quotes = find_kw(APOLOGY_KEYWORDS, 1)
         care_quotes = find_kw(CARE_KEYWORDS, 2)
 
-        # A signature quote: longest non-trivial message in this year (often substantive)
-        long_msgs = sorted(
-            [m for m in ymsgs if 8 <= len(m.text or "") <= 220],
-            key=lambda m: -len(m.text or "")
-        )
+        text_msgs = [m for m in ymsgs if m.msg_type == 1 and (m.text or "").strip()]
+        year_words = _word_counts([m.text for m in text_msgs])
+        top_words = [
+            {"word": w, "count": c}
+            for w, c in year_words.most_common(12)
+            if c >= 2
+        ]
+        top_terms = {item["word"].lower() for item in top_words[:8]}
+
+        # A signature quote: score readable snippets instead of blindly taking
+        # the longest message, which tends to pick URLs, boilerplate, or noise.
+        day_counts = Counter(_ts_to_dt(x.create_time).date().isoformat() for x in ymsgs)
+        max_day_count = max(day_counts.values()) if day_counts else 1
+
+        def _quoteable(text: str) -> bool:
+            t = (text or "").strip()
+            if not (6 <= len(t) <= 180):
+                return False
+            if URL_RE.search(t) or NON_TEXT.fullmatch(t):
+                return False
+            if re.fullmatch(r"[\d\s:：./,_-]+", t):
+                return False
+            signal_chars = re.findall(r"[\u4e00-\u9fffA-Za-z0-9]", t)
+            if len(signal_chars) < 4:
+                return False
+            if len(signal_chars) / max(1, len(t)) < 0.35:
+                return False
+            if t.lower() in {"ok", "okay", "okok", "哈哈", "哈哈哈", "hhh", "hhhh"}:
+                return False
+            return True
+
+        def _signature_score(idx: int, m: Message) -> tuple[float, list[str], str]:
+            t = (m.text or "").strip()
+            lower = t.lower()
+            hits = [w for w in top_terms if w and w in lower]
+            score = 0.0
+            score += min(len(t), 90) / 24
+            if 12 <= len(t) <= 90:
+                score += 3
+            if len(t) > 120:
+                score -= 2
+            score += min(12, len(hits) * 4)
+
+            kw_reason = ""
+            for label, kws, weight in (
+                ("线下/一起做事", OFFLINE_KEYWORDS, 5),
+                ("互相关心", CARE_KEYWORDS, 4),
+                ("人生节点", LIFECYCLE_KEYWORDS, 4),
+                ("脆弱表达", VULN_KEYWORDS, 3),
+                ("道歉/修复", APOLOGY_KEYWORDS, 3),
+            ):
+                if any(k in t for k in kws):
+                    score += weight
+                    if not kw_reason:
+                        kw_reason = label
+
+            for j in (idx - 1, idx + 1):
+                if 0 <= j < len(ymsgs):
+                    near = ymsgs[j]
+                    if near.sender_wxid != m.sender_wxid and abs(near.create_time - m.create_time) <= 15 * 60:
+                        score += 4
+                        break
+
+            day = _ts_to_dt(m.create_time).date().isoformat()
+            score += min(3, day_counts.get(day, 0) / max(1, max_day_count) * 3)
+            if "?" in t or "？" in t:
+                score += 0.8
+            if hits:
+                reason = "含年度高频词：" + "、".join(hits[:3])
+            elif kw_reason:
+                reason = kw_reason
+            else:
+                reason = "来自高频互动日"
+            return score, hits[:3], reason
+
+        scored_msgs = []
+        for idx, m in enumerate(ymsgs):
+            if m.msg_type == 1 and _quoteable(m.text or ""):
+                score, terms, reason = _signature_score(idx, m)
+                scored_msgs.append((score, terms, reason, m))
         signature = None
-        if long_msgs:
-            sig_m = long_msgs[0]
+        if scored_msgs:
+            _score, terms, reason, sig_m = sorted(scored_msgs, key=lambda item: -item[0])[0]
             signature = {
                 "date": _ts_to_dt(sig_m.create_time).strftime("%Y-%m-%d"),
                 "from": sig_m.sender_name,
                 "from_id": sig_m.sender_wxid,
                 "text": sig_m.text[:240],
+                "terms": terms,
+                "reason": reason,
             }
 
         # Late-night ratio
@@ -2747,10 +2852,12 @@ def friend_yearbook(store: EchoStore, wxid: str) -> dict:
             "lifecycle_quotes": lifecycle_quotes,
             "apology_quotes": apology_quotes,
             "care_quotes": care_quotes,
+            "top_words": top_words,
             "signature": signature,
         })
 
     return {
+        "cache_version": YEARBOOK_CACHE_VERSION,
         "wxid": wxid,
         "name": name,
         "total_msgs": len(msgs),
@@ -3483,11 +3590,13 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             running = any(_pid_running(one_pid) for one_pid in pids)
             log_tail = ""
             log_text = ""
+            per_log_progress: list[dict] = []
             for lp in log_paths:
                 p = Path(lp)
                 if p.exists():
                     try:
                         text = p.read_text(encoding="utf-8", errors="replace")
+                        per_log_progress.append(_batch_progress_from_log(text))
                         log_text += text + "\n"
                         if len(log_paths) > 1:
                             label = p.stem.replace("batch_", "")
@@ -3496,7 +3605,25 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                             log_tail = text[-3000:]
                     except OSError:
                         pass
-            progress = _batch_progress_from_log(log_text)
+            if len(per_log_progress) > 1:
+                progress = {
+                    "friends_done": 0,
+                    "friends_total": 0,
+                    "pairs_done": 0,
+                    "pairs_total": 0,
+                    "failures": 0,
+                    "skipped": 0,
+                    "last_stage": "",
+                    "crashed": False,
+                }
+                for item in per_log_progress:
+                    for key in ("friends_done", "friends_total", "pairs_done", "pairs_total", "failures", "skipped"):
+                        progress[key] += item.get(key, 0) or 0
+                    progress["crashed"] = progress["crashed"] or bool(item.get("crashed"))
+                    if item.get("last_stage"):
+                        progress["last_stage"] = item["last_stage"]
+            else:
+                progress = _batch_progress_from_log(log_text)
             # Snapshot current report counts. These are all reports in the active
             # reports directory; progress fields above describe only this run.
             reports_root = _agent_reports_root()

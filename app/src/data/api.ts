@@ -231,7 +231,8 @@ export interface YearData {
   lifecycle_quotes: Array<{ date: string; from: string; from_id?: string; text: string }>;
   apology_quotes: Array<{ date: string; from: string; from_id?: string; text: string }>;
   care_quotes: Array<{ date: string; from: string; from_id?: string; text: string }>;
-  signature: { date: string; from: string; from_id?: string; text: string } | null;
+  top_words?: Array<{ word: string; count: number }>;
+  signature: { date: string; from: string; from_id?: string; text: string; reason?: string; terms?: string[] } | null;
 }
 
 export interface Yearbook {
