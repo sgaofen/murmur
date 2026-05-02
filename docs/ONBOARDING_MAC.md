@@ -182,6 +182,24 @@ xattr -dr com.apple.quarantine /Applications/Murmur.app
 
 修：回 WeChat 多点几个对话 / 翻翻朋友圈，让它派生更多 key 到内存，回 Murmur 再点一次「开始自动抓取」。
 
+### Q：找不到微信数据
+
+Murmur 默认找 WeChat 4.x 的容器目录和 `~/Documents/xwechat_files/`。如果你的微信数据迁移到了别处，可以设置 `MURMUR_WECHAT_ROOT`：
+
+```bash
+export MURMUR_WECHAT_ROOT="$HOME/Documents/xwechat_files"
+bash start-mac.sh
+```
+
+也可以直接指向某个账号目录，例如 `$HOME/Documents/xwechat_files/wxid_xxx_abcd`。多个候选目录用英文冒号 `:` 分隔。
+
+如果你用的是 `/Applications/Murmur.app`，先把变量写进 launchd，再重新打开：
+
+```bash
+launchctl setenv MURMUR_WECHAT_ROOT "$HOME/Documents/xwechat_files"
+open -a Murmur
+```
+
 ### Q：重签名失败
 
 可能你装的不是标准位置 `/Applications/WeChat.app`。看 onboarding 的错误日志，把 `codesign` 命令手动复制到终端跑一遍，看 stderr。

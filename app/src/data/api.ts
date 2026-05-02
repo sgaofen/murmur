@@ -244,14 +244,15 @@ export async function getYearbook(wxid: string): Promise<Yearbook> {
 }
 
 export interface BatchStartReq {
-  cli: 'claude' | 'codex';
+  cli: 'claude' | 'codex' | 'both';
   mode: 'top' | 'all' | 'pairs-graph';
   top?: number;
   top_pairs?: number;
   force?: boolean;
+  parallel?: number;
 }
 export async function startBatch(req: BatchStartReq): Promise<{
-  ok: boolean; pid?: number; log_path?: string; error?: string;
+  ok: boolean; pid?: number; pids?: number[]; log_path?: string; log_paths?: string[]; error?: string;
 }> {
   return j('/api/agents/batch', {
     method: 'POST',
@@ -259,13 +260,13 @@ export async function startBatch(req: BatchStartReq): Promise<{
     body: JSON.stringify(req),
   });
 }
-export async function getBatchStatus(pid: number, log_path: string): Promise<{
+export async function getBatchStatus(pid: number, log_path: string, pids?: number[], log_paths?: string[]): Promise<{
   running: boolean; n_friends: number; n_pairs: number; log_tail: string;
 }> {
   return j('/api/agents/batch/status', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ pid, log_path }),
+    body: JSON.stringify({ pid, log_path, pids, log_paths }),
   });
 }
 
@@ -324,4 +325,4 @@ export async function openFolder(path?: string): Promise<{ ok: boolean; opened?:
   });
 }
 
-export const APP_VERSION = 'v0.1 · Murmur 微语';
+export const APP_VERSION = 'v0.2.6 · Murmur 微语';

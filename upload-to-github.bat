@@ -52,13 +52,13 @@ if errorlevel 1 (
 )
 
 echo.
-echo [3/3] 上传 Release 安装包（v0.1.0）...
+echo [3/3] 上传 Release 安装包（v0.2.6）...
 echo.
-"%GH%" release create v0.1.0 ^
-    "app\src-tauri\target\release\bundle\msi\Murmur_0.1.0_x64_en-US.msi" ^
-    "app\src-tauri\target\release\bundle\nsis\Murmur_0.1.0_x64-setup.exe" ^
-    --title "Murmur v0.1.0 — Windows" ^
-    --notes "首发 Windows 版。Mac dmg 等下次构建。详细安装指南：docs/ONBOARDING_WINDOWS.md"
+"%GH%" release create v0.2.6 ^
+    "app\src-tauri\target\release\bundle\msi\Murmur_0.2.6_x64_en-US.msi" ^
+    "app\src-tauri\target\release\bundle\nsis\Murmur_0.2.6_x64-setup.exe" ^
+    --title "Murmur v0.2.6 — Windows" ^
+    --notes "Windows 自包含安装包。推荐下载 NSIS .exe；MSI 主要给 IT 部署。详细安装指南：docs/ONBOARDING_WINDOWS.md"
 
 echo.
 echo  ✓ 完成！打开 https://github.com/sgaofen/murmur

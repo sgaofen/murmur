@@ -194,6 +194,117 @@ def iter_interactions(decrypted_dir: Path) -> Iterator[dict]:
         c.close()
 
 
+def _local_extra_users(root: ET.Element, parent_tag: str) -> Iterator[dict]:
+    extra = root.find(".//LocalExtraInfo")
+    if extra is None:
+        return
+    el = extra.find(parent_tag)
+    if el is None:
+        return
+    for uc in el.findall("user_comment"):
+        un_e = uc.find("username")
+        un = un_e.text.strip() if un_e is not None and un_e.text else ""
+        if not un:
+            continue
+        nick_e = uc.find("nickname")
+        content_e = uc.find("content")
+        yield {
+            "username": un,
+            "nickname": nick_e.text.strip() if nick_e is not None and nick_e.text else "",
+            "content": content_e.text.strip() if content_e is not None and content_e.text else "",
+        }
+
+
+def friend_context(decrypted_dir: Path, self_wxid: str, friend_wxid: str,
+                   *, limit: int = 8) -> dict:
+    """Concrete Moments context for one friend.
+
+    Counts alone are too weak for LLM analysis. This returns quote-able samples:
+    the friend's posts, your interactions on their posts, their interactions on
+    your posts, and "with/@ mention" style co-presence in Moments XML.
+    """
+    out = {
+        "posts": [],
+        "you_interacted": [],
+        "they_interacted": [],
+        "with_each_other": [],
+        "counts": {
+            "friend_posts_seen": 0,
+            "you_liked_them": 0,
+            "you_commented_them": 0,
+            "they_liked_you": 0,
+            "they_commented_you": 0,
+            "with_each_other": 0,
+        },
+    }
+    c = open_sns_db(decrypted_dir)
+    try:
+        for tid, user_name, content in c.execute(
+            "SELECT tid, user_name, content FROM SnsTimeLine ORDER BY tid DESC"
+        ):
+            if not content:
+                continue
+            parsed = parse_timeline_xml(content)
+            owner = parsed.get("username") or user_name
+            ts = parsed.get("create_time") or 0
+            date = datetime.fromtimestamp(ts, CST).strftime("%Y-%m-%d") if ts else ""
+            post_text = (parsed.get("content_desc") or parsed.get("title") or parsed.get("description") or "").strip()
+            post = {
+                "date": date,
+                "owner": owner,
+                "type": parsed.get("type_label"),
+                "text": post_text[:220],
+                "title": (parsed.get("title") or "")[:120],
+                "location": parsed.get("location"),
+                "media_count": len(parsed.get("media") or []),
+            }
+            try:
+                root = ET.fromstring(content)
+            except ET.ParseError:
+                root = None
+
+            if owner == friend_wxid:
+                out["counts"]["friend_posts_seen"] += 1
+                if len(out["posts"]) < limit and (post_text or post["title"] or post["media_count"]):
+                    out["posts"].append(post)
+                if root is not None:
+                    for actor in _local_extra_users(root, "like_user_list"):
+                        if actor["username"] == self_wxid:
+                            out["counts"]["you_liked_them"] += 1
+                            if len(out["you_interacted"]) < limit:
+                                out["you_interacted"].append({**post, "kind": "like", "comment": ""})
+                    for actor in _local_extra_users(root, "comment_user_list"):
+                        if actor["username"] == self_wxid:
+                            out["counts"]["you_commented_them"] += 1
+                            if len(out["you_interacted"]) < limit:
+                                out["you_interacted"].append({**post, "kind": "comment", "comment": actor["content"][:160]})
+                    for actor in _local_extra_users(root, "with_user_list"):
+                        if actor["username"] == self_wxid:
+                            out["counts"]["with_each_other"] += 1
+                            if len(out["with_each_other"]) < limit:
+                                out["with_each_other"].append({**post, "kind": "friend_with_you"})
+
+            elif owner == self_wxid and root is not None:
+                for actor in _local_extra_users(root, "like_user_list"):
+                    if actor["username"] == friend_wxid:
+                        out["counts"]["they_liked_you"] += 1
+                        if len(out["they_interacted"]) < limit:
+                            out["they_interacted"].append({**post, "kind": "like", "comment": ""})
+                for actor in _local_extra_users(root, "comment_user_list"):
+                    if actor["username"] == friend_wxid:
+                        out["counts"]["they_commented_you"] += 1
+                        if len(out["they_interacted"]) < limit:
+                            out["they_interacted"].append({**post, "kind": "comment", "comment": actor["content"][:160]})
+                for actor in _local_extra_users(root, "with_user_list"):
+                    if actor["username"] == friend_wxid:
+                        out["counts"]["with_each_other"] += 1
+                        if len(out["with_each_other"]) < limit:
+                            out["with_each_other"].append({**post, "kind": "you_with_friend"})
+    finally:
+        c.close()
+    return out
+
+
 def per_friend_signals(decrypted_dir: Path, self_wxid: str) -> dict[str, dict]:
     """Compute per-friend Moments-based signals (extra evidence for closeness).
 

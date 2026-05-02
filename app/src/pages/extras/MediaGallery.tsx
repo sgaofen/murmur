@@ -49,7 +49,7 @@ export function MediaGallery({ friend }: Props) {
     // For v0, we don't have a per-friend media listing endpoint yet.
     // Read the global media-index.json (served via /api/media-list — to be added)
     // Until that exists, we fall back to mock.
-    const BASE = (import.meta.env?.VITE_ETCLI_URL as string) || 'http://localhost:9100';
+    const BASE = (import.meta.env?.VITE_ETCLI_URL as string) || 'http://127.0.0.1:9100';
     fetch(BASE + '/api/friend/' + encodeURIComponent(friend.id) + '/media')
       .then(r => r.ok ? r.json() : [])
       .then(d => setItems(Array.isArray(d) ? d : []))

@@ -24,6 +24,7 @@ from paths import (
 )
 
 SKIP = {'message_fts.db', 'contact_fts.db', 'favorite_fts.db', 'message_resource.db'}
+_DLL_DIR_HANDLE = None
 
 
 def load_dll():
@@ -34,7 +35,9 @@ def load_dll():
     dll = nd / 'go_decrypt.dll'
     if not dll.exists():
         return None
-    os.add_dll_directory(str(nd))
+    global _DLL_DIR_HANDLE
+    if hasattr(os, "add_dll_directory"):
+        _DLL_DIR_HANDLE = os.add_dll_directory(str(nd))
     lib = ctypes.CDLL(str(dll))
     lib.DecryptDatabase.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p]
     lib.DecryptDatabase.restype = ctypes.c_void_p
@@ -73,6 +76,8 @@ def find_decrypt_key(profile: WeChatProfile, override: str | None = None) -> str
     cfg = load_config()
     if cfg.get("decrypt_key"):
         return cfg["decrypt_key"].strip().lower()
+    if cfg.get("key"):
+        return cfg["key"].strip().lower()
     # Legacy: read from echotrace's shared_preferences.json
     if IS_WINDOWS:
         legacy = Path(os.environ.get("APPDATA") or "") / "com.example/echotrace/shared_preferences.json"
@@ -188,8 +193,13 @@ def _decrypt_per_db(profile: WeChatProfile, per_db: dict) -> int:
     n_ok = sum(1 for _, ok, _ in results if ok)
     n_fail = len(results) - n_ok
     print(f"\n[DONE] 解密 {n_ok} 个，swap {moved} 个，失败 {n_fail} 个")
-    # Mac path: succeed if at least the core DBs (session, contact) are decrypted
-    return 0 if n_ok > 0 else 1
+    core = {"session.db", "contact.db"}
+    moved_names = {fname for fname, ok, _ in results if ok}
+    missing_core = sorted(core - moved_names)
+    if missing_core:
+        print(f"[ERR] 核心数据库未解密: {', '.join(missing_core)}")
+        return 1
+    return 0
 
 
 def main():
@@ -212,8 +222,8 @@ def main():
     if not key_hex:
         raise SystemExit(
             "找不到密钥。请先运行：\n"
-            "    python extract_key_dll.py --auto-restart --save-to ~/.murmur/key.json\n"
-            "或者用 --key <64位hex> 直接传入。"
+            "    python extract_key_dll.py --save-to ~/.murmur/config.json\n"
+            "或者在 Murmur 引导里点击「开始抓密钥」，也可以用 --key <64位hex> 直接传入。"
         )
     if len(key_hex) != 64:
         raise SystemExit(f"密钥长度不对：{len(key_hex)} 字符 (应为 64).")
@@ -270,6 +280,12 @@ def main():
     n_ok = sum(1 for _, ok, _ in results if ok)
     n_fail = len(results) - n_ok
     print(f"\n[DONE] 解密 {n_ok} 个，swap {moved} 个，失败 {n_fail} 个")
+    core = {"session.db", "contact.db"}
+    moved_names = {fname for fname, ok, _ in results if ok}
+    missing_core = sorted(core - moved_names)
+    if missing_core:
+        print(f"[ERR] 核心数据库未解密: {', '.join(missing_core)}")
+        return 1
     return 0 if n_fail == 0 else 1
 
 

@@ -21,6 +21,12 @@ from typing import Iterable, Iterator, Optional
 
 CST = timezone(timedelta(hours=8))
 
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 MSG_TYPES = {
     1: "text", 3: "image", 34: "voice", 42: "card", 43: "video",
     47: "emoji", 48: "location", 49: "share", 50: "voip",
@@ -560,6 +566,7 @@ _YEARBOOK_CACHE: dict[str, tuple[float, dict]] = {}     # per-wxid yearbook
 _PAIR_PACK_CACHE: dict[str, tuple[float, dict]] = {}    # sorted-pair-key → pack
 _PAIR_REPORT_CACHE: dict[str, tuple[float, dict]] = {}  # sorted-pair-key → report metadata
 _MENTIONS_CACHE: dict[str, tuple[float, dict]] = {}     # mentions(top_n,min_mc) → result
+_FRIEND_MOMENTS_CONTEXT_CACHE: dict[str, tuple[float, dict]] = {}
 _PAIR_STREAM: dict[str, dict] = {}    # pair_key → {running, output, error, started_at, finished_at, name_a, name_b, cli}
 _FRIEND_STREAM: dict[str, dict] = {}  # wxid → same shape as pair stream (single-friend invoke)
 _CACHE_TTL = 86400  # 1 day — caches are persisted to disk so a stale day-old cache is fine.
@@ -569,6 +576,7 @@ _CACHE_TTL = 86400  # 1 day — caches are persisted to disk so a stale day-old 
 import threading as _t
 _PACK_BUILD_LOCK = _t.Lock()
 _PAIR_BUILD_LOCK = _t.Lock()
+_STORE_READ_LOCK = _t.RLock()
 
 # Disk cache root: ~/Documents/Murmur/cache/<key>.json
 def _disk_cache_dir() -> Path:
@@ -605,6 +613,103 @@ def _disk_clear() -> None:
             f.unlink(missing_ok=True)
     except Exception:
         pass
+
+
+def get_friend_mentions_cached(store: EchoStore, top_n: int = 50,
+                               min_mention_count: int = 3) -> dict:
+    ck = f"mentions:{top_n}:{min_mention_count}"
+    cached = _MENTIONS_CACHE.get(ck)
+    if cached and (_time.time() - cached[0]) < _CACHE_TTL:
+        return cached[1]
+    disk = _disk_load(ck)
+    if disk and (_time.time() - disk["_ts"]) < _CACHE_TTL:
+        mentions = disk["_payload"]
+        _MENTIONS_CACHE[ck] = (disk["_ts"], mentions)
+        return mentions
+    with _STORE_READ_LOCK:
+        cached = _MENTIONS_CACHE.get(ck)
+        if cached and (_time.time() - cached[0]) < _CACHE_TTL:
+            return cached[1]
+        mentions = extract_friend_mentions(store, top_n=top_n, min_mention_count=min_mention_count)
+        _MENTIONS_CACHE[ck] = (_time.time(), mentions)
+        _disk_save(ck, mentions)
+        return mentions
+
+
+def get_relationship_graph_cached(store: EchoStore, *,
+                                  scope: str = "all",
+                                  min_private: int = 10,
+                                  recent_days: int = 365,
+                                  top_n: int = 600,
+                                  show_clusters: bool = False) -> dict:
+    ck = f"graph:{scope}:{min_private}:{recent_days}:{top_n}:{show_clusters}"
+    cached = _GRAPH_CACHE.get(ck)
+    if cached and (_time.time() - cached[0]) < _CACHE_TTL:
+        return cached[1]
+    disk = _disk_load(ck)
+    if disk and (_time.time() - disk["_ts"]) < _CACHE_TTL:
+        _GRAPH_CACHE[ck] = (disk["_ts"], disk["_payload"])
+        return disk["_payload"]
+    with _STORE_READ_LOCK:
+        graph = build_relationship_graph(
+            store, scope=scope, min_private=min_private,
+            recent_days=recent_days, top_n=top_n, show_clusters=show_clusters,
+        )
+    _GRAPH_CACHE[ck] = (_time.time(), graph)
+    _disk_save(ck, graph)
+    return graph
+
+
+def pair_direct_evidence(store: EchoStore, wxid_a: str, wxid_b: str) -> dict:
+    """Return direct A<->B evidence. Co-presence in groups alone is intentionally not enough."""
+    pair = {wxid_a, wxid_b}
+    graph = get_relationship_graph_cached(store, scope="all", top_n=600)
+    contacts = store.contacts()
+    name_a = (contacts.get(wxid_a).display() if contacts.get(wxid_a) else wxid_a)
+    name_b = (contacts.get(wxid_b).display() if contacts.get(wxid_b) else wxid_b)
+    direct_edges = []
+    weak_edges = []
+    for e in graph.get("edges", []):
+        if {e.get("source"), e.get("target")} != pair:
+            continue
+        if e.get("source") == "self" or e.get("target") == "self":
+            continue
+        et = e.get("type")
+        has_direct_meta = (e.get("mention_count") or 0) >= 1 or (e.get("moments_cross") or 0) >= 1
+        if et in {"mutual_reply", "mention", "moments_cross"} or has_direct_meta:
+            direct_edges.append(e)
+        else:
+            weak_edges.append(e)
+    return {
+        "ok": bool(direct_edges),
+        "a": wxid_a,
+        "b": wxid_b,
+        "name_a": name_a,
+        "name_b": name_b,
+        "direct_edges": direct_edges,
+        "weak_edges": weak_edges,
+        "message": (
+            "找到直接证据"
+            if direct_edges
+            else "没有找到直接关系证据；共同群/共同出现不能证明两人认识，已拒绝生成 AI 关系推断。"
+        ),
+    }
+
+
+def get_friend_moments_context_cached(store: EchoStore, wxid: str, limit: int = 8) -> dict:
+    ck = f"{wxid}:{limit}"
+    cached = _FRIEND_MOMENTS_CONTEXT_CACHE.get(ck)
+    if cached and (_time.time() - cached[0]) < _CACHE_TTL:
+        return cached[1]
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import sns as _sns_mod
+        ctx = _sns_mod.friend_context(store.dir, store.me or "", wxid, limit=limit)
+    except Exception as e:
+        sys.stderr.write(f"[sns friend_context] failed for {wxid}: {e}\n")
+        ctx = {"posts": [], "you_interacted": [], "they_interacted": [], "with_each_other": [], "counts": {}}
+    _FRIEND_MOMENTS_CONTEXT_CACHE[ck] = (_time.time(), ctx)
+    return ctx
 
 
 def get_sns_signals_cached(store: EchoStore) -> dict:
@@ -1418,7 +1523,7 @@ def build_analysis_pack(store: EchoStore, username: str, sample_n: int = 80,
     # === Cross-references: this person being mentioned in your chats with OTHER friends ===
     if not a["is_group"]:
         try:
-            mentions = extract_friend_mentions(store, top_n=50, min_mention_count=2)
+            mentions = get_friend_mentions_cached(store, top_n=50, min_mention_count=2)
         except Exception:
             mentions = {}
         # Find pairs where this person is mentioned
@@ -1441,6 +1546,58 @@ def build_analysis_pack(store: EchoStore, username: str, sample_n: int = 80,
                 parts.append(f"\n**当你和「{r['other']}」聊天时**，提到「{name}」 {r['count']} 次：")
                 for ex in r["examples"]:
                     parts.append(f"- `[{ex['date']}]` {ex['from']}: {ex['text']}")
+
+    # === Moments context: public posts + concrete like/comment evidence ===
+    if not a["is_group"]:
+        moments_ctx = get_friend_moments_context_cached(store, username, limit=8)
+        counts = moments_ctx.get("counts") or {}
+        has_moments_ctx = any(moments_ctx.get(k) for k in ("posts", "you_interacted", "they_interacted", "with_each_other"))
+        if has_moments_ctx or any(counts.get(k, 0) for k in counts):
+            parts.append("\n---\n")
+            parts.append(f"## 朋友圈上下文：「{name}」的公开侧与互动态\n")
+            parts.append(
+                "> 朋友圈比私聊更能显示这个人在公共场合如何表达、你们是否互相关注。"
+                "下面是具体样本；没有样本时只能把计数当弱信号。\n"
+            )
+            parts.append(
+                f"- 你看到的TA朋友圈: {counts.get('friend_posts_seen', 0)} 条；"
+                f"你赞/评TA: {counts.get('you_liked_them', 0)} / {counts.get('you_commented_them', 0)}；"
+                f"TA赞/评你: {counts.get('they_liked_you', 0)} / {counts.get('they_commented_you', 0)}；"
+                f"彼此@/同框: {counts.get('with_each_other', 0)}\n"
+            )
+
+            def _post_line(item: dict) -> str:
+                bits = []
+                if item.get("text"):
+                    bits.append(f"「{item['text']}」")
+                if item.get("title"):
+                    bits.append(f"标题：{item['title']}")
+                if item.get("location"):
+                    loc = item["location"]
+                    bits.append(f"地点：{loc.get('poi') or (str(loc.get('lat')) + ',' + str(loc.get('lon')))}")
+                if item.get("media_count"):
+                    bits.append(f"媒体 {item['media_count']} 个")
+                body = "；".join(bits) or "(无文字，仅互动/媒体)"
+                return f"- `[{item.get('date', '')}]` {item.get('type', '')}: {body}"
+
+            if moments_ctx.get("posts"):
+                parts.append("\n**TA发过的朋友圈样本**：")
+                for item in moments_ctx["posts"][:6]:
+                    parts.append(_post_line(item))
+            if moments_ctx.get("you_interacted"):
+                parts.append("\n**你对TA朋友圈的赞/评论样本**：")
+                for item in moments_ctx["you_interacted"][:6]:
+                    comment = f"；你的评论：{item['comment']}" if item.get("comment") else ""
+                    parts.append(_post_line(item) + f"（{item.get('kind')}）{comment}")
+            if moments_ctx.get("they_interacted"):
+                parts.append("\n**TA对你朋友圈的赞/评论样本**：")
+                for item in moments_ctx["they_interacted"][:6]:
+                    comment = f"；TA评论：{item['comment']}" if item.get("comment") else ""
+                    parts.append(_post_line(item) + f"（{item.get('kind')}）{comment}")
+            if moments_ctx.get("with_each_other"):
+                parts.append("\n**朋友圈@/同框/with样本**：")
+                for item in moments_ctx["with_each_other"][:4]:
+                    parts.append(_post_line(item) + f"（{item.get('kind')}）")
 
     # === Voice transcripts (Whisper-decoded) ===
     if not a["is_group"]:
@@ -1899,6 +2056,21 @@ from http.server import HTTPServer, BaseHTTPRequestHandler, ThreadingHTTPServer
 import subprocess
 import threading
 import time as _time
+
+
+def _is_allowed_origin(origin: str | None) -> bool:
+    """Allow only the bundled app and local dev origins to call the loopback API."""
+    if not origin:
+        return True
+    try:
+        u = urllib.parse.urlparse(origin)
+    except Exception:
+        return False
+    host = (u.hostname or "").lower()
+    return (
+        host in {"localhost", "127.0.0.1", "::1", "tauri.localhost"}
+        or host.endswith(".localhost")
+    )
 
 
 # Auto-derive friend cards (mirrors what the React app expects)
@@ -2531,27 +2703,42 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
+        origin = self.headers.get("Origin")
+        if _is_allowed_origin(origin):
+            self.send_header("Access-Control-Allow-Origin", origin or "*")
+            if origin:
+                self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
         self.wfile.write(body)
 
     def do_OPTIONS(self):  # noqa: N802
+        if not _is_allowed_origin(self.headers.get("Origin")):
+            self.send_response(403)
+            self.end_headers()
+            return
         self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
+        origin = self.headers.get("Origin")
+        self.send_header("Access-Control-Allow-Origin", origin or "*")
+        if origin:
+            self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
 
     def do_GET(self):  # noqa: N802
         try:
+            if not _is_allowed_origin(self.headers.get("Origin")):
+                return self._send_json({"error": "forbidden origin"}, status=403)
             self._dispatch_get()
         except Exception as e:
             self._send_json({"error": str(e), "type": type(e).__name__}, status=500)
 
     def do_POST(self):  # noqa: N802
         try:
+            if not _is_allowed_origin(self.headers.get("Origin")):
+                return self._send_json({"error": "forbidden origin"}, status=403)
             self._dispatch_post()
         except Exception as e:
             self._send_json({"error": str(e), "type": type(e).__name__}, status=500)
@@ -2593,7 +2780,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 return self._send_json({
                     "data_dir": None,
                     "self_wxid": None,
-                    "version": "0.1",
+                    "version": "0.2.6",
                     "bootstrap": True,
                     "needs_onboarding": True,
                     "reason": "no decrypted data — run extract-key + refresh to bootstrap",
@@ -2601,7 +2788,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             return self._send_json({
                 "data_dir": str(self.store.dir),
                 "self_wxid": self.store.me,
-                "version": "0.1",
+                "version": "0.2.6",
             })
 
         # Onboarding gate: data-needing endpoints return 503 until store is ready.
@@ -2622,25 +2809,15 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             recent_days = int(qs.get("recent_days", [365])[0])
             top_n = int(qs.get("top_n", [100])[0])
             show_clusters = qs.get("show_clusters", ["false"])[0] != "false"
-            ck = f"graph:{scope}:{min_private}:{recent_days}:{top_n}:{show_clusters}"
-            cached = _GRAPH_CACHE.get(ck)
-            if cached and (_time.time() - cached[0]) < _CACHE_TTL:
-                return self._send_json(cached[1])
-            disk = _disk_load(ck)
-            if disk and (_time.time() - disk["_ts"]) < _CACHE_TTL:
-                _GRAPH_CACHE[ck] = (disk["_ts"], disk["_payload"])
-                return self._send_json(disk["_payload"])
-            payload = build_relationship_graph(
+            payload = get_relationship_graph_cached(
                 self.store, scope=scope, min_private=min_private,
                 recent_days=recent_days, top_n=top_n, show_clusters=show_clusters,
             )
-            _GRAPH_CACHE[ck] = (_time.time(), payload)
-            _disk_save(ck, payload)
             return self._send_json(payload)
         if path == "/api/friend-mentions":
             top_n = int(qs.get("top_n", [50])[0])
             min_n = int(qs.get("min", [3])[0])
-            return self._send_json(extract_friend_mentions(self.store, top_n=top_n, min_mention_count=min_n))
+            return self._send_json(get_friend_mentions_cached(self.store, top_n=top_n, min_mention_count=min_n))
         if path == "/api/friend-identity-pack":
             wxid = qs.get("wxid", [""])[0]
             sample = int(qs.get("sample", [80])[0])
@@ -2653,6 +2830,13 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             b = qs.get("b", [""])[0]
             if not a or not b:
                 return self._send_json({"error": "a and b required"}, 400)
+            evidence = pair_direct_evidence(self.store, a, b)
+            if not evidence["ok"]:
+                return self._send_json({
+                    "error": "no_direct_pair_evidence",
+                    "message": evidence["message"],
+                    "evidence": evidence,
+                }, 422)
             ck = "pairpack_" + "__".join(sorted([a, b]))
             cached = _PAIR_PACK_CACHE.get(ck)
             if cached and (_time.time() - cached[0]) < _CACHE_TTL:
@@ -2661,21 +2845,8 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             if disk and (_time.time() - disk["_ts"]) < _CACHE_TTL:
                 _PAIR_PACK_CACHE[ck] = (disk["_ts"], disk["_payload"])
                 return self._send_json(disk["_payload"])
-            mck = "mentions:50:3"
-            mcached = _MENTIONS_CACHE.get(mck)
-            if mcached and (_time.time() - mcached[0]) < _CACHE_TTL:
-                mentions = mcached[1]
-            else:
-                disk_m = _disk_load(mck)
-                if disk_m and (_time.time() - disk_m["_ts"]) < _CACHE_TTL:
-                    mentions = disk_m["_payload"]
-                    _MENTIONS_CACHE[mck] = (disk_m["_ts"], mentions)
-                else:
-                    with _PAIR_BUILD_LOCK:
-                        mentions = extract_friend_mentions(self.store, top_n=50, min_mention_count=3)
-                    _MENTIONS_CACHE[mck] = (_time.time(), mentions)
-                    _disk_save(mck, mentions)
-            with _PAIR_BUILD_LOCK:
+            with _STORE_READ_LOCK:
+                mentions = get_friend_mentions_cached(self.store, top_n=50, min_mention_count=3)
                 pack = build_pair_inference_pack(self.store, a, b, mentions=mentions)
             payload = {"pack": pack, "a": a, "b": b, "size": len(pack)}
             _PAIR_PACK_CACHE[ck] = (_time.time(), payload)
@@ -2715,8 +2886,10 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     stem = p.stem
                     after_idx = stem.split("_", 1)[1] if "_" in stem else stem
                     parts = after_idx.split("__")
-                    if len(parts) != 2:
+                    if len(parts) < 2:
                         continue
+                    # Optional third part is an agent suffix (__claude/__codex)
+                    # used by parallel multi-agent batch runs.
                     if {parts[0], parts[1]} != target:
                         continue
                     try:
@@ -2905,7 +3078,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                         "month": rec.get("month") or "未知",
                         "ts": 0,  # we don't have per-file mtime yet
                         "from": None,
-                        "url": f"http://localhost:9100/api/media/{md5}",
+                        "url": f"http://127.0.0.1:9100/api/media/{md5}",
                         "size": rec.get("size", 0),
                     })
                 # Sort by month desc, then by filename
@@ -2938,13 +3111,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     _CONN_CACHE[wxid] = (disk["_ts"], disk["_payload"])
                     return self._send_json(disk["_payload"])
                 # Reuse the cached "all" graph if we already built it
-                ck_all = f"graph:all:10:365:600:False"
-                gcache = _GRAPH_CACHE.get(ck_all)
-                if gcache and (_time.time() - gcache[0]) < _CACHE_TTL:
-                    graph = gcache[1]
-                else:
-                    graph = build_relationship_graph(self.store, scope="all", top_n=600)
-                    _GRAPH_CACHE[ck_all] = (_time.time(), graph)
+                graph = get_relationship_graph_cached(self.store, scope="all", top_n=600)
                 connections = []
                 for e in graph["edges"]:
                     other = None
@@ -3001,23 +3168,34 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             ok = r.returncode == 0
             # Reload store + flush every cache so the new data shows immediately
             if ok:
-                if self.store is None:
-                    # Bootstrap mode: this was the first decrypt — instantiate store now
-                    try:
-                        new_dir = discover_data_dir()
-                        if new_dir and new_dir.exists():
-                            _MurmurAPIHandler.store = EchoStore(new_dir)
-                    except Exception as e:
-                        sys.stderr.write(f"[refresh] post-decrypt store init failed: {e}\n")
-                else:
-                    self.store._contacts = None
-                    self.store._sessions = None
-                    self.store._msg_db_for_session.clear()
+                try:
+                    new_dir = discover_data_dir()
+                    if not new_dir or not new_dir.exists():
+                        ok = False
+                        r.stderr = (r.stderr or "") + "\n[refresh] decrypt command returned success, but no decrypted data directory was found"
+                    else:
+                        # Always rebuild the store after decrypt. This catches partial
+                        # macOS decrypts where a non-core DB succeeded but session.db
+                        # or contact.db is still missing.
+                        _MurmurAPIHandler.store = EchoStore(new_dir)
+                        self.store = _MurmurAPIHandler.store
+                        self.store._contacts = None
+                        self.store._sessions = None
+                        self.store._msg_db_for_session.clear()
+                except Exception as e:
+                    ok = False
+                    r.stderr = (r.stderr or "") + f"\n[refresh] post-decrypt store init failed: {type(e).__name__}: {e}"
+                    sys.stderr.write(f"[refresh] post-decrypt store init failed: {e}\n")
+            if ok:
                 _GRAPH_CACHE.clear()
                 _CONN_CACHE.clear()
                 _FRIEND_DETAIL_CACHE.clear()
                 _FRIENDS_LIST_CACHE.clear()
                 _YEARBOOK_CACHE.clear()
+                _PAIR_PACK_CACHE.clear()
+                _PAIR_REPORT_CACHE.clear()
+                _MENTIONS_CACHE.clear()
+                _FRIEND_MOMENTS_CONTEXT_CACHE.clear()
                 _SNS_SIGNALS_CACHE["data"] = None
                 _FF_MOMENTS_CACHE["data"] = None
                 _HOME_SUMMARY_CACHE["data"] = None
@@ -3036,9 +3214,10 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             opts = json.loads(body.decode("utf-8") or "{}")
             sample = int(opts.get("sample", 80))
             with _PACK_BUILD_LOCK:
-                pack = build_analysis_pack(self.store, wxid, sample_n=sample)
+                with _STORE_READ_LOCK:
+                    pack = build_analysis_pack(self.store, wxid, sample_n=sample)
+                    name = self.store.contact(wxid).display() or wxid
                 self.export_dir.mkdir(parents=True, exist_ok=True)
-                name = self.store.contact(wxid).display() or wxid
                 safe = re.sub(r'[<>:"/\\|?*]', "_", name)
                 out = self.export_dir / f"{safe}_AI分析包.md"
                 out.write_text(pack, encoding="utf-8")
@@ -3060,28 +3239,36 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             mode = opts.get("mode", "top")
             top = int(opts.get("top", 20))
             top_pairs = int(opts.get("top_pairs", 20))
+            parallel = max(1, min(int(opts.get("parallel", 5)), 10))
             force = bool(opts.get("force", False))
-            cli_dir = Path(__file__).resolve().parent
             log_dir = Path.home() / "Desktop" / "Murmur"
             log_dir.mkdir(parents=True, exist_ok=True)
-            log_path = log_dir / f"batch_{int(_time.time())}.log"
-            extra: list = ["--cli", cli_name, "--parallel", "5"]
+            if cli_name in ("both", "all", "claude+codex"):
+                installed = {a["cli"] for a in _detect_local_agents()}
+                cli_names = [c for c in ("claude", "codex") if c in installed]
+                if len(cli_names) < 2:
+                    return self._send_json({"ok": False, "error": "both requested but claude/codex are not both installed"})
+            else:
+                cli_names = [cli_name]
+            extra_base: list = ["--parallel", str(parallel)]
             if mode == "all":
-                extra += ["--top", "100", "--top-pairs", str(top_pairs), "--min-mentions", "2"]
+                extra_base += ["--top", "100", "--top-pairs", str(top_pairs), "--min-mentions", "2"]
             elif mode == "pairs-graph":
-                extra += ["--pairs-only", "--pair-mode", "graph", "--top-pairs", str(top_pairs)]
+                extra_base += ["--pairs-only", "--pair-mode", "graph", "--top-pairs", str(top_pairs)]
             elif mode == "single-friend":
                 wxid = opts.get("wxid")
                 if not wxid:
                     return self._send_json({"ok": False, "error": "wxid required for single-friend"}, 400)
                 return self._send_json({"ok": False, "error": "use /api/agents/invoke for single-friend"}, 400)
             else:  # top mode (default)
-                extra += ["--top", str(top), "--top-pairs", str(top_pairs), "--min-mentions", "2"]
+                extra_base += ["--top", str(top), "--top-pairs", str(top_pairs), "--min-mentions", "2"]
             if force:
-                extra.append("--force")
-            cmd = _spawn_etcli_args("batch", *extra)
+                extra_base.append("--force")
+            if len(cli_names) > 1:
+                extra_base.append("--tag-cli")
             env = os.environ.copy()
             env["PYTHONIOENCODING"] = "utf-8"
+            env["ETCLI_URL"] = f"http://127.0.0.1:{self.server.server_address[1]}"
             # Run from a writable user dir, NOT the bundle's read-only Resources
             # dir (cli_dir resolves into _internal/ when frozen). codex/claude
             # spawn child sessions in cwd → fail if cwd isn't writable.
@@ -3089,15 +3276,33 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             try: batch_cwd.mkdir(parents=True, exist_ok=True)
             except OSError: batch_cwd = Path.home()
             try:
-                with open(log_path, "wb") as f:
-                    proc = subprocess.Popen(
-                        cmd, stdout=f, stderr=subprocess.STDOUT, env=env,
-                        cwd=str(batch_cwd),
-                        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform.startswith("win") else 0,
-                    )
+                procs = []
+                cmds = []
+                log_paths = []
+                stamp = int(_time.time())
+                for one_cli in cli_names:
+                    log_path = log_dir / (f"batch_{stamp}_{one_cli}.log" if len(cli_names) > 1 else f"batch_{stamp}.log")
+                    cmd = _spawn_etcli_args("batch", "--cli", one_cli, *extra_base)
+                    with open(log_path, "wb") as f:
+                        proc = subprocess.Popen(
+                            cmd, stdout=f, stderr=subprocess.STDOUT, env=env,
+                            cwd=str(batch_cwd),
+                            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform.startswith("win") else 0,
+                        )
+                    procs.append(proc)
+                    cmds.append(cmd)
+                    log_paths.append(str(log_path))
                 return self._send_json({
-                    "ok": True, "pid": proc.pid, "log_path": str(log_path),
-                    "cmd": cmd, "started_at": int(_time.time()),
+                    "ok": True,
+                    "pid": procs[0].pid,
+                    "pids": [p.pid for p in procs],
+                    "log_path": log_paths[0],
+                    "log_paths": log_paths,
+                    "cmd": cmds[0],
+                    "cmds": cmds,
+                    "started_at": int(_time.time()),
+                    "parallel": parallel,
+                    "cli": cli_name,
                 })
             except Exception as e:
                 return self._send_json({"ok": False, "error": f"{type(e).__name__}: {e}"})
@@ -3108,28 +3313,34 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             body = self.rfile.read(length) if length else b"{}"
             opts = json.loads(body.decode("utf-8") or "{}")
             pid = int(opts.get("pid", 0))
+            pids = [int(x) for x in (opts.get("pids") or ([] if not pid else [pid])) if int(x)]
             log_path = opts.get("log_path")
-            running = False
-            if pid:
+            log_paths = opts.get("log_paths") or ([] if not log_path else [log_path])
+
+            def _pid_running(one_pid: int) -> bool:
                 try:
                     if sys.platform.startswith("win"):
                         # tasklist returns "<exe>","<pid>",...  Check that ANY exe with this PID exists
                         # (could be python.exe in dev mode, or etcli.exe in PyInstaller bundle).
-                        r = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
+                        r = subprocess.run(["tasklist", "/FI", f"PID eq {one_pid}", "/NH", "/FO", "CSV"],
                                             capture_output=True, text=True, encoding="utf-8", errors="replace")
                         out = (r.stdout or "").lower()
-                        running = ("python" in out) or ("etcli" in out)
+                        return ("python" in out) or ("etcli" in out)
                     else:
-                        os.kill(pid, 0)
-                        running = True
+                        os.kill(one_pid, 0)
+                        return True
                 except (ProcessLookupError, PermissionError, OSError):
-                    running = False
+                    return False
+
+            running = any(_pid_running(one_pid) for one_pid in pids)
             log_tail = ""
-            if log_path:
-                p = Path(log_path)
+            for lp in log_paths:
+                p = Path(lp)
                 if p.exists():
                     try:
-                        log_tail = p.read_text(encoding="utf-8", errors="replace")[-3000:]
+                        label = p.stem.replace("batch_", "")
+                        tail = p.read_text(encoding="utf-8", errors="replace")[-1800:]
+                        log_tail += (("\n\n" if log_tail else "") + f"===== {label} =====\n" + tail)
                     except OSError:
                         pass
             # Snapshot current report counts
@@ -3161,6 +3372,14 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             b = opts.get("b")
             if not a or not b:
                 return self._send_json({"ok": False, "error": "a, b required"}, 400)
+            evidence = pair_direct_evidence(self.store, a, b)
+            if not evidence["ok"]:
+                return self._send_json({
+                    "ok": False,
+                    "error": evidence["message"],
+                    "code": "no_direct_pair_evidence",
+                    "evidence": evidence,
+                }, 422)
             agent = next((x for x in _detect_local_agents() if x["cli"] == cli_name), None)
             if not agent:
                 return self._send_json({"ok": False, "error": f"{cli_name} not installed"}, 404)
@@ -3184,20 +3403,9 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             def _run_pair_in_background():
                 state = _PAIR_STREAM[pair_key]
                 try:
-                    mck = "mentions:50:3"
-                    mcached = _MENTIONS_CACHE.get(mck)
-                    if mcached and (_time.time() - mcached[0]) < _CACHE_TTL:
-                        mentions = mcached[1]
-                    else:
-                        disk_m = _disk_load(mck)
-                        if disk_m and (_time.time() - disk_m["_ts"]) < _CACHE_TTL:
-                            mentions = disk_m["_payload"]
-                            _MENTIONS_CACHE[mck] = (disk_m["_ts"], mentions)
-                        else:
-                            mentions = extract_friend_mentions(store_ref, top_n=50, min_mention_count=3)
-                            _MENTIONS_CACHE[mck] = (_time.time(), mentions)
-                            _disk_save(mck, mentions)
-                    pack = build_pair_inference_pack(store_ref, a, b, mentions=mentions)
+                    with _STORE_READ_LOCK:
+                        mentions = get_friend_mentions_cached(store_ref, top_n=50, min_mention_count=3)
+                        pack = build_pair_inference_pack(store_ref, a, b, mentions=mentions)
                     state["stage"] = f"running {cli_name}"
                     use_shell = sys.platform.startswith("win") and agent_path.lower().endswith((".cmd", ".bat", ".ps1"))
                     cmd_args = ([agent_path, "--print"] if cli_name == "claude" else
@@ -3234,19 +3442,12 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     sys.stderr.write(f"[invoke-pair] {name_a}↔{name_b} done rc={rc} chars={len(output)} {elapsed}s\n")
 
                     if rc == 0 and len(output) > 100:
-                        clean_output = output
-                        if cli_name == "codex":
-                            cidx = output.rfind("\ncodex\n")
-                            if cidx > 0:
-                                clean_output = output[cidx + len("\ncodex\n"):]
-                                tidx = clean_output.find("\ntokens used\n")
-                                if tidx > 0:
-                                    clean_output = clean_output[:tidx]
-                        clean_output = clean_output.strip()
+                        clean_output = _clean_agent_output(cli_name, output)
+                        state["output"] = clean_output
                         pairs_root = Path.home() / "Desktop" / "Murmur" / "agent_reports" / "pairs"
                         pairs_root.mkdir(parents=True, exist_ok=True)
-                        safe_a = re.sub(r'[<>:"/\\|?*]', "_", name_a) or a
-                        safe_b = re.sub(r'[<>:"/\\|?*]', "_", name_b) or b
+                        safe_a = re.sub(r'[<>:"/\\|?*\s]+', "_", name_a)[:80] or a
+                        safe_b = re.sub(r'[<>:"/\\|?*\s]+', "_", name_b)[:80] or b
                         idx = max([int(p.stem.split("_")[0]) for p in pairs_root.glob("*.md")
                                     if p.stem.split("_")[0].isdigit()] + [0]) + 1
                         fname = f"{idx:02d}_{safe_a}__{safe_b}.md"
@@ -3344,9 +3545,10 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             def _run_friend_in_background():
                 state = _FRIEND_STREAM[wxid]
                 try:
-                    pack = build_analysis_pack(store_ref, wxid, sample_n=sample)
+                    with _STORE_READ_LOCK:
+                        pack = build_analysis_pack(store_ref, wxid, sample_n=sample)
                     export_dir.mkdir(parents=True, exist_ok=True)
-                    safe = re.sub(r'[<>:"/\\|?*]', "_", name)
+                    safe = re.sub(r'[<>:"/\\|?*\s]+', "_", name)[:80]
                     pack_path = export_dir / f"{safe}_AI分析包.md"
                     pack_path.write_text(pack, encoding="utf-8")
                     state["stage"] = f"running {cli_name}"
@@ -3388,19 +3590,12 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     sys.stderr.write(f"[invoke] {name} rc={rc} chars={len(output)} {elapsed}s\n")
 
                     if rc == 0 and len(output) > 100:
-                        # Strip codex banner: keep only between "\ncodex\n" and "\ntokens used\n"
-                        clean_output = output
-                        if cli_name == "codex":
-                            cidx = output.rfind("\ncodex\n")
-                            if cidx > 0:
-                                clean_output = output[cidx + len("\ncodex\n"):]
-                                tidx = clean_output.find("\ntokens used\n")
-                                if tidx > 0:
-                                    clean_output = clean_output[:tidx]
-                        clean_output = clean_output.strip()
+                        # Strip agent banners before saving and before the UI renders final output.
+                        clean_output = _clean_agent_output(cli_name, output)
+                        state["output"] = clean_output
                         reports_root = Path.home() / "Desktop" / "Murmur" / "agent_reports" / "friends"
                         reports_root.mkdir(parents=True, exist_ok=True)
-                        safe_full = re.sub(r'[<>:"/\\|?*]', "_", name) or wxid
+                        safe_full = re.sub(r'[<>:"/\\|?*\s]+', "_", name)[:80] or wxid
                         report_file = reports_root / f"{safe_full}.md"
                         ts = datetime.now(CST).isoformat(timespec="seconds")
                         md = (
@@ -3847,6 +4042,19 @@ def _which(cli: str) -> str | None:
     return None
 
 
+def _clean_agent_output(cli: str, output: str) -> str:
+    """Remove CLI wrapper noise from agent stdout before saving/rendering reports."""
+    out = (output or "").strip()
+    if cli == "codex":
+        banner = re.search(r"(?:^|\n)codex\s*\n", out, flags=re.IGNORECASE)
+        if banner:
+            out = out[banner.end():]
+        tokens = re.search(r"\ntokens used\b", out, flags=re.IGNORECASE)
+        if tokens:
+            out = out[:tokens.start()]
+    return out.strip()
+
+
 def build_friend_identity_pack(store: EchoStore, wxid: str, sample_n: int = 80) -> str:
     """Build a dense markdown pack focused on extracting WHO this person is.
 
@@ -3920,6 +4128,22 @@ def build_pair_inference_pack(store: EchoStore, wxid_a: str, wxid_b: str,
         f"# 朋友间关系推断：「{name_a}」 与 「{name_b}」\n",
         f"> 你是观察者。下方是关于这两个人的所有可证据，请推断**他们之间是什么关系**。\n",
     ]
+
+    evidence = pair_direct_evidence(store, wxid_a, wxid_b)
+    parts.append("## 直接证据门槛\n")
+    if evidence["ok"]:
+        parts.append("> 已找到至少一种直接证据，因此允许生成关系推断。直接证据包括：群内互相回复、你和一方聊到另一方、朋友圈互赞/互评。\n")
+        for e in evidence["direct_edges"][:6]:
+            bits = [f"类型={e.get('type')}", f"权重={e.get('weight')}"]
+            if e.get("mention_count"):
+                bits.append(f"提及={e.get('mention_count')}")
+            if e.get("shared_group_count"):
+                bits.append(f"共同群={e.get('shared_group_count')}")
+            if e.get("moments_cross"):
+                bits.append(f"朋友圈互动态={e.get('moments_cross')}")
+            parts.append("- " + "；".join(bits))
+    else:
+        parts.append("> **没有直接证据。不要推断他们认识。** 如果你仍看到这个包，结论必须是「证据不足」。\n")
 
     # Mentions data
     if mentions:
@@ -4136,18 +4360,19 @@ def extract_friend_mentions(store: EchoStore, top_n: int = 50,
             if n.lower() in EXCLUDE or n in EXCLUDE:
                 continue
             name_to_wxids.setdefault(n, set()).add(wxid)
+    if not name_to_wxids:
+        return {}
+    mention_pat = re.compile("|".join(re.escape(n) for n in sorted(name_to_wxids, key=len, reverse=True)))
 
     # Step 3: For each top friend, scan their chat with self for mentions of other top friends
     mentions: dict[tuple[str, str], dict] = {}  # (a_wxid, b_wxid) → {count_in_a_chat, examples_in_a}
     for (a_wxid, a_name, _) in top:
-        # Build a regex to match any "other friend's name" in this chat's text
-        # Each name → wxid set; we record matches per name
         for m in store.messages(a_wxid, text_only=True):
             if not m.text:
                 continue
-            for name, target_wxids in name_to_wxids.items():
-                if name not in m.text:
-                    continue
+            matched_names = {hit.group(0) for hit in mention_pat.finditer(m.text)}
+            for name in matched_names:
+                target_wxids = name_to_wxids.get(name, set())
                 for b_wxid in target_wxids:
                     if b_wxid == a_wxid:
                         continue
@@ -4300,7 +4525,7 @@ def build_relationship_graph(store: EchoStore, *,
     # Step 5b: Friend-to-friend mention extraction (deep relationship inference)
     # When you and A talk about B, that's the strongest evidence A↔B know each other.
     try:
-        mention_pairs = extract_friend_mentions(store, top_n=50, min_mention_count=3)
+        mention_pairs = get_friend_mentions_cached(store, top_n=50, min_mention_count=3)
     except Exception as e:
         sys.stderr.write(f"[mentions] failed: {e}\n")
         mention_pairs = {}
@@ -4624,7 +4849,8 @@ def _run_server(args) -> int:
                     sys.stderr.write(f"[etcli serve] [{ck}] hot from disk\n")
                 else:
                     sys.stderr.write(f"[etcli serve] [{ck}] computing…\n")
-                    g = build_relationship_graph(store, scope=scope, top_n=top_n)
+                    with _STORE_READ_LOCK:
+                        g = build_relationship_graph(store, scope=scope, top_n=top_n)
                     _GRAPH_CACHE[ck] = (_time.time(), g)
                     _disk_save(ck, g)
             # home_summary

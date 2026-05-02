@@ -35,9 +35,9 @@ if errorlevel 1 (
 echo [OK] Node.js found
 
 REM --- install python deps if needed ---
-python -c "import zstandard, cryptography" 2>nul
+python -c "import zstandard, cryptography, Crypto" 2>nul
 if errorlevel 1 (
-    echo [...] 装 Python 依赖（zstandard + cryptography + faster-whisper 可选）...
+    echo [...] 装 Python 依赖（zstandard + cryptography + pycryptodome）...
     python -m pip install -r requirements.txt
     if errorlevel 1 (
         echo [X] pip install 失败

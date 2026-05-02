@@ -172,6 +172,8 @@ Murmur 默认找：
 
 然后重启 Murmur。
 
+也可以直接指向某个账号目录，例如 `E:/path/to/xwechat_files/wxid_xxx_abcd`。多个候选目录用英文分号 `;` 分隔。
+
 ### Q：抓 key 后解密了一些 DB，但有些朋友打不开
 
 不太可能 —— Win 是单 master key，要么全解开要么一个都没解开。如果真出现，先看 `serve.log` 末尾报错。
@@ -213,3 +215,20 @@ cd murmur
 ```
 
 需要：Python 3.11+ + Node.js 18+。第一次会自动 `pip install -r requirements.txt` + `npm install`，约 1 分钟联网下载。
+
+## 进阶：从源码打 Windows 安装包
+
+想自己构建给小白用户安装的 `.exe` / `.msi`，在 Windows PowerShell 里运行：
+
+```powershell
+.\build-windows.ps1
+```
+
+脚本会按顺序完成：
+
+1. 安装 Python 后端依赖和 PyInstaller
+2. 构建 `cli/dist/etcli/etcli.exe`
+3. 自动复制到 `app/src-tauri/etcli/`
+4. 运行 Tauri 构建，产物在 `app/src-tauri/target/release/bundle/`
+
+这一步很关键：安装包必须包含 PyInstaller 后端，否则用户双击 Murmur 会白屏或提示后端连接失败。

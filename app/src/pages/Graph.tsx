@@ -169,7 +169,7 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
   const [loading, setLoading] = useState(true);
   // Batch analysis state
   const [agents, setAgents] = useState<LocalAgent[]>([]);
-  const [batch, setBatch] = useState<{ pid: number; log_path: string } | null>(null);
+  const [batch, setBatch] = useState<{ pid: number; log_path: string; pids?: number[]; log_paths?: string[] } | null>(null);
   const [batchStatus, setBatchStatusState] = useState<{ running: boolean; n_friends: number; n_pairs: number; log_tail: string } | null>(null);
   const [batchPanelOpen, setBatchPanelOpen] = useState(false);
 
@@ -183,7 +183,7 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
     const tick = async () => {
       if (stop) return;
       try {
-        const s = await getBatchStatus(batch.pid, batch.log_path);
+        const s = await getBatchStatus(batch.pid, batch.log_path, batch.pids, batch.log_paths);
         setBatchStatusState(s);
         if (!s.running) return;
       } catch {}
@@ -193,14 +193,14 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
     return () => { stop = true; };
   }, [batch]);
 
-  async function startGraphBatch(top_pairs: number, cli: 'claude' | 'codex') {
+  async function startGraphBatch(top_pairs: number, cli: 'claude' | 'codex' | 'both', parallel: number) {
     try {
-      const r = await startBatch({ cli, mode: 'pairs-graph', top: 0, top_pairs });
+      const r = await startBatch({ cli, mode: 'pairs-graph', top: 0, top_pairs, parallel });
       if (!r.ok || !r.pid || !r.log_path) {
         alert('启动失败：' + (r.error || ''));
         return;
       }
-      setBatch({ pid: r.pid, log_path: r.log_path });
+      setBatch({ pid: r.pid, log_path: r.log_path, pids: r.pids, log_paths: r.log_paths });
       setBatchStatusState({ running: true, n_friends: 0, n_pairs: 0, log_tail: '启动中…' });
       setBatchPanelOpen(true);
     } catch (e: any) {
@@ -211,7 +211,7 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
   useEffect(() => {
     setLoading(true);
     setData(null);
-    const BASE = (import.meta.env?.VITE_ETCLI_URL as string) || 'http://localhost:9100';
+    const BASE = (import.meta.env?.VITE_ETCLI_URL as string) || 'http://127.0.0.1:9100';
     fetch(`${BASE}/api/graph?scope=private&top_n=${topN}`)
       .then(r => r.json())
       .then((bg: BackendGraph) => {
@@ -985,9 +985,9 @@ function BatchAnalysisPanel({
 }: {
   dark: boolean;
   agents: LocalAgent[];
-  batch: { pid: number; log_path: string } | null;
+  batch: { pid: number; log_path: string; pids?: number[]; log_paths?: string[] } | null;
   status: { running: boolean; n_friends: number; n_pairs: number; log_tail: string } | null;
-  onLaunch: (top_pairs: number, cli: 'claude' | 'codex') => void;
+  onLaunch: (top_pairs: number, cli: 'claude' | 'codex' | 'both', parallel: number) => void;
   onReset: () => void;
   onClose: () => void;
 }) {
@@ -995,9 +995,10 @@ function BatchAnalysisPanel({
   const done = !!batch && status && !status.running;
   const claudeAgent = agents.find(a => a.cli === 'claude');
   const codexAgent = agents.find(a => a.cli === 'codex');
-  const [selectedCli, setSelectedCli] = useState<'claude' | 'codex'>(
+  const [selectedCli, setSelectedCli] = useState<'claude' | 'codex' | 'both'>(
     claudeAgent ? 'claude' : codexAgent ? 'codex' : 'claude'
   );
+  const [parallel, setParallel] = useState(5);
   return (
     <div style={{
       position: 'absolute', top: 64, right: 28, zIndex: 7, width: 380,
@@ -1038,14 +1039,25 @@ function BatchAnalysisPanel({
               <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
                 <CliPick label="claude" sub="Anthropic" available={!!claudeAgent} selected={selectedCli === 'claude'} onClick={() => setSelectedCli('claude')} dark={dark} />
                 <CliPick label="codex" sub="OpenAI" available={!!codexAgent} selected={selectedCli === 'codex'} onClick={() => setSelectedCli('codex')} dark={dark} />
+                <CliPick label="both" sub="并行双跑" available={!!claudeAgent && !!codexAgent} selected={selectedCli === 'both'} onClick={() => setSelectedCli('both')} dark={dark} />
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
+                <span style={{ fontSize: 11, color: dark ? 'rgba(244,236,218,0.55)' : 'rgba(26,43,74,0.55)' }}>每个 CLI 并发：</span>
+                {[3, 5, 8].map(n => (
+                  <button key={n} onClick={() => setParallel(n)} style={{
+                    all: 'unset', cursor: 'pointer', padding: '3px 8px', borderRadius: 6, fontSize: 11,
+                    background: parallel === n ? (dark ? 'rgba(255,107,71,0.35)' : 'var(--et-orange-soft)') : (dark ? 'rgba(255,255,255,0.06)' : 'rgba(26,43,74,0.06)'),
+                    border: `0.5px solid ${parallel === n ? 'rgba(255,107,71,0.45)' : 'transparent'}`,
+                  }}>{n}</button>
+                ))}
               </div>
               <div style={{ fontSize: 11, color: dark ? 'rgba(244,236,218,0.55)' : 'rgba(26,43,74,0.55)', marginBottom: 8 }}>
                 已有报告自动跳过；想全部重跑去 Reports 页面删 pairs/ 目录。
               </div>
               <div style={{ display: 'grid', gap: 8 }}>
-                <BatchOption label="Top 10 对" sub="约 10 分钟" onClick={() => onLaunch(10, selectedCli)} />
-                <BatchOption label="Top 20 对" sub="约 20 分钟" onClick={() => onLaunch(20, selectedCli)} primary />
-                <BatchOption label="Top 40 对" sub="约 40 分钟" onClick={() => onLaunch(40, selectedCli)} />
+                <BatchOption label="Top 10 对" sub={selectedCli === 'both' ? 'Claude + Codex 并行' : '约 10 分钟'} onClick={() => onLaunch(10, selectedCli, parallel)} />
+                <BatchOption label="Top 20 对" sub={selectedCli === 'both' ? '双模型同时跑' : '约 20 分钟'} onClick={() => onLaunch(20, selectedCli, parallel)} primary />
+                <BatchOption label="Top 40 对" sub={selectedCli === 'both' ? '会生成两套报告' : '约 40 分钟'} onClick={() => onLaunch(40, selectedCli, parallel)} />
               </div>
             </>
           )}

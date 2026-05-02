@@ -39,8 +39,12 @@ MEM_PRIVATE = 0x20000
 MEM_IMAGE = 0x1000000
 MEM_MAPPED = 0x40000
 
-psapi = ctypes.WinDLL("psapi", use_last_error=True)
-kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+if sys.platform.startswith("win"):
+    psapi = ctypes.WinDLL("psapi", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+else:
+    psapi = None
+    kernel32 = None
 
 
 class MEMORY_BASIC_INFORMATION(ctypes.Structure):
@@ -56,24 +60,27 @@ class MEMORY_BASIC_INFORMATION(ctypes.Structure):
     ]
 
 
-kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-kernel32.OpenProcess.restype = wintypes.HANDLE
-kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-kernel32.CloseHandle.restype = wintypes.BOOL
-kernel32.VirtualQueryEx.argtypes = [
-    wintypes.HANDLE, ctypes.c_void_p, ctypes.POINTER(MEMORY_BASIC_INFORMATION), ctypes.c_size_t
-]
-kernel32.VirtualQueryEx.restype = ctypes.c_size_t
-kernel32.ReadProcessMemory.argtypes = [
-    wintypes.HANDLE, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)
-]
-kernel32.ReadProcessMemory.restype = wintypes.BOOL
+if kernel32 is not None:
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.VirtualQueryEx.argtypes = [
+        wintypes.HANDLE, ctypes.c_void_p, ctypes.POINTER(MEMORY_BASIC_INFORMATION), ctypes.c_size_t
+    ]
+    kernel32.VirtualQueryEx.restype = ctypes.c_size_t
+    kernel32.ReadProcessMemory.argtypes = [
+        wintypes.HANDLE, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)
+    ]
+    kernel32.ReadProcessMemory.restype = wintypes.BOOL
 
 
 # ---------- Process discovery ----------
 
 def find_weixin_pids() -> list[int]:
     """Return PIDs of running Weixin.exe processes."""
+    if psapi is None or kernel32 is None:
+        return []
     arr = (wintypes.DWORD * 4096)()
     needed = wintypes.DWORD()
     if not psapi.EnumProcesses(arr, ctypes.sizeof(arr), ctypes.byref(needed)):
@@ -158,13 +165,14 @@ def looks_like_key(b: bytes) -> bool:
 # ---------- Validator (uses echotrace's go_decrypt.dll) ----------
 
 def load_validator(dll_dir: str):
-    os.add_dll_directory(dll_dir)
+    dll_dir_handle = os.add_dll_directory(dll_dir) if hasattr(os, "add_dll_directory") else None
     lib = ctypes.CDLL(os.path.join(dll_dir, "go_decrypt.dll"))
     lib.ValidateKey.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
     lib.ValidateKey.restype = ctypes.c_int
 
     def validate(db_path: str, key_bytes: bytes) -> bool:
         hex_key = key_bytes.hex()
+        _ = dll_dir_handle
         return lib.ValidateKey(db_path.encode("utf-8"), hex_key.encode("utf-8")) == 1
 
     return validate
