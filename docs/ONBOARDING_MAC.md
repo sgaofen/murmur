@@ -26,6 +26,8 @@
 - **`Murmur_x.x.x_aarch64.dmg`** （M 系列芯片，推荐）—— 双击打开，拖 Murmur 进 `/Applications`
 - 或 `Murmur_x.x.x_aarch64.app.zip` —— 解压后拖进 `/Applications`
 
+只想照着“下载 → 拖到应用程序 → 终端运行命令 → 打开”的短教程走，看 [macOS Release 下载后怎么打开](MAC_RELEASE_INSTALL.md)。
+
 DMG 安装步骤：
 
 1. 双击 `Murmur_x.x.x_aarch64.dmg`。
