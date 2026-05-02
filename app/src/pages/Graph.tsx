@@ -290,6 +290,7 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
   }
 
   const selectedNode = selected ? data.nodes.find(n => n.id === selected) : null;
+  const sidePanelOpen = Boolean(selectedEdge || (selectedNode && !selectedNode.is_self));
 
   return (
     <div style={{ position: 'fixed', inset: 0, overflow: 'hidden' }}>
@@ -306,14 +307,23 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
       />
       {/* Top chrome bar */}
       <div style={{
-        position: 'absolute', top: 0, left: 0, right: 0, zIndex: 5,
-        padding: '14px 28px', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        position: 'absolute', top: 0, left: 0, right: sidePanelOpen ? 460 : 0, zIndex: 5,
+        padding: sidePanelOpen ? '14px 18px 10px 28px' : '14px 28px',
+        display: 'flex',
+        alignItems: sidePanelOpen ? 'flex-start' : 'center',
+        justifyContent: sidePanelOpen ? 'flex-start' : 'space-between',
+        gap: sidePanelOpen ? 8 : 12,
+        flexWrap: sidePanelOpen ? 'wrap' : 'nowrap',
         background: dark
           ? 'linear-gradient(180deg, rgba(11,15,34,0.7), transparent)'
           : 'linear-gradient(180deg, rgba(247,241,230,0.85), transparent)',
         pointerEvents: 'none',
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, pointerEvents: 'auto' }}>
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 12, pointerEvents: 'auto',
+          flex: sidePanelOpen ? '1 1 100%' : '0 1 auto', minWidth: 0,
+          flexWrap: sidePanelOpen ? 'wrap' : 'nowrap',
+        }}>
           <button onClick={onBack} style={{
             all: 'unset', cursor: 'pointer', padding: '6px 12px', borderRadius: 8,
             background: dark ? 'rgba(20,24,42,0.6)' : 'rgba(251,246,238,0.8)',
@@ -326,7 +336,12 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
           <span style={{ fontSize: 11, color: dark ? 'rgba(244,236,218,0.65)' : 'rgba(26,43,74,0.65)',
             letterSpacing: '0.12em' }}>一张可旋转的社交星图</span>
         </div>
-        <div style={{ display: 'flex', gap: 8, pointerEvents: 'auto', alignItems: 'center' }}>
+        <div style={{
+          display: 'flex', gap: 8, pointerEvents: 'auto', alignItems: 'center',
+          flex: sidePanelOpen ? '1 1 100%' : '0 0 auto',
+          justifyContent: sidePanelOpen ? 'flex-start' : 'flex-end',
+          flexWrap: 'wrap',
+        }}>
           <span style={{ fontSize: 11, color: dark ? 'rgba(244,236,218,0.7)' : 'rgba(26,43,74,0.7)' }}>显示 top</span>
           {[50, 100, 200, 300].map(n => (
             <button key={n} onClick={() => changeTopN(n)}
