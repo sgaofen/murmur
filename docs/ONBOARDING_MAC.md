@@ -123,7 +123,7 @@ Murmur 此时会显示「请去 WeChat 里点开几个对话」。**回 WeChat �
 
 ---
 
-## 我电脑上没装 Claude Code / Codex / Gemini，怎么办？
+## 我电脑上没装 Claude Code / Codex，怎么办？
 
 走「导出 AI 分析包」→ 选「**通用（任何 AI）**」→ 生成 markdown 包 → 拖给 ChatGPT / Claude.ai / 豆包 / 文心一言 / Kimi / DeepSeek 任一。
 
@@ -132,7 +132,6 @@ Murmur 此时会显示「请去 WeChat 里点开几个对话」。**回 WeChat �
 ```bash
 npm install -g @anthropic-ai/claude-code     # Claude Code（推荐）
 npm install -g @openai/codex                  # Codex CLI
-npm install -g @google/gemini-cli             # Gemini CLI
 ```
 
 装完 Murmur 自动检测，每个朋友档案页 + 关系网批量按钮会自动可用。

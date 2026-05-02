@@ -7,10 +7,10 @@ import type { Friend, FriendStats, HomeSummary, Moment } from './types';
 // treats `localhost` as a "local network" hostname that requires the (new in macOS
 // Sequoia) Local Network privacy permission, while a direct IP loopback is exempt.
 // Fixes "Could not connect to the server" / "Load failed" in production .app builds.
-const BASE = (import.meta.env?.VITE_ETCLI_URL as string) || 'http://127.0.0.1:9100';
+export const API_BASE = (import.meta.env?.VITE_ETCLI_URL as string) || 'http://127.0.0.1:9100';
 
 async function j<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(BASE + path, init);
+  const res = await fetch(API_BASE + path, init);
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     throw new Error(`API ${path}: ${res.status} ${text.slice(0, 200)}`);
@@ -18,7 +18,15 @@ async function j<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json();
 }
 
-export async function getInfo(): Promise<{ data_dir: string; self_wxid: string; version: string }> {
+export interface InfoResponse {
+  data_dir?: string;
+  self_wxid?: string;
+  version?: string;
+  bootstrap?: boolean;
+  message?: string;
+}
+
+export async function getInfo(): Promise<InfoResponse> {
   return j('/api/info');
 }
 
@@ -218,12 +226,13 @@ export interface YearData {
   late_night_msgs: number;
   late_night_pct: number;
   calls: number;
-  vulnerability_quotes: Array<{ date: string; from: string; text: string }>;
-  offline_quotes: Array<{ date: string; from: string; text: string }>;
-  lifecycle_quotes: Array<{ date: string; from: string; text: string }>;
-  apology_quotes: Array<{ date: string; from: string; text: string }>;
-  care_quotes: Array<{ date: string; from: string; text: string }>;
-  signature: { date: string; from: string; text: string } | null;
+  vulnerability_quotes: Array<{ date: string; from: string; from_id?: string; text: string }>;
+  offline_quotes: Array<{ date: string; from: string; from_id?: string; text: string }>;
+  lifecycle_quotes: Array<{ date: string; from: string; from_id?: string; text: string }>;
+  apology_quotes: Array<{ date: string; from: string; from_id?: string; text: string }>;
+  care_quotes: Array<{ date: string; from: string; from_id?: string; text: string }>;
+  top_words?: Array<{ word: string; count: number }>;
+  signature: { date: string; from: string; from_id?: string; text: string; reason?: string; terms?: string[] } | null;
 }
 
 export interface Yearbook {
@@ -244,14 +253,17 @@ export async function getYearbook(wxid: string): Promise<Yearbook> {
 }
 
 export interface BatchStartReq {
-  cli: 'claude' | 'codex';
+  cli: 'claude' | 'codex' | 'both';
   mode: 'top' | 'all' | 'pairs-graph';
+  pair_mode?: 'mention' | 'graph';
   top?: number;
   top_pairs?: number;
+  sample?: number;
+  parallel?: number;
   force?: boolean;
 }
 export async function startBatch(req: BatchStartReq): Promise<{
-  ok: boolean; pid?: number; log_path?: string; error?: string;
+  ok: boolean; pid?: number; pids?: number[]; log_path?: string; log_paths?: string[]; error?: string;
 }> {
   return j('/api/agents/batch', {
     method: 'POST',
@@ -259,13 +271,32 @@ export async function startBatch(req: BatchStartReq): Promise<{
     body: JSON.stringify(req),
   });
 }
-export async function getBatchStatus(pid: number, log_path: string): Promise<{
-  running: boolean; n_friends: number; n_pairs: number; log_tail: string;
-}> {
+export interface BatchStatus {
+  running: boolean;
+  n_friends: number;
+  n_pairs: number;
+  log_tail: string;
+  reports_root?: string;
+  friends_done?: number;
+  friends_total?: number;
+  pairs_done?: number;
+  pairs_total?: number;
+  failures?: number;
+  skipped?: number;
+  last_stage?: string;
+  crashed?: boolean;
+}
+
+export async function getBatchStatus(
+  pid: number,
+  log_path: string,
+  pids?: number[],
+  log_paths?: string[],
+): Promise<BatchStatus> {
   return j('/api/agents/batch/status', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ pid, log_path }),
+    body: JSON.stringify({ pid, log_path, pids, log_paths }),
   });
 }
 
@@ -324,4 +355,4 @@ export async function openFolder(path?: string): Promise<{ ok: boolean; opened?:
   });
 }
 
-export const APP_VERSION = 'v0.1 · Murmur 微语';
+export const APP_VERSION = 'v0.2.6 · Murmur 微语';

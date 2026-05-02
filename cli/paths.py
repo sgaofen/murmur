@@ -102,6 +102,24 @@ def _is_wxid_dir(p: Path) -> bool:
     return p.is_dir() and p.name.startswith("wxid_") and (p / "db_storage").exists()
 
 
+def _wechat_root_env_paths() -> list[Path]:
+    """Optional override for users with non-standard WeChat data locations.
+
+    MURMUR_WECHAT_ROOT may point at an xwechat_files directory or directly at a
+    wxid_*/ account directory. Multiple roots are separated by os.pathsep.
+    """
+    raw = os.environ.get("MURMUR_WECHAT_ROOT", "").strip()
+    if not raw:
+        return []
+    out: list[Path] = []
+    for part in raw.split(os.pathsep):
+        part = part.strip().strip('"')
+        if not part:
+            continue
+        out.append(Path(os.path.expandvars(os.path.expanduser(part))))
+    return out
+
+
 def _safe_listdir(p: Path, timeout_s: float = 1.5) -> Optional[list[Path]]:
     """Listdir with a thread-based timeout. macOS TCC can BLOCK iterdir on
     ~/Library/Containers/<other-app> while waiting for user consent — without
@@ -136,10 +154,21 @@ def discover_wechat_profiles() -> list[WeChatProfile]:
     """
     global _LAST_TCC_BLOCKED
     _LAST_TCC_BLOCKED = False
-    candidates = (_windows_xwechat_search_paths() if IS_WINDOWS
-                  else _mac_xwechat_search_paths() if IS_MAC
-                  else [])
+    raw_candidates = _wechat_root_env_paths() + (
+        _windows_xwechat_search_paths() if IS_WINDOWS
+        else _mac_xwechat_search_paths() if IS_MAC
+        else []
+    )
+    candidates: list[Path] = []
+    seen_candidates: set[str] = set()
+    for cand in raw_candidates:
+        key = str(cand.expanduser())
+        if key in seen_candidates:
+            continue
+        seen_candidates.add(key)
+        candidates.append(cand)
     profiles: list[WeChatProfile] = []
+    seen_profiles: set[str] = set()
     plat = "windows" if IS_WINDOWS else "macos" if IS_MAC else "linux"
     import re as _re
     for root in candidates:
@@ -149,7 +178,10 @@ def discover_wechat_profiles() -> list[WeChatProfile]:
         except (PermissionError, OSError):
             _LAST_TCC_BLOCKED = True
             continue
-        entries = _safe_listdir(root)
+        if _is_wxid_dir(root):
+            entries = [root]
+        else:
+            entries = _safe_listdir(root)
         if entries is None:
             _LAST_TCC_BLOCKED = True
             continue  # TCC-blocked or hung
@@ -160,6 +192,10 @@ def discover_wechat_profiles() -> list[WeChatProfile]:
             except (PermissionError, OSError):
                 continue
             wxid_full = sub.name
+            profile_key = str(sub)
+            if profile_key in seen_profiles:
+                continue
+            seen_profiles.add(profile_key)
             wxid_short = _re.sub(r"_[0-9a-f]+$", "", wxid_full)
             profiles.append(WeChatProfile(
                 wxid=wxid_full,
@@ -229,6 +265,7 @@ def find_weixin_exe() -> Path | None:
             Path(r"C:\Program Files\Tencent\Weixin\Weixin.exe"),
             Path(r"C:\Program Files (x86)\Tencent\Weixin\Weixin.exe"),
             Path(r"C:\Program Files\Tencent\WeChat\WeChat.exe"),
+            Path(r"C:\Program Files (x86)\Tencent\WeChat\WeChat.exe"),
         ]:
             if cand.exists():
                 return cand
@@ -238,13 +275,16 @@ def find_weixin_exe() -> Path | None:
             for hive, sub in [
                 (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Tencent\Weixin"),
                 (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Tencent\Weixin"),
+                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Tencent\WeChat"),
+                (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Tencent\WeChat"),
             ]:
                 try:
                     with winreg.OpenKey(hive, sub) as k:
                         v, _ = winreg.QueryValueEx(k, "InstallPath")
-                        p = Path(v) / "Weixin.exe"
-                        if p.exists():
-                            return p
+                        for exe in ("Weixin.exe", "WeChat.exe"):
+                            p = Path(v) / exe
+                            if p.exists():
+                                return p
                 except OSError:
                     pass
         except ImportError:
@@ -326,8 +366,11 @@ def _check_weixin_running() -> Optional[bool]:
                     return True
             return False
         if IS_WINDOWS:
-            r = _sp.run(["tasklist", "/fi", "imagename eq Weixin.exe"], capture_output=True, text=True)
-            return "Weixin.exe" in r.stdout
+            for exe in ("Weixin.exe", "WeChat.exe"):
+                r = _sp.run(["tasklist", "/fi", f"imagename eq {exe}"], capture_output=True, text=True)
+                if exe.lower() in (r.stdout or "").lower():
+                    return True
+            return False
     except Exception:
         return None
     return None
@@ -355,7 +398,7 @@ def detect_capabilities() -> Capabilities:
     #       (b) hardened-runtime WeChat: only works with SIP off (rare, requires reboot)
     #   - Linux: WeChat has no Linux client
     if IS_WINDOWS:
-        can_extract = has_install
+        can_extract = has_install and bool(weixin_running)
     elif IS_MAC:
         # Either: WeChat is already ad-hoc signed → can attach right now
         # Or:     SIP is off → can attach even with hardened runtime (after sudo)
@@ -379,7 +422,9 @@ def detect_capabilities() -> Capabilities:
     if not has_data:
         notes.append("还没找到微信数据文件夹 — 你可能需要先在 Windows/Mac 上登录一次微信")
     if not has_install and IS_WINDOWS:
-        notes.append("没找到 Weixin.exe，「抓密钥」会失败 — 请确保微信已安装")
+        notes.append("没找到 Weixin.exe / WeChat.exe，「抓密钥」会失败 — 请确保微信已安装")
+    if IS_WINDOWS and has_install and not weixin_running:
+        notes.append("微信未在运行 — Windows 抓密钥前请先打开微信并保持已登录状态。")
 
     return Capabilities(
         can_decrypt_db=can_decrypt and has_data,

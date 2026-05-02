@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 import type { Friend } from '../data/types';
 import { generateAIPack, openFolder } from '../data/api';
 import { displayName } from '../utils/privacy';
+import { usePrivacy } from '../utils/usePrivacy';
 import { LocalAgentPanel } from './extras/LocalAgentPanel';
 
 interface Props {
@@ -21,6 +22,7 @@ interface GeneratedPack {
 }
 
 export function AIExportDialog({ open, onClose, friend, onLocalAgent }: Props) {
+  void usePrivacy();
   const [step, setStep] = useState(1);
   const [ai, setAi] = useState('Claude');
   const [range, setRange] = useState('year');
@@ -111,7 +113,7 @@ export function AIExportDialog({ open, onClose, friend, onLocalAgent }: Props) {
             />
           </>
         ) : (
-          <Step2 onClose={onClose} pack={pack!} />
+          <Step2 onClose={onClose} pack={pack!} friend={friend} />
         )}
       </div>
     </div>
@@ -244,7 +246,8 @@ function Step1({ ai, setAi, range, setRange, focus, setFocus, generating, onNext
   );
 }
 
-function Step2({ onClose, pack }: { onClose: () => void; pack: GeneratedPack }) {
+function Step2({ onClose, pack, friend }: { onClose: () => void; pack: GeneratedPack; friend: Friend }) {
+  const privacy = usePrivacy();
   const [copied, setCopied] = useState(false);
   const [opened, setOpened] = useState(false);
 
@@ -253,7 +256,7 @@ function Step2({ onClose, pack }: { onClose: () => void; pack: GeneratedPack }) 
       await navigator.clipboard.writeText(pack.content);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
-    } catch (e) {
+    } catch {
       alert('复制失败，请手动打开文件复制');
     }
   }
@@ -269,6 +272,8 @@ function Step2({ onClose, pack }: { onClose: () => void; pack: GeneratedPack }) 
   }
 
   const sizeKB = (pack.size / 1024).toFixed(1);
+  const displayPackName = privacy ? `${displayName(friend.id, friend.name)}_AI分析包.md` : pack.name;
+  const displayPath = privacy ? '隐私模式已隐藏完整路径' : pack.path;
 
   return (
     <div style={{ padding: '18px 28px 22px' }}>
@@ -284,8 +289,8 @@ function Step2({ onClose, pack }: { onClose: () => void; pack: GeneratedPack }) 
           display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16, flexShrink: 0,
         }}>✓</div>
         <div style={{ minWidth: 0, flex: 1 }}>
-          <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--et-ink)' }}>已生成：{pack.name}</div>
-          <div className="et-meta" style={{ fontFamily: 'var(--et-mono)', marginTop: 2, fontSize: 11, wordBreak: 'break-all' }}>{pack.path} · {sizeKB} KB</div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--et-ink)' }}>已生成：{displayPackName}</div>
+          <div className="et-meta" style={{ fontFamily: 'var(--et-mono)', marginTop: 2, fontSize: 11, wordBreak: 'break-all' }}>{displayPath} · {sizeKB} KB</div>
         </div>
       </div>
       <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--et-ink)', marginBottom: 10 }}>接下来三选一：</div>

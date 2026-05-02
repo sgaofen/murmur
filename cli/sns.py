@@ -378,6 +378,85 @@ def friend_to_friend_signals(decrypted_dir: Path, self_wxid: str) -> dict[tuple[
     return out
 
 
+def direct_interaction_examples(decrypted_dir: Path, self_wxid: str, friend_wxid: str,
+                                limit: int = 12) -> list[dict]:
+    """Recent Moments interactions between you and one friend, with direction.
+
+    Counts are useful, but LLM analysis needs examples: who reacted to whose post,
+    whether it was a like or a comment, and the rough post/comment text.
+    """
+    rows: list[dict] = []
+    c = open_sns_db(decrypted_dir)
+    try:
+        for tid, user_name, content in c.execute(
+            "SELECT tid, user_name, content FROM SnsTimeLine"
+        ):
+            if not content:
+                continue
+            try:
+                root = ET.fromstring(content)
+            except ET.ParseError:
+                continue
+
+            tl = root.find(".//TimelineObject") if root.tag != "TimelineObject" else root
+            if tl is None:
+                continue
+            owner_e = tl.find("username")
+            owner = owner_e.text.strip() if owner_e is not None and owner_e.text else None
+            if owner not in (self_wxid, friend_wxid):
+                continue
+
+            try:
+                ct_e = tl.find("createTime")
+                create_time = int(ct_e.text or 0) if ct_e is not None else 0
+            except (TypeError, ValueError):
+                create_time = 0
+            desc_e = tl.find("contentDesc")
+            post_text = desc_e.text.strip() if desc_e is not None and desc_e.text else ""
+
+            extra = root.find(".//LocalExtraInfo")
+            if extra is None:
+                continue
+
+            def each(parent_tag: str):
+                el = extra.find(parent_tag)
+                if el is None:
+                    return
+                for uc in el.findall("user_comment"):
+                    un_e = uc.find("username")
+                    actor = un_e.text.strip() if un_e is not None and un_e.text else ""
+                    content_e = uc.find("content")
+                    cmt = content_e.text.strip() if content_e is not None and content_e.text else ""
+                    if actor:
+                        yield actor, cmt
+
+            def append_event(actor: str, kind: str, text: str) -> None:
+                if owner == self_wxid and actor == friend_wxid:
+                    direction = "friend_to_you"
+                elif owner == friend_wxid and actor == self_wxid:
+                    direction = "you_to_friend"
+                else:
+                    return
+                rows.append({
+                    "ts": create_time,
+                    "date": datetime.fromtimestamp(create_time, CST).strftime("%Y-%m-%d") if create_time else "?",
+                    "direction": direction,
+                    "type": kind,
+                    "text": text[:160],
+                    "post_text": post_text[:120],
+                })
+
+            for actor, _ in each("like_user_list"):
+                append_event(actor, "like", "")
+            for actor, cmt in each("comment_user_list"):
+                append_event(actor, "comment", cmt)
+    finally:
+        c.close()
+
+    rows.sort(key=lambda r: r.get("ts", 0), reverse=True)
+    return rows[:limit]
+
+
 # ---------- CLI ----------
 
 def _select_dir() -> Path:

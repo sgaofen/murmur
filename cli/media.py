@@ -120,13 +120,15 @@ def decrypt_v3(data: bytes) -> tuple[bytes, str | None]:
     return b"", None
 
 
+def aes_ecb_decrypt(key: bytes, data: bytes) -> bytes:
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+    decryptor = Cipher(algorithms.AES(key), modes.ECB()).decryptor()
+    return decryptor.update(data) + decryptor.finalize()
+
+
 def decrypt_v4_v1(data: bytes, aes_key: bytes = V4_DEFAULT_AES_KEY) -> tuple[bytes, str | None]:
     """V4-V1: 0xF-byte header + AES portion + raw + XOR portion."""
-    try:
-        from Crypto.Cipher import AES
-    except ImportError:
-        raise RuntimeError("pycryptodome not installed: pip install pycryptodome")
-
     if len(data) < 0xF:
         return b"", None
     aes_size = struct.unpack("<I", data[6:10])[0]
@@ -138,8 +140,7 @@ def decrypt_v4_v1(data: bytes, aes_key: bytes = V4_DEFAULT_AES_KEY) -> tuple[byt
 
     plain = b""
     if aligned > 0:
-        cipher = AES.new(aes_key, AES.MODE_ECB)
-        decrypted = cipher.decrypt(body[:aligned])
+        decrypted = aes_ecb_decrypt(aes_key, body[:aligned])
         if decrypted:
             pad = decrypted[-1]
             if 0 < pad <= 16:
@@ -367,14 +368,9 @@ def _is_utf16_ascii_alnum_32(data: bytes, start: int) -> bool:
 
 def _verify_image_aes_key(ciphertext_first_block: bytes, key: bytes) -> bool:
     """Decrypt the first AES block of an encrypted image and check for JPG magic."""
-    try:
-        from Crypto.Cipher import AES
-    except ImportError:
-        return False
     if len(ciphertext_first_block) < 16 or len(key) != 16:
         return False
-    cipher = AES.new(key, AES.MODE_ECB)
-    plain = cipher.decrypt(ciphertext_first_block[:16])
+    plain = aes_ecb_decrypt(key, ciphertext_first_block[:16])
     return plain[0] == 0xFF and plain[1] == 0xD8
 
 
@@ -405,6 +401,10 @@ def extract_image_aes_key(pid: int | None = None,
     Optimization: uses regex to find ALL [0-9A-Za-z]{32} substrings in each chunk
     in C-speed, then only AES-tries those candidates.
     """
+    if not IS_WINDOWS:
+        log("[X] Image AES key extraction is Windows-only for now.")
+        return None
+
     import ctypes
     from ctypes import wintypes
     if ciphertext_block is None:
@@ -538,8 +538,16 @@ def cmd_index(args):
     print(f"  source files: {dict(by_exists)}")
     out_path = media_index_path()
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(idx, ensure_ascii=False, indent=2), encoding="utf-8")
+    existing = {}
+    if out_path.exists():
+        try:
+            existing = json.loads(out_path.read_text(encoding="utf-8"))
+        except Exception:
+            existing = {}
+    merged = {**existing, **idx}
+    out_path.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"  saved index → {out_path}")
+    print(f"  merged: {len(idx)} hardlink entries, preserved {len(merged) - len(idx)} existing entries")
 
 
 def cmd_decrypt_images(args):
@@ -567,6 +575,17 @@ def cmd_info(args):
     if not media_out().parent.exists():
         print("  (no media directory yet — run `media.py index` and `media.py decrypt-images`)")
         return
+    idx_path = media_index_path()
+    if idx_path.exists():
+        try:
+            idx = json.loads(idx_path.read_text(encoding="utf-8"))
+        except Exception:
+            idx = {}
+        by_kind = Counter((r.get("kind") or "?") for r in idx.values() if isinstance(r, dict))
+        exists = sum(1 for r in idx.values() if isinstance(r, dict) and r.get("exists"))
+        decrypted = sum(1 for r in idx.values() if isinstance(r, dict) and r.get("decrypted"))
+        print(f"  media-index.json: {len(idx)} entries, {exists} source files available, {decrypted} pre-decrypted")
+        print(f"  by kind: {dict(by_kind)}")
     for sub in sorted(media_out().iterdir()) if media_out().exists() else []:
         if sub.is_dir():
             n = sum(1 for _ in sub.iterdir())

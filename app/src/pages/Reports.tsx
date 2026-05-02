@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { getReport, listReports, startBatch, getBatchStatus, getAgents } from '../data/api';
-import type { ReportEntry, ReportsList, LocalAgent } from '../data/api';
+import type { BatchStatus, ReportEntry, ReportsList, LocalAgent } from '../data/api';
 import { mdToHtml, MURMUR_MD_CSS } from '../utils/markdown';
 
 interface Props {
@@ -14,48 +14,83 @@ export function ReportsPage({ onBack }: Props) {
   const [active, setActive] = useState<{ path: string; content: string } | null>(null);
   const [activeLoading, setActiveLoading] = useState(false);
   const [agents, setAgents] = useState<LocalAgent[]>([]);
-  const [batch, setBatch] = useState<{ pid: number; log_path: string } | null>(null);
-  const [batchStatus, setBatchStatus] = useState<{ running: boolean; n_friends: number; n_pairs: number; log_tail: string } | null>(null);
+  const [selectedCli, setSelectedCli] = useState<'claude' | 'codex' | 'both' | ''>('');
+  const [parallel, setParallel] = useState(2);
+  const [batch, setBatch] = useState<{ pid: number; log_path: string; pids?: number[]; log_paths?: string[] } | null>(null);
+  const [batchStatus, setBatchStatus] = useState<BatchStatus | null>(null);
   const [batchOpen, setBatchOpen] = useState(false);
 
   useEffect(() => {
     listReports().then(setList).catch(e => setError(e?.message || String(e)));
-    getAgents().then(setAgents).catch(() => {});
+    getAgents().then(setAgents).catch(() => { /* no local agents available */ });
   }, []);
+
+  useEffect(() => {
+    if (selectedCli || agents.length === 0) return;
+    const preferred = agents.find(a => a.cli === 'claude') || agents.find(a => a.cli === 'codex') || agents[0];
+    if (preferred?.cli === 'claude' || preferred?.cli === 'codex') {
+      setSelectedCli(preferred.cli);
+    }
+  }, [agents, selectedCli]);
 
   // Poll batch status while running
   useEffect(() => {
     if (!batch) return;
+    let stop = false;
     const tick = async () => {
+      if (stop) return;
       try {
-        const s = await getBatchStatus(batch.pid, batch.log_path);
+        const s = await getBatchStatus(batch.pid, batch.log_path, batch.pids, batch.log_paths);
         setBatchStatus(s);
         if (!s.running) {
           // Refresh report list
           const fresh = await listReports();
           setList(fresh);
+          return;
         }
-      } catch {}
+      } catch {
+        // Keep the current list visible if a transient poll fails.
+      }
+      setTimeout(tick, 5000);
     };
     tick();
-    const id = setInterval(tick, 5000);
-    return () => clearInterval(id);
+    return () => { stop = true; };
   }, [batch]);
 
-  async function launchBatch(mode: 'top' | 'all' | 'pairs-graph', top: number, top_pairs: number) {
+  async function launchBatch(
+    mode: 'top' | 'all' | 'pairs-graph',
+    top: number,
+    top_pairs: number,
+    sample = 80,
+    parallel = 2,
+    force = false,
+  ) {
     if (agents.length === 0) {
       alert('没检测到 claude / codex CLI，请先安装 (npm install -g @anthropic-ai/claude-code)');
       return;
     }
-    const cli = (agents[0].cli as 'claude' | 'codex');
+    if (selectedCli !== 'claude' && selectedCli !== 'codex' && selectedCli !== 'both') {
+      alert('请选择 Claude、Codex 或双引擎');
+      return;
+    }
+    const cli = selectedCli;
     try {
-      const r = await startBatch({ cli, mode, top, top_pairs });
+      const r = await startBatch({ cli, mode, top, top_pairs, sample, parallel, force });
       if (!r.ok || !r.pid || !r.log_path) {
         alert('启动失败：' + (r.error || ''));
         return;
       }
-      setBatch({ pid: r.pid, log_path: r.log_path });
-      setBatchStatus({ running: true, n_friends: 0, n_pairs: 0, log_tail: '启动中…' });
+      setBatch({ pid: r.pid, log_path: r.log_path, pids: r.pids, log_paths: r.log_paths });
+      setBatchStatus({
+        running: true,
+        n_friends: 0,
+        n_pairs: 0,
+        friends_done: 0,
+        friends_total: mode === 'pairs-graph' ? 0 : top,
+        pairs_done: 0,
+        pairs_total: top_pairs,
+        log_tail: '启动中…',
+      });
     } catch (e: any) {
       alert('错误：' + (e?.message || e));
     }
@@ -67,7 +102,7 @@ export function ReportsPage({ onBack }: Props) {
       const first = list.friends[0];
       pickReport(first);
     }
-  }, [list]);
+  }, [list, active]);
 
   async function pickReport(entry: ReportEntry) {
     setActiveLoading(true);
@@ -114,17 +149,23 @@ export function ReportsPage({ onBack }: Props) {
       return a.entry.path.localeCompare(b.entry.path);
     });
 
+    const htmlEsc = (s: string) => s
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
     const cleanName = (e: ReportEntry) =>
       e.name.replace(/^\d+_/, '').replace(/_/g, ' ').replace(/^(.*?)__(.*)$/, '$1 ↔ $2');
 
     const tocFriends = results.filter(r => r.kind === 'friend')
-      .map((r, i) => `<li><a href="#r${i}">${cleanName(r.entry)}</a></li>`).join('\n');
+      .map((r, i) => `<li><a href="#r${i}">${htmlEsc(cleanName(r.entry))}</a></li>`).join('\n');
     const startPairsIdx = results.findIndex(r => r.kind === 'pair');
     const tocPairs = results.filter(r => r.kind === 'pair')
-      .map((r, i) => `<li><a href="#r${startPairsIdx + i}">${cleanName(r.entry)}</a></li>`).join('\n');
+      .map((r, i) => `<li><a href="#r${startPairsIdx + i}">${htmlEsc(cleanName(r.entry))}</a></li>`).join('\n');
 
     const sections = results.map((r, i) =>
-      `<section id="r${i}"><h1>${cleanName(r.entry)}</h1>` +
+      `<section id="r${i}"><h1>${htmlEsc(cleanName(r.entry))}</h1>` +
       `<article class="murmur-md">${mdToHtml(r.content)}</article></section>`
     ).join('\n<hr/>\n');
 
@@ -184,22 +225,19 @@ ${sections}
   if (!list) {
     return <div style={{ padding: 40 }}>加载报告列表…</div>;
   }
-  if (list.friends.length === 0 && list.pairs.length === 0) {
-    return (
-      <div style={{ padding: 60, textAlign: 'center', maxWidth: 700, margin: '0 auto' }}>
-        <button onClick={onBack} style={{ all: 'unset', cursor: 'pointer', color: 'var(--et-mute)' }}>← 返回</button>
-        <div className="et-h2" style={{ marginTop: 20 }}>还没有 AI 分析报告</div>
-        <div className="et-meta" style={{ marginTop: 12, lineHeight: 1.7 }}>
-          先在 Murmur 仓库根目录的终端跑：<br/>
-          <code style={{ display: 'inline-block', marginTop: 8, padding: '8px 14px',
-            background: 'var(--et-paper-2)', borderRadius: 6, fontFamily: 'var(--et-mono)' }}>
-            python3 cli/batch_analyze.py --top 10
-          </code><br/>
-          约 8-10 分钟后报告会出现在这里。
-        </div>
-      </div>
-    );
-  }
+  const batchRunning = !!batch?.pid && !!batchStatus?.running;
+  const friendDone = batchStatus?.friends_done ?? batchStatus?.n_friends ?? 0;
+  const friendTotal = batchStatus?.friends_total ?? 0;
+  const pairDone = batchStatus?.pairs_done ?? batchStatus?.n_pairs ?? 0;
+  const pairTotal = batchStatus?.pairs_total ?? 0;
+  const friendProgress = friendTotal > 0 ? `${friendDone}/${friendTotal}` : String(friendDone);
+  const pairProgress = pairTotal > 0 ? `${pairDone}/${pairTotal}` : String(pairDone);
+  const issueText = batchStatus && (batchStatus.crashed || (batchStatus.failures || 0) > 0 || (batchStatus.skipped || 0) > 0)
+    ? `${batchStatus.crashed ? '异常退出 · ' : ''}失败 ${batchStatus.failures || 0} · 跳过 ${batchStatus.skipped || 0}`
+    : '';
+  const hasClaude = agents.some(a => a.cli === 'claude');
+  const hasCodex = agents.some(a => a.cli === 'codex');
+  const hasBoth = hasClaude && hasCodex;
 
   return (
     <div style={{ position: 'fixed', inset: 0, display: 'flex',
@@ -234,21 +272,38 @@ ${sections}
           }}>📦 导出全套 HTML</button>
           <button onClick={() => setBatchOpen(o => !o)} style={{
             all: 'unset', cursor: 'pointer', padding: '7px 12px', borderRadius: 8,
-            background: batch?.pid && batchStatus?.running ? 'var(--et-orange-2)' : 'var(--et-ink)',
+            background: batchRunning ? 'var(--et-orange-2)' : 'var(--et-ink)',
             color: '#fff', fontSize: 12, fontWeight: 600, textAlign: 'center',
-          }}>🤖 批量分析{batch?.pid && batchStatus?.running ? ' (跑着)' : ''}</button>
+          }}>🤖 批量分析{batchRunning ? ' (跑着)' : ''}</button>
           {batchOpen && (
             <div style={{
               padding: '10px 12px', background: 'var(--et-paper-2)',
               border: '0.5px solid var(--et-line-2)', borderRadius: 8,
               fontSize: 11, color: 'var(--et-ink-soft)', lineHeight: 1.6,
             }}>
+              <div style={{ fontWeight: 600, marginBottom: 6 }}>模型：</div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6, marginBottom: 10 }}>
+                <ChoiceBtn label="Claude" active={selectedCli === 'claude'} disabled={!hasClaude || batchRunning}
+                  sub={hasClaude ? '已检测' : '未安装'} onClick={() => setSelectedCli('claude')} />
+                <ChoiceBtn label="Codex" active={selectedCli === 'codex'} disabled={!hasCodex || batchRunning}
+                  sub={hasCodex ? '已检测' : '未安装'} onClick={() => setSelectedCli('codex')} />
+                <ChoiceBtn label="双引擎" active={selectedCli === 'both'} disabled={!hasBoth || batchRunning}
+                  sub={hasBoth ? '对照跑' : '需两者'} onClick={() => setSelectedCli('both')} />
+              </div>
+              <div style={{ fontWeight: 600, marginBottom: 6 }}>速度：</div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6, marginBottom: 10 }}>
+                <ChoiceBtn label="稳妥" active={parallel === 1} disabled={batchRunning} sub="1 路" onClick={() => setParallel(1)} />
+                <ChoiceBtn label="标准" active={parallel === 2} disabled={batchRunning} sub="2 路" onClick={() => setParallel(2)} />
+                <ChoiceBtn label="快跑" active={parallel === 4} disabled={batchRunning} sub="4 路" onClick={() => setParallel(4)} />
+              </div>
               <div style={{ fontWeight: 600, marginBottom: 8 }}>选个量级：</div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                <BatchBtn label="顶 10 朋友" sub="≈ 30 分钟" onClick={() => launchBatch('top', 10, 10)} disabled={!!batch?.pid && batchStatus?.running} />
-                <BatchBtn label="顶 30 朋友 + 30 对" sub="≈ 1.5 小时" onClick={() => launchBatch('top', 30, 30)} disabled={!!batch?.pid && batchStatus?.running} />
-                <BatchBtn label="全部 100 + 30 对" sub="≈ 5 小时 · token 多" onClick={() => launchBatch('all', 100, 30)} disabled={!!batch?.pid && batchStatus?.running} primary />
-                <BatchBtn label="只朋友间 (按图权重)" sub="补全 pair 报告" onClick={() => launchBatch('pairs-graph', 0, 40)} disabled={!!batch?.pid && batchStatus?.running} />
+                <BatchBtn label="小样本自检" sub="2 朋友 + 2 对 · sample 12" onClick={() => launchBatch('top', 2, 2, 12, 1, true)} disabled={batchRunning} />
+                <BatchBtn label="Top 10 朋友 + 10 对" sub="稳妥跑一轮" onClick={() => launchBatch('top', 10, 10, 80, parallel)} disabled={batchRunning} />
+                <BatchBtn label="Top 30 朋友 + 30 对" sub="更完整" onClick={() => launchBatch('top', 30, 30, 80, parallel)} disabled={batchRunning} />
+                <BatchBtn label="全部朋友 + Top 30 对" sub="覆盖本人关系" onClick={() => launchBatch('all', 0, 30, 80, parallel)} disabled={batchRunning} primary />
+                <BatchBtn label="全部朋友 + 全部朋友间" sub="最完整" onClick={() => launchBatch('all', 0, 0, 80, parallel)} disabled={batchRunning} />
+                <BatchBtn label="只朋友间 (按图权重)" sub="补 pair 报告" onClick={() => launchBatch('pairs-graph', 0, 40, 80, parallel)} disabled={batchRunning} />
               </div>
               {batch?.pid && batchStatus && (
                 <div style={{ marginTop: 10, padding: '8px 10px', background: 'var(--et-paper)',
@@ -257,8 +312,17 @@ ${sections}
                     {batchStatus.running ? `⏳ PID ${batch.pid} 跑着` : '✅ 完成'}
                   </div>
                   <div className="et-num" style={{ fontSize: 13, marginTop: 4 }}>
-                    {batchStatus.n_friends} friends · {batchStatus.n_pairs} pairs
+                    朋友 {friendProgress} · 朋友间 {pairProgress}
                   </div>
+                  {issueText && <div style={{ marginTop: 4, color: 'var(--et-rose)', fontSize: 10 }}>{issueText}</div>}
+                  {batchStatus.last_stage && (
+                    <div style={{ marginTop: 4, color: 'var(--et-mute)', fontSize: 10 }}>{batchStatus.last_stage}</div>
+                  )}
+                  <pre style={{
+                    margin: '8px 0 0', padding: 8, maxHeight: 120, overflowY: 'auto',
+                    background: 'var(--et-paper-2)', borderRadius: 6,
+                    fontSize: 10, lineHeight: 1.45, whiteSpace: 'pre-wrap',
+                  }}>{batchStatus.log_tail || '(等输出...)'}</pre>
                 </div>
               )}
             </div>
@@ -291,7 +355,13 @@ ${sections}
       {/* Main viewer */}
       <div style={{ flex: 1, overflowY: 'auto', padding: '40px 56px',
         background: 'var(--et-bg)' }}>
-        {!active && <div className="et-meta" style={{ textAlign: 'center', marginTop: 80 }}>选一份报告开始阅读</div>}
+        {!active && (
+          <div className="et-meta" style={{ textAlign: 'center', marginTop: 80 }}>
+            {list.friends.length === 0 && list.pairs.length === 0
+              ? '还没有报告，点左侧“批量分析”开始。'
+              : '选一份报告开始阅读'}
+          </div>
+        )}
         {active && activeLoading && <div className="et-meta">加载中…</div>}
         {active && !activeLoading && (
           <article
@@ -309,6 +379,26 @@ ${sections}
 
       <style>{MURMUR_MD_CSS}</style>
     </div>
+  );
+}
+
+function ChoiceBtn({ label, sub, active, disabled, onClick }: {
+  label: string; sub: string; active: boolean; disabled?: boolean; onClick: () => void;
+}) {
+  return (
+    <button onClick={onClick} disabled={disabled} style={{
+      all: 'unset', cursor: disabled ? 'not-allowed' : 'pointer',
+      padding: '7px 8px', borderRadius: 6,
+      background: active ? 'var(--et-ink)' : 'var(--et-paper)',
+      color: active ? '#fff' : 'var(--et-ink)',
+      border: active ? 'none' : '0.5px solid var(--et-line-2)',
+      opacity: disabled ? 0.4 : 1,
+      boxSizing: 'border-box',
+      minHeight: 44,
+    }}>
+      <div style={{ fontSize: 12, fontWeight: 700, lineHeight: 1.2 }}>{label}</div>
+      <div style={{ fontSize: 10, opacity: 0.72, marginTop: 3 }}>{sub}</div>
+    </button>
   );
 }
 

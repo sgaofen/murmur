@@ -32,7 +32,7 @@ export function LocalAgentPanel({
         borderRadius: 'var(--et-r)',
       }}>
         <div className="et-meta" style={{ fontSize: 12, color: 'var(--et-mute)' }}>
-          没在你电脑上检测到 Claude Code / Codex 等命令行 AI。下面可以选「通用 AI」生成分析包，自己拷给在线 AI。
+          没在你电脑上检测到 Claude Code / Codex 命令行 AI。下面可以选「通用 AI」生成分析包，自己拷给在线 AI。
         </div>
       </div>
     );
@@ -103,7 +103,7 @@ export function LocalAgentPanel({
       </div>
       <div className="et-meta" style={{ marginTop: 10, fontSize: 11, color: 'var(--et-mute)', display: 'flex', alignItems: 'center', gap: 6 }}>
         <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#48a76b' }} />
-        全程在本地运行 · 数据不会离开你的电脑
+        由本机命令行启动 · Claude/Codex 会交给对应服务商处理
       </div>
     </div>
   );
@@ -113,9 +113,6 @@ function describe(cli: string): string {
   switch (cli) {
     case 'claude': return '我电脑上的 Claude，最聪明的助手';
     case 'codex': return 'OpenAI 出的命令行助手';
-    case 'aider': return '开源的代码 / 文档助手';
-    case 'gemini': return '谷歌 Gemini CLI';
-    case 'ollama': return '本地大模型（无需联网）';
     default: return '本机 AI 工具';
   }
 }

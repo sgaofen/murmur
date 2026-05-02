@@ -40,6 +40,7 @@ export default function App() {
     () => window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false
   );
   const [onboarding, setOnboarding] = useState(false);
+  const showDevControls = import.meta.env.VITE_SHOW_DEV_CONTROLS === '1';
 
   useEffect(() => {
     const onHash = () => setRoute(parseHash(window.location.hash));
@@ -79,7 +80,7 @@ export default function App() {
       return null;
     };
     (async () => {
-      const info: any = await probe(() => getInfo());
+      const info = await probe(() => getInfo());
       if (cancelled) return;
       if (!info) {
         // Backend never came up — leave Home's connection error UI in place.
@@ -157,8 +158,8 @@ export default function App() {
   return (
     <TaskCenterProvider>
       {body}
-      {DevControls}
-      <PrivacyToggle />
+      {showDevControls && DevControls}
+      <PrivacyToggle position={showDevControls ? 'top-right' : 'bottom-right'} />
       <OnboardingDialog
         open={onboarding}
         onClose={() => { localStorage.setItem(ONBOARDING_SEEN_KEY, '1'); setOnboarding(false); }}

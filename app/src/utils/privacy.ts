@@ -26,7 +26,9 @@ export function setPrivacyMode(v: boolean) {
   _enabled = v;
   try {
     localStorage.setItem(STORAGE_KEY, v ? '1' : '0');
-  } catch {}
+  } catch {
+    // localStorage can be unavailable in hardened/private webview contexts.
+  }
   for (const l of listeners) l(v);
 }
 
@@ -83,5 +85,7 @@ export function maskText(text: string): string {
   if (!_enabled || !text) return text;
   return text
     .replace(/wxid_[a-z0-9]+/g, m => `wxid_${(shortHash(m) % 9999).toString().padStart(4, '0')}`)
-    .replace(/\d{8,11}@chatroom/g, m => `group_${shortHash(m) % 999}`);
+    .replace(/\d{8,11}@chatroom/g, m => `group_${shortHash(m) % 999}`)
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, m => `email_${shortHash(m) % 999}`)
+    .replace(/(^|[^\d])(\+?\d[\d -]{6,}\d)(?!\d)/g, (_m, prefix, num) => `${prefix}num_${shortHash(num) % 9999}`);
 }

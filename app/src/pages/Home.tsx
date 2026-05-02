@@ -4,10 +4,12 @@ import { FriendCard } from '../components/FriendCard';
 import { Postmark } from '../components/Postmark';
 import { Ribbon } from '../components/Ribbon';
 import { Sparkline } from '../components/Sparkline';
-import { getAllFriends, getHomeSummary, refreshData } from '../data/api';
+import { APP_VERSION, getAllFriends, getHomeSummary, refreshData } from '../data/api';
 import type { Friend, HomeSummary } from '../data/types';
 import { ExtractKeyDialog } from './ExtractKeyDialog';
 import { TaskCenterBell, TaskCenterDrawer, useTaskCenter } from '../components/extras/TaskCenter';
+import { displayName } from '../utils/privacy';
+import { usePrivacy } from '../utils/usePrivacy';
 
 interface Props {
   dark?: boolean;
@@ -83,6 +85,7 @@ function HomeChromeBar({ onRefresh, refreshing, refreshMsg, onExtractKey, onTogg
 }
 
 function HeroFrame({ summary, onOpen }: { summary: HomeSummary; onOpen: (id: string) => void }) {
+  void usePrivacy();
   return (
     <div className="et-paper-grain" style={{
       position: 'relative', margin: '24px 28px 0', padding: '40px 44px 36px',
@@ -127,7 +130,7 @@ function HeroFrame({ summary, onOpen }: { summary: HomeSummary; onOpen: (id: str
               color: i === 0 ? 'var(--et-orange)' : 'var(--et-ink)',
             }}>No.{i + 1}</div>
             <Avatar friend={f} size={i === 0 ? 64 : 52} ring={i === 0} />
-            <div className="et-serif" style={{ fontSize: 15, fontWeight: 600, color: 'var(--et-ink)', marginTop: 2 }}>{f.name}</div>
+            <div className="et-serif" style={{ fontSize: 15, fontWeight: 600, color: 'var(--et-ink)', marginTop: 2 }}>{displayName(f.id, f.name)}</div>
             <div className="et-num" style={{ fontSize: 18, fontWeight: 600, color: i === 0 ? 'var(--et-orange)' : 'var(--et-ink)' }}>
               {f.count.toLocaleString()}<span style={{ fontSize: 10, fontWeight: 500, color: 'var(--et-mute)', marginLeft: 3, fontFamily: 'var(--et-sans)' }}>条</span>
             </div>
@@ -365,7 +368,7 @@ export function HomePage({ dark = false, onOpenFriend }: Props) {
         <div className="et-meta" style={{ color: 'var(--et-mute)' }}>
           全部数据均在你的电脑上 · 不会上传到任何云端
         </div>
-        <div className="et-meta" style={{ fontFamily: 'var(--et-mono)', color: 'var(--et-faint)' }}>v0.1 · Murmur 微语</div>
+        <div className="et-meta" style={{ fontFamily: 'var(--et-mono)', color: 'var(--et-faint)' }}>{APP_VERSION}</div>
       </div>
       <ExtractKeyDialog
         open={extractOpen}
