@@ -238,6 +238,24 @@ need platform-specific validation first.
 - Pair reports now write `wxid_a` and `wxid_b` frontmatter, and report lookup prefers those stable ids.
 - `top=0` now means all for batch friend selection, mention extraction, and graph node selection.
 
+## 2026-05-02 Mac graph pointer/performance pass pulled into Windows
+
+Reviewed Mac commits:
+- `82120d2` Improve graph click targeting and animation cost
+- `634bec4` Fix graph pointer coordinate mapping
+
+Pulled into Windows:
+- SVG pointer coordinates now use `getScreenCTM().inverse()` with a bounding-rect fallback, so graph clicks stay aligned under CSS/viewBox scaling.
+- Node hit testing now includes larger node radii plus rendered labels, which makes small/nearby friends much easier to click.
+- Friend-friend edge hover/click is only active after a friend is selected and the pointer is not near a node, reducing accidental edge selections in the dense whole-graph view.
+- Selected edges are keyed order-insensitively and sorted to render above normal edges.
+- Auto-rotate skips hidden tabs and throttles to about 30fps; deep-space decoration was simplified by removing blurred orbs and reducing static stars to 72.
+- Tooltip names now go through the Windows privacy `displayName()` helper.
+
+Windows-specific behavior kept:
+- Selected-edge endpoints stay highlighted and undimmed even while a friend remains selected. This preserves the continuous "inspect one friend's relation lines" workflow requested in Windows QA.
+- The Windows direct-evidence gate for pair reports is unchanged. Mac's graph UI improvements do not relax the Kevin/Zhihui class of false-positive protection.
+
 ## Windows-side changes Mac should pull or mirror
 
 - Do not generate pair LLM reports from `co_group` alone. Shared group membership is useful context, but it is not direct evidence that two people have a relationship.

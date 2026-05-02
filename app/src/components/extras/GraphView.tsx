@@ -80,11 +80,9 @@ interface Projected extends GraphNode {
   proj: { x: number; y: number; depth: number };
 }
 
-function sameEdge(a: { source: string; target: string } | null | undefined,
-                  b: { source: string; target: string } | null | undefined) {
-  if (!a || !b) return false;
-  return (a.source === b.source && a.target === b.target)
-    || (a.source === b.target && a.target === b.source);
+function edgeKey(edge: Pick<GraphEdge, 'source' | 'target'> | null | undefined): string {
+  if (!edge) return '';
+  return [edge.source, edge.target].sort().join('__');
 }
 
 // Project 3D → 2D with rotations on Y (yaw) and X (pitch) axes,
@@ -148,8 +146,12 @@ export function GraphView({ data, dark = false, selected, selectedEdge = null, o
   useEffect(() => {
     if (!autoRotate || userInteracted || selected || selectedEdge) return;
     let raf = 0;
+    let lastFrame = 0;
     const loop = (t: number) => {
-      setRotY(t * 0.00008);
+      if (document.visibilityState === 'visible' && t - lastFrame >= 33) {
+        setRotY(t * 0.00008);
+        lastFrame = t;
+      }
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
@@ -196,6 +198,113 @@ export function GraphView({ data, dark = false, selected, selectedEdge = null, o
     return () => window.removeEventListener('keydown', onKey);
   }, [onSelect, onSelectEdge]);
 
+  function svgPoint(svg: SVGSVGElement, clientX: number, clientY: number) {
+    const matrix = svg.getScreenCTM();
+    if (matrix) {
+      const p = new DOMPoint(clientX, clientY).matrixTransform(matrix.inverse());
+      return { x: p.x, y: p.y };
+    }
+    const rect = svg.getBoundingClientRect();
+    return {
+      x: (clientX - rect.left) * (W / rect.width),
+      y: (clientY - rect.top) * (H / rect.height),
+    };
+  }
+
+  function nodeHitRadius(n: Projected) {
+    return Math.max(n.is_self ? 34 : 40, n.size * n.proj.depth + (n.is_self ? 22 : 30));
+  }
+
+  function nodeLabelHitScore(n: Projected, sx: number, sy: number) {
+    const isSel = selected === n.id;
+    const isNeighbor = neighbors.has(n.id);
+    const isEdgeEndpoint = selectedEdgeEndpoints.has(n.id);
+    const dim = !!selected && !isSel && !isNeighbor && !isEdgeEndpoint && !n.is_self;
+    if (dim || n.tier === 'E') return Infinity;
+
+    const r = n.size * n.proj.depth;
+    const label = n.is_self ? '你' : displayName(n.id, n.name);
+    const labelY = n.proj.y + r + (n.is_self ? 18 : 14);
+    const halfWidth = Math.min(150, Math.max(36, label.length * 8 + 22)) / 2;
+    const dx = Math.abs(sx - n.proj.x) - halfWidth;
+    const dy = Math.abs(sy - labelY) - 20;
+    return Math.max(dx, dy);
+  }
+
+  function findNodeHit(sx: number, sy: number, includeLabel: boolean) {
+    let best: Projected | null = null;
+    let bestScore = Infinity;
+    for (const n of projNodes) {
+      const circleScore = Math.hypot(n.proj.x - sx, n.proj.y - sy) - nodeHitRadius(n);
+      const labelScore = includeLabel ? nodeLabelHitScore(n, sx, sy) : Infinity;
+      const score = Math.min(circleScore, labelScore);
+      if (score <= 0 && score < bestScore) {
+        bestScore = score;
+        best = n;
+      }
+    }
+    return best;
+  }
+
+  function isNearAnyNode(sx: number, sy: number, extra = 0) {
+    return projNodes.some(n => Math.hypot(n.proj.x - sx, n.proj.y - sy) <= nodeHitRadius(n) + extra);
+  }
+
+  function edgeDistance(eg: GraphEdge, sx: number, sy: number) {
+    const a = projById[eg.source];
+    const b = projById[eg.target];
+    if (!a || !b) return Infinity;
+
+    const isSelfEdge = eg.source === 'self' || eg.target === 'self';
+    const dx = b.proj.x - a.proj.x;
+    const dy = b.proj.y - a.proj.y;
+    const len = Math.hypot(dx, dy) || 1;
+    const nSamples = Math.max(8, Math.min(80, Math.round(len / 3)));
+    let minD = Infinity;
+
+    if (isSelfEdge) {
+      for (let i = 0; i <= nSamples; i++) {
+        const t = i / nSamples;
+        const px = a.proj.x + dx * t;
+        const py = a.proj.y + dy * t;
+        const d = Math.hypot(px - sx, py - sy);
+        if (d < minD) minD = d;
+      }
+      return minD;
+    }
+
+    const mx = (a.proj.x + b.proj.x) / 2;
+    const my = (a.proj.y + b.proj.y) / 2;
+    const bow = Math.min(28, len * 0.12);
+    let nx = -dy / len, ny = dx / len;
+    if (nx * (mx - W / 2) + ny * (my - H / 2) < 0) { nx = -nx; ny = -ny; }
+    const cx = mx + nx * bow;
+    const cy = my + ny * bow;
+    for (let i = 0; i <= nSamples; i++) {
+      const t = i / nSamples;
+      const it = 1 - t;
+      const px = it * it * a.proj.x + 2 * it * t * cx + t * t * b.proj.x;
+      const py = it * it * a.proj.y + 2 * it * t * cy + t * t * b.proj.y;
+      const d = Math.hypot(px - sx, py - sy);
+      if (d < minD) minD = d;
+    }
+    return minD;
+  }
+
+  function findEdgeHit(sx: number, sy: number, tolerance: number) {
+    let bestEdge: GraphEdge | null = null;
+    let bestScore = Infinity;
+    for (const eg of data.edges) {
+      if (selected && eg.source !== selected && eg.target !== selected) continue;
+      const d = edgeDistance(eg, sx, sy);
+      if (d <= tolerance && d < bestScore) {
+        bestScore = d;
+        bestEdge = eg;
+      }
+    }
+    return bestEdge;
+  }
+
   function handlePointerDown(e: ReactPointerEvent<SVGSVGElement>) {
     setUserInteracted(true);
     setDragging(true);
@@ -225,70 +334,19 @@ export function GraphView({ data, dark = false, selected, selectedEdge = null, o
     lastHoverHitTestAtRef.current = now;
 
     const svg = e.currentTarget as SVGSVGElement;
-    const rect = svg.getBoundingClientRect();
-    const sx = (e.clientX - rect.left) * (W / rect.width);
-    const sy = (e.clientY - rect.top) * (H / rect.height);
+    const { x: sx, y: sy } = svgPoint(svg, e.clientX, e.clientY);
 
-    // 1. Try nearest node first (priority over edges)
-    let bestNodeId: string | null = null;
-    let bestNodeDist = Infinity;
-    for (const n of projNodes) {
-      const r = Math.max(16, n.size * n.proj.depth + 10);
-      const d = Math.hypot(n.proj.x - sx, n.proj.y - sy);
-      if (d < r && d < bestNodeDist) { bestNodeDist = d; bestNodeId = n.id; }
-    }
+    const bestNode = findNodeHit(sx, sy, true);
+    const bestNodeId = bestNode?.id ?? null;
     if (bestNodeId !== hover) setHover(bestNodeId);
 
-    // 2. If no node hovered, find nearest edge.
-    if (bestNodeId) {
+    if (bestNode) {
       if (hoverEdge) setHoverEdge(null);
       return;
     }
-    const HIT_TOLERANCE = 14;
-    let bestEdge: { source: string; target: string } | null = null;
-    let bestEdgeScore = Infinity;
-    for (const eg of data.edges) {
-      // When a node is selected, only edges connected to it are RENDERED, so
-      // hover preview must agree with what's visible.
-      if (selected && eg.source !== selected && eg.target !== selected) continue;
-      const a = projById[eg.source];
-      const b = projById[eg.target];
-      if (!a || !b) continue;
-      const isSelfEdge = eg.source === 'self' || eg.target === 'self';
-      const dxe = b.proj.x - a.proj.x;
-      const dye = b.proj.y - a.proj.y;
-      const len = Math.hypot(dxe, dye) || 1;
-      const nSamples = Math.max(8, Math.min(80, Math.round(len / 3)));
-      let minD = Infinity;
-      if (isSelfEdge) {
-        for (let i = 0; i <= nSamples; i++) {
-          const t = i / nSamples;
-          const px = a.proj.x + dxe * t, py = a.proj.y + dye * t;
-          const d = Math.hypot(px - sx, py - sy);
-          if (d < minD) minD = d;
-        }
-      } else {
-        const mx = (a.proj.x + b.proj.x) / 2;
-        const my = (a.proj.y + b.proj.y) / 2;
-        const bow = Math.min(28, len * 0.12);
-        let nx = -dye / len, ny = dxe / len;
-        if (nx * (mx - W / 2) + ny * (my - H / 2) < 0) { nx = -nx; ny = -ny; }
-        const cx = mx + nx * bow, cy = my + ny * bow;
-        for (let i = 0; i <= nSamples; i++) {
-          const t = i / nSamples;
-          const it = 1 - t;
-          const px = it * it * a.proj.x + 2 * it * t * cx + t * t * b.proj.x;
-          const py = it * it * a.proj.y + 2 * it * t * cy + t * t * b.proj.y;
-          const d = Math.hypot(px - sx, py - sy);
-          if (d < minD) minD = d;
-        }
-      }
-      if (minD <= HIT_TOLERANCE && minD < bestEdgeScore) {
-        bestEdgeScore = minD;
-        bestEdge = { source: eg.source, target: eg.target };
-      }
-    }
-    if (!sameEdge(bestEdge, hoverEdge)) setHoverEdge(bestEdge);
+    const bestEdge = selected && !isNearAnyNode(sx, sy, 10) ? findEdgeHit(sx, sy, 9) : null;
+    const nextHoverEdge = bestEdge ? { source: bestEdge.source, target: bestEdge.target } : null;
+    if (edgeKey(nextHoverEdge) !== edgeKey(hoverEdge)) setHoverEdge(nextHoverEdge);
   }
 
   function handlePointerLeave() {
@@ -302,71 +360,20 @@ export function GraphView({ data, dark = false, selected, selectedEdge = null, o
       // Detect "click vs drag": <5px movement = click → resolve which node was clicked
       const dx = e.clientX - dragRef.current.x;
       const dy = e.clientY - dragRef.current.y;
-      const wasClick = (dx * dx + dy * dy) < 25;
+      const wasClick = (dx * dx + dy * dy) < 256;
       if (wasClick) {
         // Find nearest visible node within hit radius (manually — pointer capture
         // breaks the natural click bubbling, so we resolve the hit ourselves)
         const svg = e.currentTarget as SVGSVGElement;
-        const rect = svg.getBoundingClientRect();
-        const sx = (e.clientX - rect.left) * (W / rect.width);
-        const sy = (e.clientY - rect.top) * (H / rect.height);
-        let best: Projected | null = null;
-        let bestDist = Infinity;
-        for (const n of projNodes) {
-          // Generous hit area: at least 16px, plus the rendered radius. Makes small
-          // E-tier nodes still clickable without zooming.
-          const r = Math.max(16, n.size * n.proj.depth + 10);
-          const d = Math.hypot(n.proj.x - sx, n.proj.y - sy);
-          if (d < r && d < bestDist) { best = n; bestDist = d; }
-        }
+        const { x: sx, y: sy } = svgPoint(svg, e.clientX, e.clientY);
+        const best = findNodeHit(sx, sy, true);
         if (best) {
           onSelect(best.id);
         } else if (onSelectEdge) {
           // No node hit — try to resolve nearest visible edge.
           // Density-aware sampling: ~3 px between samples so a 200px edge has 60+ checks.
           // Tolerance bumped to 14 px so curved bows are still hittable.
-          const HIT_TOLERANCE = 14;
-          let bestEdge: GraphEdge | null = null;
-          let bestEdgeScore = Infinity;
-          for (const eg of data.edges) {
-            if (selected && eg.source !== selected && eg.target !== selected) continue;
-            const a = projById[eg.source];
-            const b = projById[eg.target];
-            if (!a || !b) continue;
-            const isSelfEdge = eg.source === 'self' || eg.target === 'self';
-            const dxe = b.proj.x - a.proj.x;
-            const dye = b.proj.y - a.proj.y;
-            const len = Math.hypot(dxe, dye) || 1;
-            const nSamples = Math.max(8, Math.min(80, Math.round(len / 3)));
-            let minD = Infinity;
-            if (isSelfEdge) {
-              for (let i = 0; i <= nSamples; i++) {
-                const t = i / nSamples;
-                const px = a.proj.x + dxe * t, py = a.proj.y + dye * t;
-                const d = Math.hypot(px - sx, py - sy);
-                if (d < minD) minD = d;
-              }
-            } else {
-              const mx = (a.proj.x + b.proj.x) / 2;
-              const my = (a.proj.y + b.proj.y) / 2;
-              const bow = Math.min(28, len * 0.12);
-              let nx = -dye / len, ny = dxe / len;
-              if (nx * (mx - W / 2) + ny * (my - H / 2) < 0) { nx = -nx; ny = -ny; }
-              const cx = mx + nx * bow, cy = my + ny * bow;
-              for (let i = 0; i <= nSamples; i++) {
-                const t = i / nSamples;
-                const it = 1 - t;
-                const px = it * it * a.proj.x + 2 * it * t * cx + t * t * b.proj.x;
-                const py = it * it * a.proj.y + 2 * it * t * cy + t * t * b.proj.y;
-                const d = Math.hypot(px - sx, py - sy);
-                if (d < minD) minD = d;
-              }
-            }
-            if (minD <= HIT_TOLERANCE && minD < bestEdgeScore) {
-              bestEdgeScore = minD;
-              bestEdge = eg;
-            }
-          }
+          const bestEdge = selected && !isNearAnyNode(sx, sy, 10) ? findEdgeHit(sx, sy, 8) : null;
           if (bestEdge) {
             onSelectEdge(bestEdge);
           }
@@ -411,15 +418,16 @@ export function GraphView({ data, dark = false, selected, selectedEdge = null, o
     if (!selectedEdge) return new Set<string>();
     return new Set([selectedEdge.source, selectedEdge.target]);
   }, [selectedEdge]);
+  const selectedEdgeKey = edgeKey(selectedEdge);
 
   const sortedEdges = useMemo(
     () => [...data.edges].sort((a, b) => {
-      const aSelected = sameEdge(a, selectedEdge) ? 1 : 0;
-      const bSelected = sameEdge(b, selectedEdge) ? 1 : 0;
-      if (aSelected !== bSelected) return aSelected - bSelected;
+      const aSelected = !!selectedEdgeKey && edgeKey(a) === selectedEdgeKey;
+      const bSelected = !!selectedEdgeKey && edgeKey(b) === selectedEdgeKey;
+      if (aSelected !== bSelected) return aSelected ? 1 : -1;
       return (EDGE_ORDER[a.type] ?? 0) - (EDGE_ORDER[b.type] ?? 0);
     }),
-    [data.edges, selectedEdge]
+    [data.edges, selectedEdgeKey]
   );
 
   return (
@@ -431,14 +439,6 @@ export function GraphView({ data, dark = false, selected, selectedEdge = null, o
       overflow: 'hidden',
     }}>
       {dark && <Starfield />}
-      {dark && (
-        <>
-          <div style={{ position: 'absolute', left: '18%', top: '20%', width: 340, height: 340, borderRadius: '50%',
-            background: 'radial-gradient(circle, rgba(255,107,71,0.18), transparent 65%)', filter: 'blur(20px)' }} />
-          <div style={{ position: 'absolute', right: '12%', top: '55%', width: 280, height: 280, borderRadius: '50%',
-            background: 'radial-gradient(circle, rgba(232,181,122,0.14), transparent 65%)', filter: 'blur(20px)' }} />
-        </>
-      )}
 
       <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`}
            style={{
@@ -498,8 +498,8 @@ export function GraphView({ data, dark = false, selected, selectedEdge = null, o
           if (!a || !b) return null;
           const isSelfEdge = e.source === 'self' || e.target === 'self';
           const isHighlight = !!selected && (e.source === selected || e.target === selected);
-          const isHoverEdge = sameEdge(e, hoverEdge);
-          const isSelectedEdge = sameEdge(e, selectedEdge);
+          const isHoverEdge = !!hoverEdge && hoverEdge.source === e.source && hoverEdge.target === e.target;
+          const isSelectedEdge = !!selectedEdgeKey && edgeKey(e) === selectedEdgeKey;
           const styleByType: Record<string, { stroke: string; width: number; opMul: number; dash: string | null }> = {
             private:      { stroke: '#FF6B47',                                width: 1.2, opMul: 0.5,  dash: e.dashed ? '2 4' : null },
             co_group:     { stroke: dark ? '#5A7A99' : '#1A2B4A',              width: 0.8, opMul: 0.32, dash: '1 3' },
@@ -559,8 +559,9 @@ export function GraphView({ data, dark = false, selected, selectedEdge = null, o
         })}
 
         {/* Self ping ripples */}
+        {!selected && !selectedEdge && (
         <g>
-          {[0, 1, 2].map(i => (
+          {[0, 1].map(i => (
             <circle key={i}
               cx={W / 2} cy={H / 2} r="20"
               fill="none" stroke="#FF6B47"
@@ -569,18 +570,19 @@ export function GraphView({ data, dark = false, selected, selectedEdge = null, o
               <animate
                 attributeName="r"
                 values="20;240"
-                dur="4.5s"
-                begin={`${i * 1.5}s`}
+                dur="4.8s"
+                begin={`${i * 2.4}s`}
                 repeatCount="indefinite" />
               <animate
                 attributeName="stroke-opacity"
                 values="0.35;0"
-                dur="4.5s"
-                begin={`${i * 1.5}s`}
+                dur="4.8s"
+                begin={`${i * 2.4}s`}
                 repeatCount="indefinite" />
             </circle>
           ))}
         </g>
+        )}
 
         {/* Nodes */}
         {sortedNodes.map(n => {
@@ -678,13 +680,12 @@ export function GraphView({ data, dark = false, selected, selectedEdge = null, o
 
 function Starfield() {
   const stars = useMemo(() => {
-    const arr: { x: number; y: number; s: number; o: number; d: number }[] = [];
-    for (let i = 0; i < 140; i++) {
+    const arr: { x: number; y: number; s: number; o: number }[] = [];
+    for (let i = 0; i < 72; i++) {
       arr.push({
         x: Math.random() * 100, y: Math.random() * 100,
         s: Math.random() < 0.85 ? 1 : 1.6,
         o: 0.3 + Math.random() * 0.7,
-        d: Math.random() * 4,
       });
     }
     return arr;
@@ -692,15 +693,14 @@ function Starfield() {
   return (
     <svg style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none' }}>
       {stars.map((s, i) => (
-        <circle key={i} cx={`${s.x}%`} cy={`${s.y}%`} r={s.s} fill="white" opacity={s.o}>
-          <animate attributeName="opacity" values={`${s.o};${s.o * 0.3};${s.o}`} dur={`${3 + s.d}s`} repeatCount="indefinite" />
-        </circle>
+        <circle key={i} cx={`${s.x}%`} cy={`${s.y}%`} r={s.s} fill="white" opacity={s.o} />
       ))}
     </svg>
   );
 }
 
 function NodeTooltip({ node, dark }: { node: Projected; dark: boolean }) {
+  const name = displayName(node.id, node.name);
   return (
     <div style={{
       position: 'absolute',
@@ -712,7 +712,7 @@ function NodeTooltip({ node, dark }: { node: Projected; dark: boolean }) {
       boxShadow: '0 8px 24px rgba(0,0,0,0.3)',
       pointerEvents: 'none',
     }}>
-      <div style={{ fontWeight: 600, fontSize: 12.5 }}>{node.name}</div>
+      <div style={{ fontWeight: 600, fontSize: 12.5 }}>{name}</div>
       <div style={{ opacity: 0.75, marginTop: 2 }}>
         {node.is_self ? '是你' : `${node.tier} 级 · ${(node.private_msgs || 0).toLocaleString()} 条私聊`}
         {!node.is_self && node.group_msgs ? ` · ${node.group_msgs.toLocaleString()} 条群聊` : ''}
