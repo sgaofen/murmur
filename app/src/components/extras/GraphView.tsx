@@ -1,5 +1,5 @@
 // 3D 关系网络 — 拖拽旋转 / 滚轮缩放 / 投影。底层 SVG，无外部 force-graph 依赖。
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent } from 'react';
 import { displayName } from '../../utils/privacy';
 import { usePrivacy } from '../../utils/usePrivacy';
@@ -116,6 +116,8 @@ interface Props {
   onSelect: (id: string | null) => void;
   onSelectEdge?: (edge: GraphEdge | null) => void;
   autoRotate?: boolean;
+  autoRotateResumeSignal?: number;
+  onAutoRotatePause?: () => void;
   height?: number;
 }
 
@@ -124,7 +126,18 @@ function edgeKey(edge: Pick<GraphEdge, 'source' | 'target'> | null | undefined):
   return [edge.source, edge.target].sort().join('__');
 }
 
-export function GraphView({ data, dark = false, selected, selectedEdge = null, onSelect, onSelectEdge, autoRotate = true, height = 820 }: Props) {
+export function GraphView({
+  data,
+  dark = false,
+  selected,
+  selectedEdge = null,
+  onSelect,
+  onSelectEdge,
+  autoRotate = true,
+  autoRotateResumeSignal = 0,
+  onAutoRotatePause,
+  height = 820,
+}: Props) {
   const privacy = usePrivacy();
   void privacy;  // re-render when privacy toggle flips (used in label render below)
   const W = 1240, H = height;
@@ -141,6 +154,17 @@ export function GraphView({ data, dark = false, selected, selectedEdge = null, o
   const [hover, setHover] = useState<string | null>(null);
   const [hoverEdge, setHoverEdge] = useState<{ source: string; target: string } | null>(null);
 
+  const pauseAutoRotateForUser = useCallback(() => {
+    setUserInteracted(true);
+    onAutoRotatePause?.();
+  }, [onAutoRotatePause]);
+
+  useEffect(() => {
+    setUserInteracted(false);
+    setDragging(false);
+    dragRef.current = null;
+  }, [autoRotateResumeSignal]);
+
   // Auto-rotate (paused when user interacts OR a panel is open — so the edge/node
   // they clicked doesn't drift away while reading the side panel)
   useEffect(() => {
@@ -148,8 +172,14 @@ export function GraphView({ data, dark = false, selected, selectedEdge = null, o
     let raf = 0;
     let lastFrame = 0;
     const loop = (t: number) => {
-      if (document.visibilityState === 'visible' && t - lastFrame >= 33) {
-        setRotY(t * 0.00008);
+      if (document.visibilityState === 'visible') {
+        if (!lastFrame) lastFrame = t;
+        const delta = t - lastFrame;
+        if (delta >= 33) {
+          setRotY(r => r + delta * 0.00008);
+          lastFrame = t;
+        }
+      } else {
         lastFrame = t;
       }
       raf = requestAnimationFrame(loop);
@@ -168,6 +198,7 @@ export function GraphView({ data, dark = false, selected, selectedEdge = null, o
       const panStep = 30;
       const zoomStep = 0.1;
       let handled = true;
+      let shouldPauseAutoRotate = true;
       switch (e.key) {
         case 'ArrowLeft':  setRotY(r => r - rotStep); break;
         case 'ArrowRight': setRotY(r => r + rotStep); break;
@@ -182,21 +213,23 @@ export function GraphView({ data, dark = false, selected, selectedEdge = null, o
         case 'r': case 'R':
           setRotX(-0.15); setRotY(0); setZoom(1); setPan({ x: 0, y: 0 });
           setUserInteracted(false);
+          shouldPauseAutoRotate = false;
           break;
         case 'Escape':
           onSelect(null);
           if (onSelectEdge) onSelectEdge(null);
+          shouldPauseAutoRotate = false;
           break;
         default: handled = false;
       }
       if (handled) {
         e.preventDefault();
-        setUserInteracted(true);
+        if (shouldPauseAutoRotate) pauseAutoRotateForUser();
       }
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onSelect, onSelectEdge]);
+  }, [onSelect, onSelectEdge, pauseAutoRotateForUser]);
 
   function svgPoint(e: ReactPointerEvent<SVGSVGElement>) {
     const svg = e.currentTarget as SVGSVGElement;
@@ -316,7 +349,7 @@ export function GraphView({ data, dark = false, selected, selectedEdge = null, o
   }
 
   function handlePointerDown(e: ReactPointerEvent<SVGSVGElement>) {
-    setUserInteracted(true);
+    pauseAutoRotateForUser();
     setDragging(true);
     (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
     // Right-click or shift = pan; else rotate
@@ -399,7 +432,7 @@ export function GraphView({ data, dark = false, selected, selectedEdge = null, o
   }
   function handleWheel(e: ReactWheelEvent<SVGSVGElement>) {
     e.stopPropagation();
-    setUserInteracted(true);
+    pauseAutoRotateForUser();
     const factor = e.deltaY > 0 ? 0.92 : 1.08;
     setZoom(z => Math.max(0.25, Math.min(4, z * factor)));
   }
