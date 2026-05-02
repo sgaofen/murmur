@@ -26,6 +26,8 @@
 - **`Murmur_x.x.x_aarch64.dmg`** （M 系列芯片，推荐）—— 双击打开，拖 Murmur 进 `/Applications`
 - 或 `Murmur_x.x.x_aarch64.app.zip` —— 解压后拖进 `/Applications`
 
+> 注意：只有 **Developer ID 签名 + Apple notarization** 后，才算真正“小白从 GitHub 下载后可直接打开”。未公证测试包会被 macOS Gatekeeper 拦截，只适合开发验证；正式发布流程见 [Mac 正式签名与公证发布教程](MAC_NOTARIZATION_GUIDE.md)。
+
 > Mac Intel x64 dmg 还没出。Intel 用户用方式 2 或方式 3。
 
 ### 方式 2 · 一行 curl 安装（小白推荐）
@@ -163,13 +165,13 @@ rm -rf ~/Documents/Murmur ~/.murmur ~/Desktop/Murmur
 
 ### Q：macOS 报「Murmur 已损坏，无法打开」
 
-我们用 ad-hoc 签名（没有 Apple Developer ID 证书），Gatekeeper 会拦。终端跑：
+这通常说明包没有正确签名、公证，或者下载文件仍带旧的损坏签名结构。正式面向小白的包必须走 Developer ID + notarization。开发验证时可临时跑：
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/Murmur.app
 ```
 
-然后重新打开 Murmur.app。
+然后重新打开 Murmur.app。这个命令只是临时绕过，不是正式发行方案。
 
 ### Q：「开始自动抓取」点了之后没反应
 
