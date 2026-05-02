@@ -218,7 +218,7 @@ cd murmur
 
 ## 进阶：从源码打 Windows 安装包
 
-想自己构建给小白用户安装的 `.exe` / `.msi`，在 Windows PowerShell 里运行：
+想自己构建给用户安装的 `.exe` / `.msi`，在 Windows PowerShell 里运行：
 
 ```powershell
 .\build-windows.ps1
