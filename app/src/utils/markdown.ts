@@ -1,7 +1,12 @@
 // Minimal markdown → HTML conversion (no external deps).
 // Handles: # ## ### h1-h3, **bold**, *italic*, `code`, ```fences```, > blockquotes, - * lists, links.
 export function mdToHtml(md: string): string {
-  const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const esc = (s: string) => s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
   md = md.replace(/```([\w-]*)\n([\s\S]*?)\n```/g, (_, lang, code) =>
     `<pre><code class="lang-${lang}">${esc(code)}</code></pre>`
   );
@@ -12,7 +17,7 @@ export function mdToHtml(md: string): string {
   let inTable = false;
   let tableHeaderDone = false;
   for (let i = 0; i < lines.length; i++) {
-    let line = lines[i];
+    const line = lines[i];
     if (line.includes('<pre>') || line.includes('</pre>') || line.startsWith('<pre>')) {
       if (inList) { out.push('</ul>'); inList = false; }
       if (inQuote) { out.push('</blockquote>'); inQuote = false; }
@@ -77,8 +82,25 @@ function inlineFormat(s: string): string {
   s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
   s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   s = s.replace(/\*([^*]+)\*/g, '<em>$1</em>');
-  s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+  s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, label, href) =>
+    `<a href="${safeHref(href)}" target="_blank" rel="noreferrer">${
+      label
+    }</a>`
+  );
   return s;
+}
+
+function safeHref(href: string): string {
+  const normalized = href.trim().replace(/&amp;/g, '&');
+  if (/^(https?:|mailto:|#)/i.test(normalized)) {
+    return normalized
+      .replace(/&/g, '&amp;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  }
+  return '#';
 }
 
 export const MURMUR_MD_CSS = `

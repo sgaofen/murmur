@@ -16,13 +16,15 @@ xwechat_files/ → decrypt_py.py / go_decrypt.dll → 你电脑上的 SQLite
                                                     ▼
                                                  等数据
                                                     │
-                                  Murmur 后端 (Python http server) on localhost:9100
+                                                 Murmur 后端 (Python http server) on 127.0.0.1:9100
                                                     │
                                                     ▼
-                                              React 前端 on localhost:5173
+                                              React 前端 on 127.0.0.1:5173
 ```
 
 **没有任何外部网络请求**。Telemetry: 0。
+
+本地后端只给 Murmur 开发前端 `127.0.0.1:5173` / `localhost:5173` 和 Tauri 应用来源开放 CORS。普通网页、外网网页、以及其他 localhost 端口都不能跨域读取 Murmur 的本地 API。
 
 ### 2. AI 分析（可选 / 你主动触发）
 
@@ -40,13 +42,13 @@ xwechat_files/ → decrypt_py.py / go_decrypt.dll → 你电脑上的 SQLite
 
 **这一步上传到第三方**：
 - Claude Code → Anthropic（你的 API key 账号）
-- Codex CLI → OpenAI（你的 API key 账号）
+- Codex CLI → OpenAI（你的 API key 账号；默认模型 `gpt-5.2`，可用 `MURMUR_CODEX_MODEL` 覆盖）
 
 如果不想上传，**别点 AI 按钮**。离线信号矩阵 + 关系图 + 双人年代记 完全本地、能看出 70% 的关系深度。
 
 ### 3. 语音转写（可选 / 100% 本地）
 
-如果你装了 `faster-whisper`：
+如果你装了可选依赖 `requirements-voice.txt`：
 
 ```
 echotrace 已提取的 mp3 → 本地 Whisper 模型 (CPU 或 GPU) → 文字 .txt
@@ -112,7 +114,7 @@ UI 右下角「🔒 隐私模式：开」按钮：
 - 没有任何混淆
 - 没有任何 telemetry / analytics 库
 - 没有任何外部 API key 硬编码
-- `requirements.txt` 列了所有 Python 依赖，`package.json` 列了所有 JS 依赖
+- `requirements.txt` 列了主功能 Python 依赖，`requirements-voice.txt` 列了可选语音转写依赖，`package.json` 列了所有 JS 依赖
 
 如果你不放心，可以：
 - 在隔离的 VM / Docker 里跑

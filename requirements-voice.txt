@@ -1,0 +1,9 @@
+# Optional voice transcription dependencies.
+#
+# Install with:
+#   python3.12 -m pip install -r requirements-voice.txt
+#
+# This file includes the core Murmur dependencies plus faster-whisper, which is
+# large and only needed by transcribe_voice.py / voice transcription features.
+-r requirements.txt
+faster-whisper>=1.0

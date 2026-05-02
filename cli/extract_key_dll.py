@@ -16,19 +16,27 @@ import time
 from ctypes import wintypes
 from pathlib import Path
 
+IS_WINDOWS = sys.platform.startswith("win")
+
 # Win32 process enumeration (same as extract_key.py)
 PROCESS_QUERY_INFORMATION = 0x0400
 PROCESS_VM_READ = 0x0010
 
-psapi = ctypes.WinDLL("psapi", use_last_error=True)
-kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-kernel32.OpenProcess.restype = wintypes.HANDLE
-kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-kernel32.CloseHandle.restype = wintypes.BOOL
+if IS_WINDOWS:
+    psapi = ctypes.WinDLL("psapi", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+else:
+    psapi = None
+    kernel32 = None
 
 
 def find_weixin_pids() -> list[int]:
+    if not IS_WINDOWS or psapi is None or kernel32 is None:
+        return []
     arr = (wintypes.DWORD * 4096)()
     needed = wintypes.DWORD()
     if not psapi.EnumProcesses(arr, ctypes.sizeof(arr), ctypes.byref(needed)):
@@ -53,6 +61,8 @@ def find_weixin_pids() -> list[int]:
 
 
 def get_executable_path(pid: int) -> str | None:
+    if not IS_WINDOWS or psapi is None or kernel32 is None:
+        return None
     h = kernel32.OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, False, pid)
     if not h:
         return None
@@ -66,6 +76,8 @@ def get_executable_path(pid: int) -> str | None:
 
 def find_weixin_path_from_registry() -> str | None:
     """Fallback: look up Weixin install path from registry."""
+    if not IS_WINDOWS:
+        return None
     import winreg
     candidates = [
         (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Tencent\Weixin", "InstallPath"),
@@ -296,6 +308,10 @@ def main():
     p.add_argument("--save-to", help="Save key to this JSON file")
     p.add_argument("--validate-against", help="Path to a sample db_storage .db to validate key")
     args = p.parse_args()
+
+    if not IS_WINDOWS:
+        print("[X] extract_key_dll.py is Windows-only. On macOS use extract_key_mac.py.")
+        return 2
 
     if args.auto_restart:
         key = auto_restart_and_extract(timeout=args.timeout)

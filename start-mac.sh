@@ -39,6 +39,14 @@ if ! command -v node > /dev/null; then
     read -n 1
     exit 1
 fi
+NODE_MAJOR=$(node --version | sed 's/v//' | cut -d . -f 1)
+if [ "$NODE_MAJOR" -lt 18 ]; then
+    echo "[X] Node.js 版本太老，需要 18+"
+    echo "    当前版本：$(node --version)"
+    echo "    升级：brew upgrade node"
+    read -n 1
+    exit 1
+fi
 echo "[OK] Node found ($(node --version))"
 
 # --- install python deps ---
@@ -72,7 +80,7 @@ BACKEND_PID=$!
 sleep 2
 
 echo "[...] 启动前端..."
-(cd app && npm run dev) > /tmp/murmur-frontend.log 2>&1 &
+(cd app && npm run dev -- --host 127.0.0.1) > /tmp/murmur-frontend.log 2>&1 &
 FRONTEND_PID=$!
 sleep 4
 
@@ -84,7 +92,7 @@ echo "    前端 PID $FRONTEND_PID (log: /tmp/murmur-frontend.log)"
 echo ""
 echo "  按 Ctrl+C 停止"
 echo ""
-open "http://localhost:5173"
+open "http://127.0.0.1:5173"
 
 # --- wait for Ctrl+C, then cleanup ---
 trap 'echo "Stopping..."; kill $BACKEND_PID $FRONTEND_PID 2>/dev/null; exit 0' INT TERM

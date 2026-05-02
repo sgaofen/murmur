@@ -12,10 +12,57 @@ echo.
 
 cd /d "%~dp0"
 
-set "GH=C:\Program Files\GitHub CLI\gh.exe"
-if not exist "%GH%" (
+where git > nul 2>&1
+if errorlevel 1 (
+    echo [X] 没找到 git
+    echo     先装：https://git-scm.com/download/win
+    pause
+    exit /b 1
+)
+
+where node > nul 2>&1
+if errorlevel 1 (
+    echo [X] 没找到 Node.js
+    echo     先装：https://nodejs.org/
+    pause
+    exit /b 1
+)
+
+set "GH=gh"
+where gh > nul 2>&1
+if errorlevel 1 (
+    if exist "C:\Program Files\GitHub CLI\gh.exe" (
+        set "GH=C:\Program Files\GitHub CLI\gh.exe"
+    )
+)
+where "%GH%" > nul 2>&1
+if errorlevel 1 if not exist "%GH%" (
     echo [X] 没找到 gh CLI
     echo     先装：winget install GitHub.cli
+    pause
+    exit /b 1
+)
+
+for /f %%v in ('node -p "require('./app/package.json').version"') do set VERSION=%%v
+set TAG=v%VERSION%
+
+echo  ⚠ 高风险操作：这个脚本会把当前 git 仓库推送到 GitHub，并创建公开 Release。
+echo     运行前请确认：
+echo       - 没有把私人聊天数据、密钥、解密数据库加入 git
+echo       - 你真的要发布 %TAG%
+echo.
+set /p CONFIRM=请输入 %TAG% 继续，其他内容取消：
+if not "%CONFIRM%"=="%TAG%" (
+    echo 已取消。
+    pause
+    exit /b 1
+)
+
+git status --short
+echo.
+set /p CONFIRM_DIRTY=上面是当前 git 状态。继续推送？输入 PUSH：
+if not "%CONFIRM_DIRTY%"=="PUSH" (
+    echo 已取消。
     pause
     exit /b 1
 )
@@ -52,13 +99,29 @@ if errorlevel 1 (
 )
 
 echo.
-echo [3/3] 上传 Release 安装包（v0.1.0）...
+echo [3/3] 上传 Release 安装包（%TAG%）...
 echo.
-"%GH%" release create v0.1.0 ^
-    "app\src-tauri\target\release\bundle\msi\Murmur_0.1.0_x64_en-US.msi" ^
-    "app\src-tauri\target\release\bundle\nsis\Murmur_0.1.0_x64-setup.exe" ^
-    --title "Murmur v0.1.0 — Windows" ^
-    --notes "首发 Windows 版。Mac dmg 等下次构建。详细安装指南：docs/ONBOARDING_WINDOWS.md"
+if exist "app\src-tauri\target\release\bundle\msi\Murmur_%VERSION%_x64_en-US.msi" (
+    set MSI=app\src-tauri\target\release\bundle\msi\Murmur_%VERSION%_x64_en-US.msi
+) else (
+    set MSI=
+)
+if exist "app\src-tauri\target\release\bundle\nsis\Murmur_%VERSION%_x64-setup.exe" (
+    set NSIS=app\src-tauri\target\release\bundle\nsis\Murmur_%VERSION%_x64-setup.exe
+) else (
+    set NSIS=
+)
+
+if "%MSI%%NSIS%"=="" (
+    echo [X] 没找到 %VERSION% 的 Windows 安装包。
+    echo     先在 Windows 上运行：cd app ^&^& npm run tauri:build
+    pause
+    exit /b 1
+)
+
+"%GH%" release create %TAG% %MSI% %NSIS% ^
+    --title "Murmur %TAG%" ^
+    --notes "Release %TAG%。安装和隐私说明见 README.md、docs/ONBOARDING_WINDOWS.md、docs/PRIVACY.md。"
 
 echo.
 echo  ✓ 完成！打开 https://github.com/sgaofen/murmur

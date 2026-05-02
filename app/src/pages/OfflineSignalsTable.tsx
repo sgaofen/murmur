@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { Friend } from '../data/types';
 import { getAllFriends, getFriend } from '../data/api';
+import { displayName } from '../utils/privacy';
+import { usePrivacy } from '../utils/usePrivacy';
 
 interface SignalRow {
   id: string;
@@ -29,6 +31,7 @@ interface Props {
 }
 
 export function OfflineSignalsTable({ onBack, onOpenFriend }: Props) {
+  void usePrivacy();
   const [rows, setRows] = useState<SignalRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState(0);
@@ -107,7 +110,7 @@ export function OfflineSignalsTable({ onBack, onOpenFriend }: Props) {
     const csv = [
       headers.join(','),
       ...rows.map(r => [
-        JSON.stringify(r.name), r.id, r.tier, r.msg_count, r.span_days, r.longevity_years || 0,
+        JSON.stringify(displayName(r.id, r.name)), r.id, r.tier, r.msg_count, r.span_days, r.longevity_years || 0,
         r.longest_silence, r.offline_evidence, r.vuln_total, r.call_count, r.apology_count,
         r.lifecycle_count, JSON.stringify(r.last_active), JSON.stringify(r.signature_summary),
       ].join(','))
@@ -218,7 +221,7 @@ export function OfflineSignalsTable({ onBack, onOpenFriend }: Props) {
                     onMouseEnter={e => (e.currentTarget.style.background = 'var(--et-paper-2)')}
                     onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                 >
-                  <td style={{ padding: '8px', fontWeight: 600, color: 'var(--et-ink)' }}>{r.name}</td>
+                  <td style={{ padding: '8px', fontWeight: 600, color: 'var(--et-ink)' }}>{displayName(r.id, r.name)}</td>
                   <td style={{ padding: '8px' }}>
                     <span style={{
                       padding: '2px 8px', borderRadius: 4, fontSize: 10, fontWeight: 600,

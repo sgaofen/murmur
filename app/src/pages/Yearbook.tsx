@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { getYearbook } from '../data/api';
 import type { Yearbook, YearData } from '../data/api';
+import { displayName, maskedWxid, maskText } from '../utils/privacy';
+import { usePrivacy } from '../utils/usePrivacy';
 
 interface Props {
   friendId: string;
@@ -8,6 +10,7 @@ interface Props {
 }
 
 export function YearbookPage({ friendId, onBack }: Props) {
+  void usePrivacy();
   const [data, setData] = useState<Yearbook | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -38,6 +41,7 @@ export function YearbookPage({ friendId, onBack }: Props) {
 
   const years = [...data.years].reverse();  // newest first
   const yearMaxMsgs = Math.max(...data.years.map(y => y.msg_count));
+  const friendName = displayName(data.wxid, data.name);
 
   return (
     <div className="et-root" style={{ background: 'var(--et-bg)', minHeight: '100vh' }}>
@@ -47,8 +51,8 @@ export function YearbookPage({ friendId, onBack }: Props) {
         borderBottom: '0.5px solid var(--et-line)',
       }}>
         <button onClick={onBack} style={{ all: 'unset', cursor: 'pointer', color: 'var(--et-mute)', fontSize: 13 }}>← 返回</button>
-        <div className="et-serif" style={{ fontSize: 14, color: 'var(--et-mute)' }}>双人年代记 · 你 ↔ {data.name}</div>
-        <span style={{ fontFamily: 'var(--et-mono)', fontSize: 11, color: 'var(--et-faint)' }}>{data.wxid}</span>
+        <div className="et-serif" style={{ fontSize: 14, color: 'var(--et-mute)' }}>双人年代记 · 你 ↔ {friendName}</div>
+        <span style={{ fontFamily: 'var(--et-mono)', fontSize: 11, color: 'var(--et-faint)' }}>{maskedWxid(data.wxid)}</span>
       </div>
 
       {/* Cover */}
@@ -61,12 +65,12 @@ export function YearbookPage({ friendId, onBack }: Props) {
         <div style={{ position: 'absolute', top: 18, right: 28, padding: '4px 12px',
           borderRadius: 999, background: 'var(--et-orange)', color: '#fff',
           fontSize: 11, fontWeight: 600, letterSpacing: 0.5 }}>双人年代记</div>
-        <div className="et-eyebrow" style={{ color: 'var(--et-mute)' }}>关于「{data.name}」</div>
+        <div className="et-eyebrow" style={{ color: 'var(--et-mute)' }}>关于「{friendName}」</div>
         <div className="et-display" style={{
           marginTop: 14, fontFamily: 'var(--et-serif)', fontSize: 40, fontWeight: 600,
           color: 'var(--et-ink)', lineHeight: 1.3, maxWidth: 700,
         }}>
-          你和 {data.name} 一起<br />走过 {data.active_years} 年
+          你和 {friendName} 一起<br />走过 {data.active_years} 年
         </div>
         <div style={{ marginTop: 24, display: 'flex', gap: 32, flexWrap: 'wrap' }}>
           <Stat label="跨度" value={`${data.span_days} 天`} sub={`${data.first_date} → ${data.last_date}`} />
@@ -80,7 +84,7 @@ export function YearbookPage({ friendId, onBack }: Props) {
       <div style={{ padding: '12px 28px 60px', maxWidth: 1080, margin: '0 auto',
         display: 'flex', flexDirection: 'column', gap: 22 }}>
         {years.map(y => (
-          <YearCard key={y.year} y={y} maxMsgs={yearMaxMsgs} friendName={data.name} />
+          <YearCard key={y.year} y={y} maxMsgs={yearMaxMsgs} friendName={friendName} />
         ))}
       </div>
     </div>
@@ -98,7 +102,10 @@ function Stat({ label, value, sub }: { label: string; value: string; sub?: strin
   );
 }
 
+type Quote = { date: string; from: string; from_id?: string; text: string };
+
 function YearCard({ y, maxMsgs, friendName }: { y: YearData; maxMsgs: number; friendName: string }) {
+  void usePrivacy();
   const heatPct = Math.round((y.msg_count / maxMsgs) * 100);
   const tone =
     y.msg_count >= maxMsgs * 0.7 ? 'hot'
@@ -106,7 +113,7 @@ function YearCard({ y, maxMsgs, friendName }: { y: YearData; maxMsgs: number; fr
     : 'cool';
   const accent = tone === 'hot' ? '#FF6B47' : tone === 'warm' ? '#E8B57A' : '#5A7A99';
 
-  const allQuotes: Array<{ kind: string; emoji: string; q: { date: string; from: string; text: string } }> = [];
+  const allQuotes: Array<{ kind: string; emoji: string; q: Quote }> = [];
   y.vulnerability_quotes.slice(0, 1).forEach(q => allQuotes.push({ kind: '脆弱表达', emoji: '🫂', q }));
   y.offline_quotes.slice(0, 1).forEach(q => allQuotes.push({ kind: '线下证据', emoji: '🚪', q }));
   y.lifecycle_quotes.slice(0, 1).forEach(q => allQuotes.push({ kind: '人生节点', emoji: '✨', q }));
@@ -160,10 +167,10 @@ function YearCard({ y, maxMsgs, friendName }: { y: YearData; maxMsgs: number; fr
           <div className="et-eyebrow" style={{ fontSize: 9, color: accent }}>这一年的代表对话</div>
           <div className="et-serif" style={{ marginTop: 6, fontSize: 14.5, lineHeight: 1.65,
             color: 'var(--et-ink-soft)' }}>
-            「{y.signature.text}」
+            「{maskText(y.signature.text)}」
           </div>
           <div className="et-meta" style={{ marginTop: 6, fontSize: 10, color: 'var(--et-faint)' }}>
-            — {y.signature.from} · {y.signature.date}
+            — {displayName(y.signature.from_id, y.signature.from)} · {y.signature.date}
           </div>
         </div>
       )}
@@ -177,10 +184,10 @@ function YearCard({ y, maxMsgs, friendName }: { y: YearData; maxMsgs: number; fr
               <div style={{ flex: 1 }}>
                 <div style={{ fontSize: 10, fontWeight: 600, color: accent, letterSpacing: 0.4 }}>{bucket.kind}</div>
                 <div className="et-serif" style={{ fontSize: 13.5, lineHeight: 1.6, color: 'var(--et-ink-soft)', marginTop: 2 }}>
-                  「{bucket.q.text}」
+                  「{maskText(bucket.q.text)}」
                 </div>
                 <div className="et-meta" style={{ fontSize: 10, color: 'var(--et-faint)', marginTop: 2 }}>
-                  {bucket.q.from} · {bucket.q.date}
+                  {displayName(bucket.q.from_id, bucket.q.from)} · {bucket.q.date}
                 </div>
               </div>
             </div>

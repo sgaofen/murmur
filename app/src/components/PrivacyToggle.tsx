@@ -1,26 +1,20 @@
-import { useEffect, useState } from 'react';
-import { isPrivacyMode, togglePrivacyMode, subscribePrivacy } from '../utils/privacy';
+import { togglePrivacyMode } from '../utils/privacy';
+import { usePrivacy } from '../utils/usePrivacy';
 
-/** A floating toggle button + a hook for components that want to react to changes. */
-export function usePrivacy(): boolean {
-  const [v, setV] = useState(isPrivacyMode());
-  useEffect(() => subscribePrivacy(setV), []);
-  return v;
-}
-
-/** Floating bottom-right pill — one click flips privacy mode on/off (and forces a re-render). */
+/** Floating bottom-right pill — one click flips privacy mode on/off. */
 export function PrivacyToggle({ position = 'bottom-right' }: { position?: 'bottom-right' | 'top-right' }) {
   const on = usePrivacy();
   const pos = position === 'top-right'
     ? { top: 16, right: 16 }
-    : { bottom: 70, right: 16 };  // sit above the dev controls bar
+    : { bottom: 16, right: 16 };
   return (
     <button
       onClick={() => togglePrivacyMode()}
       title={on ? '关闭隐私模式 (展示真名)' : '开隐私模式 (脱敏，录视频用)'}
       style={{
+        all: 'unset',
         position: 'fixed', zIndex: 9999, ...pos,
-        all: 'unset', cursor: 'pointer',
+        cursor: 'pointer',
         padding: '6px 12px', borderRadius: 999,
         background: on ? '#1A2B4A' : 'rgba(255,255,255,0.92)',
         color: on ? '#FFE6CF' : '#5A7A99',

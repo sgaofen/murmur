@@ -1,5 +1,6 @@
 import { Avatar } from './Avatar';
 import type { Friend } from '../data/types';
+import { useDisplayName } from '../utils/usePrivacy';
 
 interface Props {
   friend: Friend;
@@ -9,6 +10,7 @@ interface Props {
 }
 
 export function FriendCard({ friend, rank, big = false, onClick }: Props) {
+  const name = useDisplayName(friend.id, friend.name);
   return (
     <div onClick={onClick} style={{
       position: 'relative',
@@ -43,7 +45,7 @@ export function FriendCard({ friend, rank, big = false, onClick }: Props) {
         <Avatar friend={friend} size={big ? 52 : 42} />
         <div style={{ minWidth: 0, flex: 1 }}>
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
-            <div className="et-h3" style={{ fontSize: big ? 20 : 17, fontWeight: 600, color: 'var(--et-ink)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{friend.name}</div>
+            <div className="et-h3" style={{ fontSize: big ? 20 : 17, fontWeight: 600, color: 'var(--et-ink)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{name}</div>
           </div>
           <div className="et-meta" style={{ marginTop: 2 }}>{friend.last} · {friend.knew}</div>
         </div>

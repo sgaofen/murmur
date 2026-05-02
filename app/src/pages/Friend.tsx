@@ -10,8 +10,8 @@ import { AIExportDialog } from './AIExportDialog';
 import { MediaGallery } from './extras/MediaGallery';
 import { AgentReport } from './extras/AgentReport';
 import { mdToHtml, MURMUR_MD_CSS } from '../utils/markdown';
-import { displayName, maskedWxid } from '../utils/privacy';
-import { usePrivacy } from '../components/PrivacyToggle';
+import { displayName, maskedWxid, maskText } from '../utils/privacy';
+import { usePrivacy } from '../utils/usePrivacy';
 
 interface Props {
   friendId: string;
@@ -137,6 +137,7 @@ function RhythmCard({ friend, stats }: { friend: Friend; stats: FriendStats }) {
 }
 
 function MomentsCard({ moments, loading }: { moments: Moment[]; loading: boolean }) {
+  void usePrivacy();
   return (
     <div style={{
       padding: '24px 26px', background: 'var(--et-paper)',
@@ -152,7 +153,13 @@ function MomentsCard({ moments, loading }: { moments: Moment[]; loading: boolean
         {loading && <div className="et-meta" style={{ gridColumn: 'span 2', textAlign: 'center', padding: 20 }}>加载中…</div>}
         {!loading && moments.length === 0 && <div className="et-meta" style={{ gridColumn: 'span 2', textAlign: 'center', padding: 20 }}>没有抓到合适的样本</div>}
         {moments.map((m, i) => (
-          <MessageCard key={i} from={m.from} date={m.date} text={m.text} accent={i % 2 ? 'var(--et-ink)' : 'var(--et-orange)'} />
+          <MessageCard
+            key={i}
+            from={displayName(m.from_id, m.from)}
+            date={m.date}
+            text={maskText(m.text)}
+            accent={i % 2 ? 'var(--et-ink)' : 'var(--et-orange)'}
+          />
         ))}
       </div>
     </div>
@@ -218,6 +225,7 @@ function SignalsEvidenceCard({ friend }: { friend: Friend & { relationship_signa
 function ConnectionsCard({ friend, onOpen }: {
   friend: Friend; onOpen: (peerWxid: string) => void;
 }) {
+  void usePrivacy();
   const [conns, setConns] = useState<FriendConnection[] | null>(null);
   useEffect(() => {
     getFriendConnections(friend.id).then(r => setConns(r.connections)).catch(() => setConns([]));
@@ -245,7 +253,9 @@ function ConnectionsCard({ friend, onOpen }: {
           onMouseEnter={(e) => e.currentTarget.style.background = 'var(--et-orange-soft)'}
           onMouseLeave={(e) => e.currentTarget.style.background = 'var(--et-paper-2)'}>
             <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--et-ink)',
-              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 240 }}>{c.name}</span>
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 240 }}>
+              {displayName(c.wxid, c.name)}
+            </span>
             <span style={{ fontSize: 10, color: 'var(--et-mute)' }}>
               {c.edge_type === 'mutual_reply' ? `群里互动 ${c.weight}` :
                c.edge_type === 'mention' ? `提及 ${c.mention_count ?? '—'}` :
@@ -428,6 +438,7 @@ function ActionDock({ onExportAI, onShowMessages, onExportChat, onOpenYearbook }
 }
 
 function MessagesDrawer({ open, friend, onClose }: { open: boolean; friend: Friend; onClose: () => void }) {
+  void usePrivacy();
   const [msgs, setMsgs] = useState<Awaited<ReturnType<typeof getMessages>> | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -488,10 +499,10 @@ function MessagesDrawer({ open, friend, onClose }: { open: boolean; friend: Frie
                     alignItems: isSelf ? 'flex-end' : 'flex-start',
                   }}>
                     <div className="et-meta" style={{ fontSize: 10, color: labelColor, marginBottom: 2 }}>
-                      <strong>{m.from}</strong>
+                      <strong>{displayName(m.from_id, m.from)}</strong>
                       {friend.isGroup && !isSelf && (
                         <span style={{ opacity: 0.55, marginLeft: 4, fontFamily: 'var(--et-mono)' }}>
-                          ~{m.from_id.slice(-6)}
+                          ~{maskedWxid(m.from_id)}
                         </span>
                       )}
                       <span style={{ marginLeft: 6, opacity: 0.7 }}>{m.time.slice(5, 16).replace('T', ' ')}</span>
@@ -504,7 +515,7 @@ function MessagesDrawer({ open, friend, onClose }: { open: boolean; friend: Frie
                       borderRadius: 12,
                       fontSize: 13, color: 'var(--et-ink)',
                       whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-                    }}>{m.text}</div>
+                    }}>{maskText(m.text)}</div>
                   </div>
                 );
               })}
@@ -557,7 +568,7 @@ export function FriendPage({ friendId, onBack, onOpenFriend }: Props) {
     if (!friend) return;
     try {
       const msgs = await getMessages(friendId, { limit: 5000 });
-      downloadAsFile(`${friend.name}_chat.json`, JSON.stringify(msgs, null, 2));
+      downloadAsFile(`${displayName(friend.id, friend.name)}_chat.json`, JSON.stringify(msgs, null, 2));
     } catch (e: any) {
       alert('导出失败：' + (e?.message || e));
     }
