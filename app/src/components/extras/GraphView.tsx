@@ -136,10 +136,10 @@ export function GraphView({ data, dark = false, selected, selectedEdge = null, o
   const [userInteracted, setUserInteracted] = useState(false);
   const [dragging, setDragging] = useState(false);
   const dragRef = useRef<{ x: number; y: number; rotX: number; rotY: number; panX: number; panY: number; mode: 'rotate' | 'pan' } | null>(null);
+  const lastHoverHitTestAtRef = useRef(0);
 
   const [hover, setHover] = useState<string | null>(null);
   const [hoverEdge, setHoverEdge] = useState<{ source: string; target: string } | null>(null);
-  const [tick, setTick] = useState(0);
 
   // Auto-rotate (paused when user interacts OR a panel is open — so the edge/node
   // they clicked doesn't drift away while reading the side panel)
@@ -194,13 +194,6 @@ export function GraphView({ data, dark = false, selected, selectedEdge = null, o
     return () => window.removeEventListener('keydown', onKey);
   }, [onSelect, onSelectEdge]);
 
-  useEffect(() => {
-    let raf = 0;
-    const loop = () => { setTick(Date.now()); raf = requestAnimationFrame(loop); };
-    raf = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(raf);
-  }, []);
-
   function handlePointerDown(e: ReactPointerEvent<SVGSVGElement>) {
     setUserInteracted(true);
     setDragging(true);
@@ -225,6 +218,10 @@ export function GraphView({ data, dark = false, selected, selectedEdge = null, o
     // Not dragging — update node/edge hover preview so user can SEE what their
     // click would select before committing. Hit-tested in screen coords using
     // the same logic as handlePointerUp.
+    const now = performance.now();
+    if (now - lastHoverHitTestAtRef.current < 32) return;
+    lastHoverHitTestAtRef.current = now;
+
     const svg = e.currentTarget as SVGSVGElement;
     const rect = svg.getBoundingClientRect();
     const sx = (e.clientX - rect.left) * (W / rect.width);
@@ -295,6 +292,7 @@ export function GraphView({ data, dark = false, selected, selectedEdge = null, o
   }
 
   function handlePointerLeave() {
+    lastHoverHitTestAtRef.current = 0;
     setHover(null);
     setHoverEdge(null);
   }
@@ -563,16 +561,26 @@ export function GraphView({ data, dark = false, selected, selectedEdge = null, o
 
         {/* Self ping ripples */}
         <g>
-          {[0, 1, 2].map(i => {
-            const offset = ((tick / 1500) + i * 0.33) % 1;
-            return (
-              <circle key={i}
-                cx={W / 2} cy={H / 2} r={20 + offset * 220}
-                fill="none" stroke="#FF6B47"
-                strokeOpacity={(1 - offset) * 0.35}
-                strokeWidth="1" />
-            );
-          })}
+          {[0, 1, 2].map(i => (
+            <circle key={i}
+              cx={W / 2} cy={H / 2} r="20"
+              fill="none" stroke="#FF6B47"
+              strokeOpacity="0.35"
+              strokeWidth="1">
+              <animate
+                attributeName="r"
+                values="20;240"
+                dur="4.5s"
+                begin={`${i * 1.5}s`}
+                repeatCount="indefinite" />
+              <animate
+                attributeName="stroke-opacity"
+                values="0.35;0"
+                dur="4.5s"
+                begin={`${i * 1.5}s`}
+                repeatCount="indefinite" />
+            </circle>
+          ))}
         </g>
 
         {/* Nodes */}
