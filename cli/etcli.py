@@ -3429,6 +3429,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     _CONN_CACHE[wxid] = (disk["_ts"], disk["_payload"])
                     return self._send_json(disk["_payload"])
                 graph = get_relationship_graph_cached(self.store, scope="all", top_n=600)
+                node_lookup = {n["id"]: n for n in graph["nodes"]}
                 connections = []
                 for e in graph["edges"]:
                     other = None
@@ -3440,7 +3441,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                         continue
                     if other == "self" or other == wxid:
                         continue
-                    other_node = next((n for n in graph["nodes"] if n["id"] == other), None)
+                    other_node = node_lookup.get(other)
                     other_name = other_node["name"] if other_node else other
                     connections.append({
                         "wxid": other,
