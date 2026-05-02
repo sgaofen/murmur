@@ -278,8 +278,8 @@ def cmd_run(args):
         try:
             if args.pair_mode == "graph":
                 # Pull all friend-friend edges from the graph and rank by combined-edge weight.
-                # Includes mutual_reply / mention / moments_cross / co_group — covers pairs that
-                # have ANY interaction, not just textual mentions.
+                # Only direct signals become LLM pair-report candidates. Pure
+                # co_group edges stay graph context, not relationship evidence.
                 graph_top_n = 0 if args.top_pairs <= 0 else 300
                 graph = _api(f"/api/graph?scope=private&top_n={graph_top_n}")
                 # Build per-pair max-priority edge
