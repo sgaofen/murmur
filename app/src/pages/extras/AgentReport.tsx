@@ -4,6 +4,8 @@ import { Ribbon } from '../../components/Ribbon';
 import { MessageCard } from '../../components/MessageCard';
 import { invokeAgent, getInvokeStream } from '../../data/api';
 import type { Friend } from '../../data/types';
+import { displayName } from '../../utils/privacy';
+import { usePrivacy } from '../../utils/usePrivacy';
 
 interface Props {
   friend: Friend;
@@ -23,7 +25,7 @@ function parseChapters(md: string): Chapter[] {
   const lines = md.split('\n');
   const chapters: Chapter[] = [];
   let cur: Chapter | null = null;
-  const headingPat = /^\s*(?:#{1,4}\s*)?(?:(\d+)[\.、:]?\s*)?\*?\*?(关系定性|互动节奏|关键时刻|人物画像|关系走向)\*?\*?/;
+  const headingPat = /^\s*(?:#{1,4}\s*)?(?:(\d+)[.、:]?\s*)?\*?\*?(关系定性|互动节奏|关键时刻|人物画像|关系走向)\*?\*?/;
   for (const line of lines) {
     const m = line.match(headingPat);
     if (m) {
@@ -40,6 +42,7 @@ function parseChapters(md: string): Chapter[] {
 }
 
 export function AgentReport({ friend, cli, onClose }: Props) {
+  void usePrivacy();
   const [phase, setPhase] = useState<'running' | 'done' | 'error'>('running');
   const [streamed, setStreamed] = useState<string>('');
   const [output, setOutput] = useState<string>('');
@@ -82,7 +85,9 @@ export function AgentReport({ friend, cli, onClose }: Props) {
                 setPhase('done');
               }
             }
-          } catch {}
+          } catch {
+            // Keep polling; the stream endpoint can briefly race with process startup.
+          }
         }, 2000);
       })
       .catch(e => {
@@ -96,6 +101,7 @@ export function AgentReport({ friend, cli, onClose }: Props) {
 
   const chapters = output ? parseChapters(output) : [];
   const agentDisplayName = cli === 'claude' ? 'Claude Code' : cli === 'codex' ? 'Codex CLI' : cli;
+  const friendName = displayName(friend.id, friend.name);
 
   if (phase === 'running') {
     return <Streaming friend={friend} agentName={agentDisplayName}
@@ -132,7 +138,7 @@ export function AgentReport({ friend, cli, onClose }: Props) {
         </div>
         <Ribbon color="var(--et-orange)" tone="solid">精装分析报告 · {agentDisplayName}</Ribbon>
         <div className="et-display" style={{ marginTop: 22, color: 'var(--et-ink)', maxWidth: 760 }}>
-          与 {friend.name} 的<br />关系画像
+          与 {friendName} 的<br />关系画像
         </div>
         <div className="et-meta" style={{ marginTop: 14, fontSize: 13 }}>
           由 <b style={{ color: 'var(--et-ink)' }}>{agentDisplayName}</b> 撰写 · 用时 {secs} 秒
@@ -163,6 +169,8 @@ export function AgentReport({ friend, cli, onClose }: Props) {
 }
 
 function Streaming({ friend, agentName, text, secs }: { friend: Friend; agentName: string; text: string; secs: number }) {
+  void usePrivacy();
+  const friendName = displayName(friend.id, friend.name);
   return (
     <div className="et-root" style={{ background: 'var(--et-bg)', minHeight: '100%', padding: '28px 28px 32px' }}>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 14 }}>
@@ -170,7 +178,7 @@ function Streaming({ friend, agentName, text, secs }: { friend: Friend; agentNam
           width: 10, height: 10, borderRadius: '50%', background: 'var(--et-orange)',
           animation: 'et-pulse 1.4s ease-in-out infinite',
         }} />
-        <div className="et-h2" style={{ color: 'var(--et-ink)' }}>{agentName} 正在分析 与 {friend.name} 的关系</div>
+        <div className="et-h2" style={{ color: 'var(--et-ink)' }}>{agentName} 正在分析 与 {friendName} 的关系</div>
       </div>
       <style>{`@keyframes et-pulse{0%,100%{opacity:.4}50%{opacity:1}} @keyframes et-blink{50%{opacity:0}}`}</style>
       <div className="et-paper-grain" style={{

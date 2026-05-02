@@ -49,6 +49,16 @@ LANGUAGE = "zh"
 WORKERS = 1                   # faster-whisper is multi-threaded internally; 1 process = enough
 
 
+def ensure_faster_whisper() -> None:
+    try:
+        import faster_whisper  # noqa: F401
+    except ImportError:
+        print("[X] faster-whisper is not installed.")
+        print("    Voice transcription is optional. To enable it, run:")
+        print("    python3.12 -m pip install -r requirements-voice.txt")
+        sys.exit(2)
+
+
 def collect_files() -> list[tuple[Path, Path]]:
     """Returns list of (mp3, out_txt). Skips already-transcribed."""
     pairs: list[tuple[Path, Path]] = []
@@ -141,6 +151,7 @@ def main():
     if not jobs:
         print("[*] all done already")
     else:
+        ensure_faster_whisper()
         transcribe_batch(jobs)
 
     build_per_friend_index()

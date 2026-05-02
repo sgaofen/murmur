@@ -7,7 +7,8 @@ known V4-V2 image's first AES block and checking for FF D8 (JPEG) magic.
 Performance budget:
 - Scan only MEM_PRIVATE pages (rules out file-backed code/data).
 - Stride 16 (key alignment).
-- Pure-Python AES is slow; use pycryptodome ECB which uses native code.
+- Use cryptography ECB (already required by Murmur) so image-key extraction does
+  not need a second AES dependency.
 - ~1 GB MEM_PRIVATE / 16 = 67M trials × ~10µs = ~700 sec worst case.
 - But the key is usually in the heap of the WCDB module, found within 100 MB.
 
@@ -28,7 +29,7 @@ from pathlib import Path
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from media import find_v4v2_sample_ciphertext, V4_V2_SIG  # noqa: E402
+from media import aes_ecb_decrypt, find_v4v2_sample_ciphertext, V4_V2_SIG  # noqa: E402
 from extract_key_dll import find_weixin_pids  # noqa: E402
 
 
@@ -102,6 +103,10 @@ def main():
     ap.add_argument("--save-to", help="Save key to JSON")
     args = ap.parse_args()
 
+    if not sys.platform.startswith("win"):
+        print("[X] image AES key extraction is Windows-only for now.")
+        sys.exit(2)
+
     pids = [args.pid] if args.pid else find_weixin_pids()
     if not pids:
         print("[X] Weixin.exe not running.")
@@ -116,8 +121,6 @@ def main():
     print(f"[*] Multi-sample validation: {len(samples)} DISTINCT 1024-byte AES portions")
     for i, s in enumerate(samples):
         print(f"    sample {i} first 16 bytes: {s[:16].hex()}")
-
-    from Crypto.Cipher import AES
 
     k32 = ctypes.WinDLL("kernel32", use_last_error=True)
     k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
@@ -168,13 +171,12 @@ def main():
 
                     def validate_full(cand: bytes) -> bool:
                         """Decrypt full 1024-byte AES portion of each sample, check FF D8 + PKCS7."""
-                        cipher_ = AES.new(cand, AES.MODE_ECB)
                         # Stage-1: quick first-block check on sample 0
-                        if cipher_.decrypt(samples[0][:16])[:2] != target_first2:
+                        if aes_ecb_decrypt(cand, samples[0][:16])[:2] != target_first2:
                             return False
                         # Stage-2: full decryption + PKCS7 padding validation
                         for s in samples:
-                            full = cipher_.decrypt(s)
+                            full = aes_ecb_decrypt(cand, s)
                             if full[:2] != target_first2:
                                 return False
                             pad = full[-1]

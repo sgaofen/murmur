@@ -5,7 +5,7 @@
 #   1. 装 Homebrew（如果没装）
 #   2. brew install python@3.12 node ffmpeg
 #   3. git clone 仓库到 ~/Applications/Murmur（默认）
-#   4. pip install / npm install 全部依赖
+#   4. pip install / npm install 主功能依赖
 #   5. 启动 Murmur（终端 + 浏览器）
 #
 # 用法：
@@ -107,7 +107,7 @@ fi
 ok "仓库就绪：$DEFAULT_DIR"
 
 # ----------------- Python 依赖 -----------------
-info "装 Python 依赖（zstandard / cryptography / faster-whisper）"
+info "装 Python 依赖（zstandard / cryptography / pycryptodome；语音转写依赖可之后单独安装）"
 $PY -m pip install --user --break-system-packages -r requirements.txt > /dev/null 2>&1
 ok "Python 依赖 ready"
 

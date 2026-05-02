@@ -39,10 +39,18 @@ if ! command -v node > /dev/null; then
     read -n 1
     exit 1
 fi
+NODE_MAJOR=$(node --version | sed 's/v//' | cut -d . -f 1)
+if [ "$NODE_MAJOR" -lt 18 ]; then
+    echo "[X] Node.js 版本太老，需要 18+"
+    echo "    当前版本：$(node --version)"
+    echo "    升级：brew upgrade node"
+    read -n 1
+    exit 1
+fi
 echo "[OK] Node found ($(node --version))"
 
 # --- install python deps ---
-if ! $PY -c "import zstandard, cryptography" 2>/dev/null; then
+if ! $PY -c "import zstandard, cryptography, Crypto" 2>/dev/null; then
     echo "[...] 装 Python 依赖..."
     $PY -m pip install --user -r requirements.txt
 fi
@@ -59,9 +67,8 @@ echo "[OK] Node deps ready"
 if [ ! -d "$HOME/Documents/Murmur/decrypted" ] && [ ! -d "$HOME/Documents/EchoTrace" ]; then
     echo ""
     echo "  ⚠ 没找到解密后的微信数据。"
-    echo "    Mac 上有两个选项："
-    echo "      1. 在 Windows 上跑过 Murmur 后，把 ~/Documents/Murmur/decrypted/ 拷过来"
-    echo "      2. 在 app 内点'引导' → 粘贴 64 位 hex 密钥（要从 Win 上抓出来）"
+    echo "    浏览器打开后会自动进入引导：给完全磁盘访问 → 重签名 WeChat → 自动抓 key → 解密。"
+    echo "    如果你已经从别的机器迁移数据，也可以把 ~/Documents/Murmur/decrypted/ 放到这里。"
     echo ""
 fi
 
@@ -72,7 +79,7 @@ BACKEND_PID=$!
 sleep 2
 
 echo "[...] 启动前端..."
-(cd app && npm run dev) > /tmp/murmur-frontend.log 2>&1 &
+(cd app && npm run dev -- --host 127.0.0.1) > /tmp/murmur-frontend.log 2>&1 &
 FRONTEND_PID=$!
 sleep 4
 
@@ -84,7 +91,7 @@ echo "    前端 PID $FRONTEND_PID (log: /tmp/murmur-frontend.log)"
 echo ""
 echo "  按 Ctrl+C 停止"
 echo ""
-open "http://localhost:5173"
+open "http://127.0.0.1:5173"
 
 # --- wait for Ctrl+C, then cleanup ---
 trap 'echo "Stopping..."; kill $BACKEND_PID $FRONTEND_PID 2>/dev/null; exit 0' INT TERM

@@ -128,7 +128,7 @@
 - 3.x **不支持**（数据库格式不同）
 
 **Q: 我没装 Python / Node 也能用吗？**
-不用装。Win 安装包已用 PyInstaller 把 Python 运行时 + 所有依赖打进 MSI。Mac 一键脚本（`install-mac.sh`）会自动装 Homebrew + Python + Node。开发模式才需要手动装。
+用打包版不用装。Windows / macOS 安装包会带上后端运行时；源码一键脚本（`install-mac.sh` / `start-windows.bat`）才会检测并安装 Python、Node 和项目依赖。
 
 **Q: 能合伙人/家庭成员一起用同一份数据吗？**
 不能。每个微信账号是独立的，数据格式以 wxid 区分，每人各装各的。
