@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { GraphView } from '../components/extras/GraphView';
 import type { GraphData, GraphNode, GraphEdge, GraphCluster } from '../components/extras/GraphView';
 import { API_BASE, getFriend, getPairPack, findPairReport, getReport, getFriendConnections, invokeAgent, getInvokeStream, getAgents, invokePairAgent, getPairStream, startBatch, getBatchStatus } from '../data/api';
@@ -163,6 +163,7 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
   const [selectedEdge, setSelectedEdge] = useState<GraphEdge | null>(null);
   const [dark, setDark] = useState(false);
   const [autoRotate, setAutoRotate] = useState(true);
+  const [autoRotateResumeSignal, setAutoRotateResumeSignal] = useState(0);
   const [topN, setTopN] = useState<number>(() => {
     const stored = parseInt(localStorage.getItem(TOPN_KEY) || '100', 10);
     return Number.isFinite(stored) && stored > 0 ? stored : 100;
@@ -238,11 +239,26 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
 
   function selectNode(id: string | null) {
     setSelected(id);
-    if (id) setSelectedEdge(null);
+    if (id) {
+      setSelectedEdge(null);
+      setAutoRotate(false);
+    }
   }
   function selectEdge(edge: GraphEdge | null) {
     setSelectedEdge(edge);
+    if (edge) setAutoRotate(false);
   }
+  function toggleAutoRotate() {
+    if (autoRotate) {
+      setAutoRotate(false);
+      return;
+    }
+    setSelected(null);
+    setSelectedEdge(null);
+    setAutoRotate(true);
+    setAutoRotateResumeSignal(s => s + 1);
+  }
+  const pauseAutoRotate = useCallback(() => setAutoRotate(false), []);
   function nameOf(id: string): string {
     const real = backendNodes.find(n => n.id === id)?.name || id;
     return displayName(id, real);
@@ -285,6 +301,8 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
         onSelect={selectNode}
         onSelectEdge={selectEdge}
         autoRotate={autoRotate}
+        autoRotateResumeSignal={autoRotateResumeSignal}
+        onAutoRotatePause={pauseAutoRotate}
       />
       {/* Top chrome bar */}
       <div style={{
@@ -321,7 +339,7 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
                 fontWeight: topN === n ? 600 : 500,
               }}>{n}</button>
           ))}
-          <button onClick={() => setAutoRotate(r => !r)} style={chromeBtn(dark)}>
+          <button onClick={toggleAutoRotate} style={chromeBtn(dark)}>
             {autoRotate ? '⏸ 暂停旋转' : '▶ 自动旋转'}
           </button>
           <button onClick={() => setBatchPanelOpen(o => !o)} style={{
