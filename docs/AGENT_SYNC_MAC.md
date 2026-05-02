@@ -368,6 +368,32 @@ Windows report review on 2026-05-02:
   report was written against Mac `c4514df`, so that note was slightly behind the
   newest Mac branch.
 
+Final graph polish sync on 2026-05-02:
+
+- Reviewed Windows branch `origin/codex/windows-progress-2026-05-02` at
+  `c8ca957`.
+- Windows has absorbed Mac commits `82120d2` and `634bec4`: SVG pointer
+  coordinate mapping, wider person/label hit targets, full-graph person-first
+  selection, edge selection only after a person is selected, and lower-cost graph
+  animations.
+- Mac pulled back the useful Windows-side auto-rotate state fix:
+  - manual graph interaction pauses the parent auto-rotate button state,
+  - pressing `▶ 自动旋转` clears the current node/edge selection and resets
+    GraphView's internal `userInteracted` flag,
+  - auto-rotate now advances by frame delta instead of absolute timestamp, so
+    resume is smooth and does not jump.
+- Mac also mirrored Windows' safe `get_friend_mentions_cached()` path so
+  `/api/friend-mentions` and graph construction reuse the same cached mention
+  scan instead of repeatedly rescanning private chats.
+- Kept Mac-specific imports (`utils/usePrivacy`) and current Mac UI styling.
+- Validation for this pass:
+  - `npm run lint` from `app/`
+  - `npm run build` from `app/`
+  - `python3 -m py_compile cli/etcli.py cli/batch_analyze.py`
+  - `git diff --check`
+  - temporary backend on `127.0.0.1:9138` verified `/api/graph` and repeated
+    `/api/friend-mentions` calls.
+
 ## Known Mac Gaps / Next Coordination Points
 
 1. Continue validating `pair_direct_evidence()` on larger real datasets. The
@@ -422,4 +448,6 @@ git diff --check
 ```
 
 Do not use the Windows branch as the only source of truth for Mac behavior.
-The Mac branch has newer fixes after Windows compared against `69c51b8`.
+As of the final graph polish pass, Mac and Windows have exchanged the shared
+graph targeting/performance fixes, while platform-specific imports and packaging
+paths remain intentionally different.

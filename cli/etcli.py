@@ -724,6 +724,27 @@ def _disk_clear() -> None:
         pass
 
 
+def get_friend_mentions_cached(store: EchoStore, top_n: int = 50,
+                               min_mention_count: int = 3) -> dict:
+    ck = f"mentions:{top_n}:{min_mention_count}"
+    cached = _MENTIONS_CACHE.get(ck)
+    if cached and (_time.time() - cached[0]) < _CACHE_TTL:
+        return cached[1]
+    disk = _disk_load(ck)
+    if disk and (_time.time() - disk["_ts"]) < _CACHE_TTL:
+        mentions = disk["_payload"]
+        _MENTIONS_CACHE[ck] = (disk["_ts"], mentions)
+        return mentions
+    with _STORE_READ_LOCK:
+        cached = _MENTIONS_CACHE.get(ck)
+        if cached and (_time.time() - cached[0]) < _CACHE_TTL:
+            return cached[1]
+        mentions = extract_friend_mentions(store, top_n=top_n, min_mention_count=min_mention_count)
+        _MENTIONS_CACHE[ck] = (_time.time(), mentions)
+        _disk_save(ck, mentions)
+        return mentions
+
+
 def _graph_cache_key(scope: str, min_private: int, recent_days: int,
                      top_n: int, show_clusters: bool) -> str:
     # v3 adds the direct-evidence gate for pair packs/reports. Keep it separate
@@ -3124,9 +3145,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         if path == "/api/friend-mentions":
             top_n = int(qs.get("top_n", [50])[0])
             min_n = int(qs.get("min", [3])[0])
-            with _STORE_READ_LOCK:
-                mentions = extract_friend_mentions(self.store, top_n=top_n, min_mention_count=min_n)
-            return self._send_json(mentions)
+            return self._send_json(get_friend_mentions_cached(self.store, top_n=top_n, min_mention_count=min_n))
         if path == "/api/friend-identity-pack":
             wxid = qs.get("wxid", [""])[0]
             sample = int(qs.get("sample", [80])[0])
@@ -4906,7 +4925,7 @@ def build_relationship_graph(store: EchoStore, *,
         # friends for mention edges. Otherwise match the graph's visible candidate scale
         # while keeping a floor of 50 so small graphs still get useful cross-links.
         mention_top_n = 0 if top_n <= 0 else max(50, top_n)
-        mention_pairs = extract_friend_mentions(store, top_n=mention_top_n, min_mention_count=3)
+        mention_pairs = get_friend_mentions_cached(store, top_n=mention_top_n, min_mention_count=3)
     except Exception as e:
         sys.stderr.write(f"[mentions] failed: {e}\n")
         mention_pairs = {}
