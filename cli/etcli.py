@@ -19,6 +19,18 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Iterable, Iterator, Optional
 
+
+def _configure_utf8_stdio() -> None:
+    """Windows consoles often default to GBK; Murmur emits emoji/CJK JSON."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
+_configure_utf8_stdio()
+
 CST = timezone(timedelta(hours=8))
 
 MSG_TYPES = {
@@ -470,7 +482,7 @@ STOPWORDS.update("这个 那个 一下 还是 就是 没有 什么 怎么 为啥
 STOP_CHARS = set("的了是我你他她也都在就不和与这那一个有没啊吧呀嗯哦嘛呢吗哈呜哇噢哎唉哟唔嗷嘿哼啦喔把被让给从向对跟比又再才还但而或因所以之上下里外中后前时日年月来去到过")
 NON_TEXT = re.compile(r"\[[^\]]+\]")
 URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
-APP_VERSION = "0.2.6"
+APP_VERSION = "0.2.7"
 YEARBOOK_CACHE_VERSION = 5
 
 
@@ -3008,6 +3020,8 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         ("http", "localhost", 5173),
         ("http", "::1", 5173),
     }
+    _ALLOWED_DEV_HOSTS = {"127.0.0.1", "localhost", "::1"}
+    _ALLOWED_DEV_PORT_RANGE = range(5173, 5200)
     _ALLOWED_TAURI_HOSTS = {"tauri.localhost"}
     _ALLOWED_CORS_SCHEMES = {"tauri", "asset"}
 
@@ -3031,6 +3045,12 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         if parsed.hostname in self._ALLOWED_TAURI_HOSTS:
             return origin
         if (parsed.scheme, parsed.hostname, parsed.port) in self._ALLOWED_DEV_ORIGINS:
+            return origin
+        if (
+            parsed.scheme == "http"
+            and parsed.hostname in self._ALLOWED_DEV_HOSTS
+            and parsed.port in self._ALLOWED_DEV_PORT_RANGE
+        ):
             return origin
         return None
 
