@@ -1,13 +1,13 @@
 import { useEffect, useState } from 'react';
 import { GraphView } from '../components/extras/GraphView';
 import type { GraphData, GraphNode, GraphEdge, GraphCluster } from '../components/extras/GraphView';
-import { getFriend, getPairPack, findPairReport, getReport, getFriendConnections, invokeAgent, getAgents, invokePairAgent, getPairStream, startBatch, getBatchStatus } from '../data/api';
-import type { LocalAgent } from '../data/api';
+import { API_BASE, getFriend, getPairPack, findPairReport, getReport, getFriendConnections, invokeAgent, getAgents, invokePairAgent, getPairStream, startBatch, getBatchStatus } from '../data/api';
+import type { BatchStatus, LocalAgent } from '../data/api';
 import type { FriendConnection } from '../data/api';
 import type { Friend, FriendStats } from '../data/types';
 import { mdToHtml, MURMUR_MD_CSS } from '../utils/markdown';
 import { displayName, maskedWxid } from '../utils/privacy';
-import { usePrivacy } from '../components/PrivacyToggle';
+import { usePrivacy } from '../utils/usePrivacy';
 
 const TIER_COLORS: Record<string, string> = {
   self: '#FFE6CF', A: '#FF6B47', B: '#E8B57A',
@@ -170,11 +170,11 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
   // Batch analysis state
   const [agents, setAgents] = useState<LocalAgent[]>([]);
   const [batch, setBatch] = useState<{ pid: number; log_path: string } | null>(null);
-  const [batchStatus, setBatchStatusState] = useState<{ running: boolean; n_friends: number; n_pairs: number; log_tail: string } | null>(null);
+  const [batchStatus, setBatchStatusState] = useState<BatchStatus | null>(null);
   const [batchPanelOpen, setBatchPanelOpen] = useState(false);
 
   // Load agents once
-  useEffect(() => { getAgents().then(setAgents).catch(() => {}); }, []);
+  useEffect(() => { getAgents().then(setAgents).catch(() => { /* no local agents available */ }); }, []);
 
   // Poll batch progress
   useEffect(() => {
@@ -186,7 +186,9 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
         const s = await getBatchStatus(batch.pid, batch.log_path);
         setBatchStatusState(s);
         if (!s.running) return;
-      } catch {}
+      } catch {
+        // Keep polling; transient backend misses are expected while an agent starts.
+      }
       setTimeout(tick, 5000);
     };
     tick();
@@ -195,13 +197,13 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
 
   async function startGraphBatch(top_pairs: number, cli: 'claude' | 'codex') {
     try {
-      const r = await startBatch({ cli, mode: 'pairs-graph', top: 0, top_pairs });
+      const r = await startBatch({ cli, mode: 'pairs-graph', top: 0, top_pairs, parallel: 2 });
       if (!r.ok || !r.pid || !r.log_path) {
         alert('启动失败：' + (r.error || ''));
         return;
       }
       setBatch({ pid: r.pid, log_path: r.log_path });
-      setBatchStatusState({ running: true, n_friends: 0, n_pairs: 0, log_tail: '启动中…' });
+      setBatchStatusState({ running: true, n_friends: 0, n_pairs: 0, pairs_done: 0, pairs_total: top_pairs, log_tail: '启动中…' });
       setBatchPanelOpen(true);
     } catch (e: any) {
       alert('错误：' + (e?.message || e));
@@ -211,8 +213,7 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
   useEffect(() => {
     setLoading(true);
     setData(null);
-    const BASE = (import.meta.env?.VITE_ETCLI_URL as string) || 'http://localhost:9100';
-    fetch(`${BASE}/api/graph?scope=private&top_n=${topN}`)
+    fetch(`${API_BASE}/api/graph?scope=private&top_n=${topN}`)
       .then(r => r.json())
       .then((bg: BackendGraph) => {
         setBackendNodes(bg.nodes);
@@ -400,6 +401,10 @@ function SidePanel({ node, onClose, onOpenFriend, onSelectPeer }: {
   const [analyzeError, setAnalyzeError] = useState<string | null>(null);
 
   useEffect(() => {
+    getAgents().then(setAgents).catch(() => { /* no local agents available */ });
+  }, []);
+
+  useEffect(() => {
     setDetail(null);
     setReportContent(null);
     setShowFullReport(false);
@@ -409,7 +414,6 @@ function SidePanel({ node, onClose, onOpenFriend, onSelectPeer }: {
     setAnalyzeError(null);
     getFriend(node.id).then(setDetail).catch(() => {});
     getFriendConnections(node.id).then(r => setConnections(r.connections)).catch(() => setConnections([]));
-    if (agents.length === 0) getAgents().then(setAgents).catch(() => {});
   }, [node.id]);
 
   async function runAnalysis(cli: string) {
@@ -438,7 +442,9 @@ function SidePanel({ node, onClose, onOpenFriend, onSelectPeer }: {
             setDetail(updated);
             setAnalyzing('idle');
           }
-        } catch {}
+        } catch {
+          // Report may not be visible until the writer flushes it.
+        }
       }, 5000);
     } catch (e: any) {
       setAnalyzeError(e?.message || String(e));
@@ -453,7 +459,9 @@ function SidePanel({ node, onClose, onOpenFriend, onSelectPeer }: {
       const r = await getReport(detail.aiReport.path);
       setReportContent(r.content);
       setShowFullReport(true);
-    } catch {}
+    } catch {
+      // Full report preview is optional; keep the side panel usable if it fails.
+    }
   }
 
   const total = (node.private_msgs || 0) + (node.group_msgs || 0);
@@ -726,6 +734,10 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
   const otherName = edge.source === 'self' ? bName : aName;
 
   useEffect(() => {
+    getAgents().then(setAgents).catch(() => { /* no local agents available */ });
+  }, []);
+
+  useEffect(() => {
     setPack(null);
     setAIReport(null);
     setFullReport(null);
@@ -736,10 +748,9 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
     setPackLoading(true);
     getPairPack(edge.source, edge.target)
       .then(r => setPack(r.pack))
-      .catch(() => {})
+      .catch(() => { /* no pair pack available */ })
       .finally(() => setPackLoading(false));
-    findPairReport(edge.source, edge.target).then(setAIReport).catch(() => {});
-    if (agents.length === 0) getAgents().then(setAgents).catch(() => {});
+    findPairReport(edge.source, edge.target).then(setAIReport).catch(() => { /* no saved pair report */ });
   }, [edge.source, edge.target, isSelfEdge]);
 
   async function runPairAnalysis(cli: string) {
@@ -778,7 +789,9 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
               setStream(null);
             }
           }
-        } catch {}
+        } catch {
+          // Keep polling; stream endpoints can briefly race with process startup.
+        }
       }, 2000);
     } catch (e: any) {
       setAnalyzeErr(e?.message || String(e));
@@ -793,7 +806,9 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
       const r = await getReport(aiReport.path);
       setFullReport(r.content);
       setShowFullReport(true);
-    } catch {}
+    } catch {
+      // Full report preview is optional; keep the side panel usable if it fails.
+    }
   }
 
   return (
@@ -986,13 +1001,22 @@ function BatchAnalysisPanel({
   dark: boolean;
   agents: LocalAgent[];
   batch: { pid: number; log_path: string } | null;
-  status: { running: boolean; n_friends: number; n_pairs: number; log_tail: string } | null;
+  status: BatchStatus | null;
   onLaunch: (top_pairs: number, cli: 'claude' | 'codex') => void;
   onReset: () => void;
   onClose: () => void;
 }) {
   const running = !!batch && !!status?.running;
   const done = !!batch && status && !status.running;
+  const friendDone = status?.friends_done ?? status?.n_friends ?? 0;
+  const friendTotal = status?.friends_total ?? 0;
+  const pairDone = status?.pairs_done ?? status?.n_pairs ?? 0;
+  const pairTotal = status?.pairs_total ?? 0;
+  const friendProgress = friendTotal > 0 ? `${friendDone}/${friendTotal}` : String(friendDone);
+  const pairProgress = pairTotal > 0 ? `${pairDone}/${pairTotal}` : String(pairDone);
+  const issueText = status && (status.crashed || (status.failures || 0) > 0 || (status.skipped || 0) > 0)
+    ? ` · ${status.crashed ? '异常退出 · ' : ''}失败 ${status.failures || 0} · 跳过 ${status.skipped || 0}`
+    : '';
   const claudeAgent = agents.find(a => a.cli === 'claude');
   const codexAgent = agents.find(a => a.cli === 'codex');
   const [selectedCli, setSelectedCli] = useState<'claude' | 'codex'>(
@@ -1060,9 +1084,9 @@ function BatchAnalysisPanel({
           }}>
             <div style={{ fontSize: 18, animation: 'spin 1.4s linear infinite' }}>⏳</div>
             <div>
-              <div style={{ fontWeight: 600, fontSize: 13 }}>正在跑 · {status.n_pairs} 对完成</div>
+              <div style={{ fontWeight: 600, fontSize: 13 }}>正在跑 · 朋友 {friendProgress} · 朋友间 {pairProgress}{issueText}</div>
               <div style={{ fontSize: 11, color: dark ? 'rgba(244,236,218,0.65)' : 'rgba(26,43,74,0.65)' }}>
-                关掉这个面板没事，跑在后台
+                关掉这个面板没事，跑在后台{status.last_stage ? ` · ${status.last_stage}` : ''}
               </div>
             </div>
           </div>
@@ -1079,21 +1103,21 @@ function BatchAnalysisPanel({
         <div>
           <div style={{
             padding: '10px 12px',
-            background: status.n_pairs > 0
+            background: pairDone > 0
               ? (dark ? 'rgba(78,176,109,0.16)' : 'rgba(78,176,109,0.12)')
               : (dark ? 'rgba(255,107,71,0.16)' : 'rgba(255,107,71,0.10)'),
-            border: `0.5px solid ${status.n_pairs > 0
+            border: `0.5px solid ${pairDone > 0
               ? (dark ? 'rgba(78,176,109,0.4)' : 'rgba(78,176,109,0.3)')
               : (dark ? 'rgba(255,107,71,0.4)' : 'rgba(255,107,71,0.3)')}`,
             borderRadius: 8, marginBottom: 10, fontSize: 13,
           }}>
-            {status.n_pairs > 0
-              ? <>✓ 跑完了 · {status.n_pairs} 对关系档案已落盘</>
+            {pairDone > 0
+              ? <>✓ 跑完了 · 本次 {pairProgress} 对关系档案已完成{issueText}</>
               : <>⚠ 跑完了但 0 份报告 — 看 <code style={{ fontSize: 10 }}>~/Desktop/Murmur/agent_reports/_errors.txt</code> 排错</>
             }
           </div>
           <div style={{ fontSize: 11, color: dark ? 'rgba(244,236,218,0.6)' : 'rgba(26,43,74,0.6)', marginBottom: 10 }}>
-            报告路径：<code style={{ fontSize: 10 }}>~/Desktop/Murmur/agent_reports/pairs/</code>
+            报告路径：<code style={{ fontSize: 10 }}>{status.reports_root || '~/Desktop/Murmur/agent_reports'}/pairs/</code>
           </div>
           <div style={{ display: 'flex', gap: 6 }}>
             <button onClick={onReset} style={{

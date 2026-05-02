@@ -22,7 +22,14 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
-echo [OK] Python found
+for /f %%v in ('python -c "import sys; print(1 if sys.version_info >= (3, 11) else 0)"') do set PY_OK=%%v
+if not "%PY_OK%"=="1" (
+    echo [X] Python 版本太老，需要 3.11+
+    python --version
+    pause
+    exit /b 1
+)
+echo [OK] Python 3.11+ found
 
 REM --- check node ---
 where node > nul 2>&1
@@ -32,12 +39,19 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
-echo [OK] Node.js found
+for /f %%v in ('node -p "Number(process.versions.node.split('.')[0]) >= 18 ? 1 : 0"') do set NODE_OK=%%v
+if not "%NODE_OK%"=="1" (
+    echo [X] Node.js 版本太老，需要 18+
+    node --version
+    pause
+    exit /b 1
+)
+echo [OK] Node.js 18+ found
 
 REM --- install python deps if needed ---
 python -c "import zstandard, cryptography" 2>nul
 if errorlevel 1 (
-    echo [...] 装 Python 依赖（zstandard + cryptography + faster-whisper 可选）...
+    echo [...] 装 Python 依赖（zstandard + cryptography；语音转写依赖可之后单独安装）...
     python -m pip install -r requirements.txt
     if errorlevel 1 (
         echo [X] pip install 失败
@@ -69,17 +83,17 @@ timeout /t 3 /nobreak > nul
 
 REM --- launch frontend ---
 echo [...] 启动前端 (vite dev)...
-start "Murmur Frontend" /min cmd /c "cd /d app && npm run dev"
+start "Murmur Frontend" /min cmd /c "cd /d app && npm run dev -- --host 127.0.0.1"
 timeout /t 5 /nobreak > nul
 
 REM --- open browser ---
 echo.
 echo  ✓ 启动完成！正在打开浏览器…
 echo.
-echo  后端: http://localhost:9100
-echo  前端: http://localhost:5173
+echo  后端: http://127.0.0.1:9100
+echo  前端: http://127.0.0.1:5173
 echo.
 echo  关闭此窗口不会停止服务，要停服务关掉那两个 cmd 窗口
 echo.
-start "" "http://localhost:5173"
+start "" "http://127.0.0.1:5173"
 pause

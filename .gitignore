@@ -16,8 +16,8 @@ app/node_modules/
 app/dist/
 app/dist-ssr/
 app/src-tauri/target/
-app/src-tauri/Cargo.lock
-app/src-tauri/etcli/
+app/src-tauri/etcli/*
+!app/src-tauri/etcli/.keep
 cli/build/
 cli/dist/
 **/__pycache__/

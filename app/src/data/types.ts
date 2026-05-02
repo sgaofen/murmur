@@ -53,6 +53,7 @@ export interface FriendStats {
 export interface Moment {
   date: string;
   from: string;
+  from_id?: string;
   text: string;
 }
 

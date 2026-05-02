@@ -1,6 +1,6 @@
 """batch_analyze.py — 用 Claude Code (或 Codex) 把每个朋友 + 每对关系都跑一遍
 
-输出: ~/Desktop/Murmur/agent_reports/
+输出: ~/Desktop/Murmur/agent_reports/（可用 MURMUR_AGENT_REPORTS_DIR 覆盖）
   - friends/<name>.md       每个朋友的关系档案 (基于私聊+群聊上下文+提及)
   - pairs/<a>__<b>.md       每对朋友间关系的推断
   - index.md                所有报告的索引
@@ -17,6 +17,9 @@
     python batch_analyze.py --pairs-only
     python batch_analyze.py --friends-only
     python batch_analyze.py --cli codex  # 用 codex 替代
+
+Codex 默认使用 gpt-5.2，避免旧 Codex CLI 默认模型过新导致启动失败。
+可用 MURMUR_CODEX_MODEL 覆盖。
 """
 from __future__ import annotations
 import argparse
@@ -44,8 +47,20 @@ except Exception:
 
 CST = timezone(timedelta(hours=8))
 
-ETCLI_URL = "http://localhost:9100"
+ETCLI_URL = os.environ.get("ETCLI_URL", "http://127.0.0.1:9100")
 NPM_BIN = Path(os.environ.get("APPDATA") or "") / "npm"
+
+
+def _agent_reports_root() -> Path:
+    override = os.environ.get("MURMUR_AGENT_REPORTS_DIR")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / "Desktop" / "Murmur" / "agent_reports"
+
+
+def _codex_model_args() -> list[str]:
+    model = os.environ.get("MURMUR_CODEX_MODEL", "gpt-5.2").strip()
+    return ["-m", model] if model else []
 
 
 def _which_agent(cli: str) -> Path | None:
@@ -88,7 +103,7 @@ def call_agent(cli: str, agent_path: Path, prompt: str, timeout: int = 900) -> t
     if cli == "claude":
         cmd_args = [str(agent_path), "--print"]
     elif cli == "codex":
-        cmd_args = [str(agent_path), "exec", "--skip-git-repo-check", "-"]
+        cmd_args = [str(agent_path), "exec", "--skip-git-repo-check", "--ephemeral", *_codex_model_args(), "-"]
     else:
         cmd_args = [str(agent_path)]
 
@@ -140,7 +155,7 @@ def cmd_run(args):
         sys.exit(2)
     print(f"[*] Using agent: {agent_path}")
 
-    out_root = Path(os.path.expanduser("~")) / "Desktop" / "Murmur" / "agent_reports"
+    out_root = _agent_reports_root()
     friends_dir = out_root / "friends"
     pairs_dir = out_root / "pairs"
     friends_dir.mkdir(parents=True, exist_ok=True)
@@ -221,12 +236,14 @@ def cmd_run(args):
             content = (
                 f"# {an} ↔ {bn} 关系推断\n\n"
                 f"> 由 {cli} 生成 · 用时 {elapsed:.0f}s · 提及次数 {rec['total_mentions']}\n\n"
+                f"> wxid_a: `{a}`\n"
+                f"> wxid_b: `{b}`\n\n"
                 f"---\n\n{out}\n"
             )
             out_path.write_text(content, encoding="utf-8")
             print(f"  [P {idx}/{total}] {an} ↔ {bn} OK ({len(out)//1000}KB, {elapsed:.0f}s)")
             with summary_lock:
-                summary.append({"type": "pair", "a": an, "b": bn,
+                summary.append({"type": "pair", "a": an, "b": bn, "wxid_a": a, "wxid_b": b,
                                 "out": str(out_path), "elapsed": elapsed, "size": len(out)})
         else:
             print(f"  [P {idx}/{total}] {an} ↔ {bn} FAIL ({elapsed:.0f}s)")
@@ -234,9 +251,10 @@ def cmd_run(args):
 
     # === Phase 1: Top friends (PARALLEL) ===
     if not args.pairs_only:
-        print(f"\n[*] Phase 1: top {args.top} friends with {cli} (parallel={args.parallel})...")
+        scope_label = "all" if args.top <= 0 else f"top {args.top}"
+        print(f"\n[*] Phase 1: {scope_label} friends with {cli} (parallel={args.parallel})...")
         friends = _api("/api/friends?type=private")
-        top_friends = friends[:args.top]
+        top_friends = friends if args.top <= 0 else friends[:args.top]
         with ThreadPoolExecutor(max_workers=args.parallel) as ex:
             futs = []
             for i, f in enumerate(top_friends, 1):
@@ -246,14 +264,16 @@ def cmd_run(args):
 
     # === Phase 2: Key pairs (PARALLEL) ===
     if not args.friends_only:
-        print(f"\n[*] Phase 2: top {args.top_pairs} pairs (mode={args.pair_mode}) with {cli} (parallel={args.parallel})...")
+        pair_scope = "all" if args.top_pairs <= 0 else f"top {args.top_pairs}"
+        print(f"\n[*] Phase 2: {pair_scope} pairs (mode={args.pair_mode}) with {cli} (parallel={args.parallel})...")
         sorted_pairs: list[dict] = []
         try:
             if args.pair_mode == "graph":
                 # Pull all friend-friend edges from the graph and rank by combined-edge weight.
                 # Includes mutual_reply / mention / moments_cross / co_group — covers pairs that
                 # have ANY interaction, not just textual mentions.
-                graph = _api(f"/api/graph?scope=private&top_n=300")
+                graph_top_n = 0 if args.top_pairs <= 0 else 300
+                graph = _api(f"/api/graph?scope=private&top_n={graph_top_n}")
                 # Build per-pair max-priority edge
                 priority = {"mutual_reply": 4, "mention": 3, "moments_cross": 2, "co_group": 1}
                 pair_edges: dict[tuple[str, str], dict] = {}
@@ -274,7 +294,8 @@ def cmd_run(args):
                           e.get("shared_group_count") or e["weight"] or 0
                     return p * 1e6 + sig
                 ranked = sorted(pair_edges.values(), key=lambda e: -score(e))
-                for e in ranked[:args.top_pairs]:
+                selected_pairs = ranked if args.top_pairs <= 0 else ranked[:args.top_pairs]
+                for e in selected_pairs:
                     a, b = e["source"], e["target"]
                     sorted_pairs.append({
                         "wxid_a": a, "wxid_b": b,
@@ -287,7 +308,8 @@ def cmd_run(args):
             else:
                 # Original mention-based mode
                 pairs = _api(f"/api/friend-mentions?top_n=80&min={args.min_mentions}")
-                sorted_pairs = sorted(pairs.values(), key=lambda r: -r["total_mentions"])[:args.top_pairs]
+                ranked_pairs = sorted(pairs.values(), key=lambda r: -r["total_mentions"])
+                sorted_pairs = ranked_pairs if args.top_pairs <= 0 else ranked_pairs[:args.top_pairs]
         except Exception as e:
             print(f"[X] pair selection failed: {e}")
             sorted_pairs = []
@@ -337,8 +359,8 @@ def cmd_run(args):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--cli", default="claude", choices=["claude", "codex"])
-    p.add_argument("--top", type=int, default=10, help="Top N friends to analyze (default 10)")
-    p.add_argument("--top-pairs", type=int, default=10, help="Top N friend pairs (default 10)")
+    p.add_argument("--top", type=int, default=10, help="Top N friends to analyze; 0 means all (default 10)")
+    p.add_argument("--top-pairs", type=int, default=10, help="Top N friend pairs; 0 means all (default 10)")
     p.add_argument("--sample", type=int, default=80, help="Pack sample size (default 80)")
     p.add_argument("--timeout", type=int, default=900, help="Agent timeout per call (default 900s = 15min)")
     p.add_argument("--parallel", type=int, default=5, help="How many agents to run concurrently (default 5)")

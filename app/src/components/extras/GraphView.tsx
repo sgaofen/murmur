@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent } from 'react';
 import { displayName } from '../../utils/privacy';
-import { usePrivacy } from '../PrivacyToggle';
+import { usePrivacy } from '../../utils/usePrivacy';
 
 export interface GraphNode {
   id: string;
@@ -64,6 +64,17 @@ const TIER_COLORS: Record<string, string> = {
   E: '#C8BFAB',
 };
 
+const EDGE_ORDER: Record<GraphEdge['type'], number> = {
+  private: 0,
+  co_group: 1,
+  co_active: 2,
+  mention: 3,
+  moments_cross: 4,
+  dm_inferred: 5,
+  mutual_reply: 6,
+  close_pair: 7,
+};
+
 interface Projected extends GraphNode {
   proj: { x: number; y: number; depth: number };
 }
@@ -78,7 +89,7 @@ function project(
 ) {
   // Rotate around Y axis (yaw)
   const cosY = Math.cos(rotY), sinY = Math.sin(rotY);
-  let x = p.x * cosY - p.z * sinY;
+  const x = p.x * cosY - p.z * sinY;
   let z = p.x * sinY + p.z * cosY;
   let y = p.y;
   // Rotate around X axis (pitch)
@@ -376,7 +387,7 @@ export function GraphView({ data, dark = false, selected, onSelect, onSelectEdge
 
   const projNodes: Projected[] = useMemo(
     () => data.nodes.map(n => ({ ...n, proj: project(n, rotY, rotX, zoom, pan.x, pan.y, W, H) })),
-    [data.nodes, rotY, rotX, zoom, pan.x, pan.y]
+    [data.nodes, rotY, rotX, zoom, pan.x, pan.y, H]
   );
   const projById = useMemo(() => Object.fromEntries(projNodes.map(n => [n.id, n])), [projNodes]);
   const sortedNodes = useMemo(() => [...projNodes].sort((a, b) => a.proj.depth - b.proj.depth), [projNodes]);
@@ -392,9 +403,8 @@ export function GraphView({ data, dark = false, selected, onSelect, onSelectEdge
     return s;
   }, [selected, data.edges]);
 
-  const edgeOrder: Record<string, number> = { private: 0, co_group: 1, co_active: 2, mention: 3, moments_cross: 4, dm_inferred: 5, mutual_reply: 6, close_pair: 7 };
   const sortedEdges = useMemo(
-    () => [...data.edges].sort((a, b) => (edgeOrder[a.type] ?? 0) - (edgeOrder[b.type] ?? 0)),
+    () => [...data.edges].sort((a, b) => (EDGE_ORDER[a.type] ?? 0) - (EDGE_ORDER[b.type] ?? 0)),
     [data.edges]
   );
 
@@ -646,6 +656,7 @@ function Starfield() {
 }
 
 function NodeTooltip({ node, dark }: { node: Projected; dark: boolean }) {
+  const name = displayName(node.id, node.name);
   return (
     <div style={{
       position: 'absolute',
@@ -657,7 +668,7 @@ function NodeTooltip({ node, dark }: { node: Projected; dark: boolean }) {
       boxShadow: '0 8px 24px rgba(0,0,0,0.3)',
       pointerEvents: 'none',
     }}>
-      <div style={{ fontWeight: 600, fontSize: 12.5 }}>{node.name}</div>
+      <div style={{ fontWeight: 600, fontSize: 12.5 }}>{name}</div>
       <div style={{ opacity: 0.75, marginTop: 2 }}>
         {node.is_self ? '是你' : `${node.tier} 级 · ${(node.private_msgs || 0).toLocaleString()} 条私聊`}
         {!node.is_self && node.group_msgs ? ` · ${node.group_msgs.toLocaleString()} 条群聊` : ''}

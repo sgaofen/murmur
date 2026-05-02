@@ -1,5 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { Friend } from '../../data/types';
+import { API_BASE } from '../../data/api';
+import { displayName } from '../../utils/privacy';
+import { usePrivacy } from '../../utils/usePrivacy';
 
 interface MediaItem {
   md5: string;
@@ -39,6 +42,7 @@ function groupByMonth(items: MediaItem[]): MediaGroup[] {
 }
 
 export function MediaGallery({ friend }: Props) {
+  void usePrivacy();
   const [items, setItems] = useState<MediaItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -46,11 +50,7 @@ export function MediaGallery({ friend }: Props) {
 
   useEffect(() => {
     setLoading(true);
-    // For v0, we don't have a per-friend media listing endpoint yet.
-    // Read the global media-index.json (served via /api/media-list — to be added)
-    // Until that exists, we fall back to mock.
-    const BASE = (import.meta.env?.VITE_ETCLI_URL as string) || 'http://localhost:9100';
-    fetch(BASE + '/api/friend/' + encodeURIComponent(friend.id) + '/media')
+    fetch(API_BASE + '/api/friend/' + encodeURIComponent(friend.id) + '/media')
       .then(r => r.ok ? r.json() : [])
       .then(d => setItems(Array.isArray(d) ? d : []))
       .catch(() => setItems([]))
@@ -71,7 +71,7 @@ export function MediaGallery({ friend }: Props) {
     <div className="et-root" style={{ background: 'var(--et-bg)', minHeight: '100%' }}>
       <style>{`.media-hover-wrap:hover .media-hover { opacity: 1 !important; }`}</style>
       <div style={{ padding: '14px 28px 0', display: 'flex', alignItems: 'center', gap: 14 }}>
-        <div className="et-eyebrow">相册 · 你和 {friend.name}</div>
+        <div className="et-eyebrow">相册 · 你和 {displayName(friend.id, friend.name)}</div>
         <div className="et-meta">
           共 <span className="et-num" style={{ color: 'var(--et-ink)', fontWeight: 600 }}>{imgCount}</span> 张图 ·{' '}
           <span className="et-num" style={{ color: 'var(--et-ink)', fontWeight: 600 }}>{vidCount}</span> 条视频
@@ -130,6 +130,11 @@ export function MediaGallery({ friend }: Props) {
 }
 
 function Thumb({ item, onClick }: { item: MediaItem; onClick: () => void }) {
+  void usePrivacy();
+  const senderLabel = item.from
+    ? item.from === 'self' ? '你' : displayName(item.from, item.from)
+    : '';
+
   return (
     <div
       className="media-hover-wrap"
@@ -180,7 +185,7 @@ function Thumb({ item, onClick }: { item: MediaItem; onClick: () => void }) {
         color: '#fff', fontSize: 10.5, lineHeight: 1.3,
       }}>
         <div>
-          {item.from && <div style={{ fontWeight: 600 }}>{item.from === 'self' ? '你发送' : `${item.from} 发送`}</div>}
+          {senderLabel && <div style={{ fontWeight: 600 }}>{senderLabel} 发送</div>}
           <div style={{ opacity: 0.85 }}>{new Date(item.ts * 1000).toLocaleString()}</div>
         </div>
       </div>

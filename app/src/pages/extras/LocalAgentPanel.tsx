@@ -103,7 +103,7 @@ export function LocalAgentPanel({
       </div>
       <div className="et-meta" style={{ marginTop: 10, fontSize: 11, color: 'var(--et-mute)', display: 'flex', alignItems: 'center', gap: 6 }}>
         <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#48a76b' }} />
-        全程在本地运行 · 数据不会离开你的电脑
+        由本机命令行启动 · Claude/Codex 会交给对应服务商处理，Ollama 才是完全本地
       </div>
     </div>
   );

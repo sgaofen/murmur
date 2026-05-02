@@ -562,7 +562,28 @@ _PAIR_REPORT_CACHE: dict[str, tuple[float, dict]] = {}  # sorted-pair-key → re
 _MENTIONS_CACHE: dict[str, tuple[float, dict]] = {}     # mentions(top_n,min_mc) → result
 _PAIR_STREAM: dict[str, dict] = {}    # pair_key → {running, output, error, started_at, finished_at, name_a, name_b, cli}
 _FRIEND_STREAM: dict[str, dict] = {}  # wxid → same shape as pair stream (single-friend invoke)
+_BATCH_PROCS: dict[int, subprocess.Popen] = {}  # pid → child batch process, so status can reap and not hang on zombies
 _CACHE_TTL = 86400  # 1 day — caches are persisted to disk so a stale day-old cache is fine.
+_YEARBOOK_QUOTE_FIELDS = (
+    "vulnerability_quotes",
+    "offline_quotes",
+    "lifecycle_quotes",
+    "apology_quotes",
+    "care_quotes",
+)
+
+
+def _yearbook_has_quote_ids(payload: dict) -> bool:
+    """Reject pre-v0.2.6 yearbook caches that cannot drive privacy-safe UI labels."""
+    for year in payload.get("years", []):
+        for field in _YEARBOOK_QUOTE_FIELDS:
+            for quote in year.get(field, []) or []:
+                if "from_id" not in quote:
+                    return False
+        signature = year.get("signature")
+        if signature and "from_id" not in signature:
+            return False
+    return True
 
 # Build locks: SQLite + heavy Python construction is not safe to call from N threads concurrently
 # on the SAME EchoStore instance. Crashes the process (segfaults in C extensions). Serialize.
@@ -576,8 +597,75 @@ def _disk_cache_dir() -> Path:
     p.mkdir(parents=True, exist_ok=True)
     return p
 
+def _agent_reports_root() -> Path:
+    override = os.environ.get("MURMUR_AGENT_REPORTS_DIR")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / "Desktop" / "Murmur" / "agent_reports"
+
+def _codex_model_args() -> list[str]:
+    model = os.environ.get("MURMUR_CODEX_MODEL", "gpt-5.2").strip()
+    return ["-m", model] if model else []
+
 def _safe_filename(s: str) -> str:
     return re.sub(r'[<>:"/\\|?*]', "_", s)[:80]
+
+def _batch_progress_from_log(log_text: str) -> dict:
+    progress = {
+        "friends_done": 0,
+        "friends_total": 0,
+        "pairs_done": 0,
+        "pairs_total": 0,
+        "failures": 0,
+        "skipped": 0,
+        "last_stage": "",
+        "crashed": False,
+    }
+    seen_terminal: set[tuple[str, int, str]] = set()
+    saw_traceback = False
+    for raw in log_text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("Traceback ") or line.startswith("[X]") or "ConnectionRefusedError" in line:
+            saw_traceback = True
+            progress["last_stage"] = line
+        if "Phase 1:" in line or "Phase 2:" in line or line.startswith("[DONE]"):
+            progress["last_stage"] = line
+
+        m = re.search(r"\[(F|P)\s+(\d+)/(\d+)\]\s+(.+)", line)
+        if not m:
+            continue
+        kind, idx_s, total_s, rest = m.groups()
+        idx = int(idx_s)
+        total = int(total_s)
+        done_key = "friends_done" if kind == "F" else "pairs_done"
+        total_key = "friends_total" if kind == "F" else "pairs_total"
+        progress[total_key] = max(progress[total_key], total)
+        progress["last_stage"] = line
+
+        terminal = None
+        if re.search(r"\bOK\b", rest):
+            terminal = "OK"
+        elif re.search(r"\bSKIP\b", rest):
+            terminal = "SKIP"
+        elif re.search(r"\bFAIL\b", rest) or " err:" in rest or "failed:" in rest:
+            terminal = "FAIL"
+
+        if terminal:
+            key = (kind, idx, terminal)
+            if key not in seen_terminal:
+                seen_terminal.add(key)
+                if terminal == "SKIP":
+                    progress["skipped"] += 1
+                elif terminal == "FAIL":
+                    progress["failures"] += 1
+            progress[done_key] = max(progress[done_key], idx)
+    if saw_traceback:
+        progress["crashed"] = True
+        if progress["failures"] == 0:
+            progress["failures"] = 1
+    return progress
 
 def _disk_load(key: str) -> dict | None:
     """Try to load a cached payload from disk. Returns None if not present or stale."""
@@ -2242,12 +2330,12 @@ def all_friends(store: EchoStore, kind: str = "all", q: str = "") -> list[dict]:
 
 
 def find_ai_report_for(wxid: str) -> dict | None:
-    """Look in ~/Desktop/Murmur/agent_reports/friends/ for a report tagged with this wxid.
+    """Look in the agent reports friends dir for a report tagged with this wxid.
 
     Reports start with: > wxid: `wxid_xxx`  (frontmatter line). Returns metadata + first
     ~600 chars of body (after frontmatter) for use as a "summary card".
     """
-    reports_root = Path.home() / "Desktop" / "Murmur" / "agent_reports" / "friends"
+    reports_root = _agent_reports_root() / "friends"
     if not reports_root.exists():
         return None
     for p in reports_root.iterdir():
@@ -2418,6 +2506,7 @@ def friend_yearbook(store: EchoStore, wxid: str) -> dict:
                     out.append({
                         "date": _ts_to_dt(x.create_time).strftime("%Y-%m-%d"),
                         "from": x.sender_name,
+                        "from_id": x.sender_wxid,
                         "text": (x.text or "")[:160],
                     })
                     if len(out) >= limit:
@@ -2441,6 +2530,7 @@ def friend_yearbook(store: EchoStore, wxid: str) -> dict:
             signature = {
                 "date": _ts_to_dt(sig_m.create_time).strftime("%Y-%m-%d"),
                 "from": sig_m.sender_name,
+                "from_id": sig_m.sender_wxid,
                 "text": sig_m.text[:240],
             }
 
@@ -2515,6 +2605,13 @@ def friend_moments(store: EchoStore, wxid: str, n: int = 4) -> list[dict]:
 class _MurmurAPIHandler(BaseHTTPRequestHandler):
     store: Optional[EchoStore] = None  # set by _run_server
     export_dir: Path = Path.home() / "Desktop" / "Murmur"
+    _ALLOWED_DEV_ORIGINS = {
+        ("http", "127.0.0.1", 5173),
+        ("http", "localhost", 5173),
+        ("http", "::1", 5173),
+    }
+    _ALLOWED_TAURI_HOSTS = {"tauri.localhost"}
+    _ALLOWED_CORS_SCHEMES = {"tauri", "asset"}
 
     # quiet noisy default logging
     def log_message(self, format, *args):  # noqa: A002
@@ -2526,32 +2623,59 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
     def address_string(self):
         return self.client_address[0]
 
+    def _allowed_cors_origin(self) -> str | None:
+        origin = self.headers.get("Origin")
+        if not origin:
+            return None
+        parsed = urllib.parse.urlparse(origin)
+        if parsed.scheme in self._ALLOWED_CORS_SCHEMES:
+            return origin
+        if parsed.hostname in self._ALLOWED_TAURI_HOSTS:
+            return origin
+        if (parsed.scheme, parsed.hostname, parsed.port) in self._ALLOWED_DEV_ORIGINS:
+            return origin
+        return None
+
+    def _origin_allowed(self) -> bool:
+        origin = self.headers.get("Origin")
+        return not origin or self._allowed_cors_origin() is not None
+
+    def _send_cors_headers(self) -> None:
+        allowed_origin = self._allowed_cors_origin()
+        if allowed_origin:
+            self.send_header("Access-Control-Allow-Origin", allowed_origin)
+            self.send_header("Vary", "Origin")
+            self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+
     def _send_json(self, payload, status=200):
         body = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self._send_cors_headers()
         self.end_headers()
         self.wfile.write(body)
 
     def do_OPTIONS(self):  # noqa: N802
+        if not self._origin_allowed():
+            return self._send_json({"error": "origin_not_allowed"}, 403)
         self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self._send_cors_headers()
         self.end_headers()
 
     def do_GET(self):  # noqa: N802
         try:
+            if not self._origin_allowed():
+                return self._send_json({"error": "origin_not_allowed"}, 403)
             self._dispatch_get()
         except Exception as e:
             self._send_json({"error": str(e), "type": type(e).__name__}, status=500)
 
     def do_POST(self):  # noqa: N802
         try:
+            if not self._origin_allowed():
+                return self._send_json({"error": "origin_not_allowed"}, 403)
             self._dispatch_post()
         except Exception as e:
             self._send_json({"error": str(e), "type": type(e).__name__}, status=500)
@@ -2706,23 +2830,29 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 return re.sub(r'[<>:"/\\|?*\s]+', "_", s)[:80]
 
             target = {_safe(name_a), _safe(name_b)}
-            pairs_root = Path.home() / "Desktop" / "Murmur" / "agent_reports" / "pairs"
+            pairs_root = _agent_reports_root() / "pairs"
             if pairs_root.exists():
                 for p in pairs_root.iterdir():
                     if p.suffix.lower() != ".md":
-                        continue
-                    # stem = "XX_<safeA>__<safeB>" — strip the "XX_" index prefix
-                    stem = p.stem
-                    after_idx = stem.split("_", 1)[1] if "_" in stem else stem
-                    parts = after_idx.split("__")
-                    if len(parts) != 2:
-                        continue
-                    if {parts[0], parts[1]} != target:
                         continue
                     try:
                         content = p.read_text(encoding="utf-8", errors="replace")
                     except OSError:
                         continue
+                    ids = set(re.findall(r"> wxid_[ab]: `([^`]+)`", content))
+                    if ids and ids != {a, b}:
+                        continue
+                    if not ids:
+                        # Legacy reports (pre wxid frontmatter) fall back to the deterministic
+                        # filename. Body matching is deliberately forbidden to avoid A↔B returning
+                        # A↔C just because B is mentioned in the prose.
+                        stem = p.stem
+                        after_idx = stem.split("_", 1)[1] if "_" in stem else stem
+                        parts = after_idx.split("__")
+                        if len(parts) != 2:
+                            continue
+                        if {parts[0], parts[1]} != target:
+                            continue
                     idx = content.find("\n---\n")
                     body = content[idx + 5:].lstrip() if idx > 0 else content
                     payload = {
@@ -2739,7 +2869,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             return self._send_json(payload)
         if path == "/api/reports":
             # List all generated agent reports (friends + pairs).
-            reports_root = Path.home() / "Desktop" / "Murmur" / "agent_reports"
+            reports_root = _agent_reports_root()
             out = {"friends": [], "pairs": [], "root": str(reports_root)}
             if reports_root.exists():
                 fr = reports_root / "friends"
@@ -2769,7 +2899,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         if path.startswith("/api/report/"):
             # Serve a single report's markdown content
             rel = urllib.parse.unquote(path[len("/api/report/"):])
-            reports_root = Path.home() / "Desktop" / "Murmur" / "agent_reports"
+            reports_root = _agent_reports_root()
             target = (reports_root / rel).resolve()
             try:
                 # Path traversal guard
@@ -2862,10 +2992,10 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 return self._send_json(friend_moments(self.store, wxid, n=int(qs.get("n", [4])[0])))
             if sub == "yearbook":
                 cached = _YEARBOOK_CACHE.get(wxid)
-                if cached and (_time.time() - cached[0]) < _CACHE_TTL:
+                if cached and (_time.time() - cached[0]) < _CACHE_TTL and _yearbook_has_quote_ids(cached[1]):
                     return self._send_json(cached[1])
                 disk = _disk_load(f"yearbook_{wxid}")
-                if disk and (_time.time() - disk["_ts"]) < _CACHE_TTL:
+                if disk and (_time.time() - disk["_ts"]) < _CACHE_TTL and _yearbook_has_quote_ids(disk["_payload"]):
                     _YEARBOOK_CACHE[wxid] = (disk["_ts"], disk["_payload"])
                     return self._send_json(disk["_payload"])
                 payload = friend_yearbook(self.store, wxid)
@@ -2882,6 +3012,8 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 except Exception:
                     return self._send_json([])
                 target_hash = hashlib.md5(wxid.encode()).hexdigest()
+                host = self.headers.get("Host") or "127.0.0.1:9100"
+                api_base = f"http://{host}"
                 items = []
                 for md5, rec in idx.items():
                     # Strict filter: only include items whose chat_hash matches md5(wxid).
@@ -2905,7 +3037,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                         "month": rec.get("month") or "未知",
                         "ts": 0,  # we don't have per-file mtime yet
                         "from": None,
-                        "url": f"http://localhost:9100/api/media/{md5}",
+                        "url": f"{api_base}/api/media/{md5}",
                         "size": rec.get("size", 0),
                     })
                 # Sort by month desc, then by filename
@@ -3052,22 +3184,27 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
 
         if path == "/api/agents/batch":
             # Launch batch_analyze.py as a subprocess. Returns immediately with the PID.
-            # Body: {cli: 'claude', mode: 'top'|'all'|'pairs-graph', top: 20, top_pairs: 30, force: false}
+            # Body: {cli, mode, top, top_pairs, sample, parallel, force}
             length = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(length) if length else b"{}"
             opts = json.loads(body.decode("utf-8") or "{}")
             cli_name = opts.get("cli", "claude")
             mode = opts.get("mode", "top")
+            pair_mode = opts.get("pair_mode", "graph")
+            if pair_mode not in ("graph", "mention"):
+                pair_mode = "graph"
             top = int(opts.get("top", 20))
             top_pairs = int(opts.get("top_pairs", 20))
+            sample = max(1, min(int(opts.get("sample", 80)), 500))
+            parallel = max(1, min(int(opts.get("parallel", 5)), 10))
             force = bool(opts.get("force", False))
-            cli_dir = Path(__file__).resolve().parent
             log_dir = Path.home() / "Desktop" / "Murmur"
             log_dir.mkdir(parents=True, exist_ok=True)
             log_path = log_dir / f"batch_{int(_time.time())}.log"
-            extra: list = ["--cli", cli_name, "--parallel", "5"]
+            extra: list = ["--cli", cli_name, "--parallel", str(parallel), "--sample", str(sample)]
             if mode == "all":
-                extra += ["--top", "100", "--top-pairs", str(top_pairs), "--min-mentions", "2"]
+                pair_arg = top_pairs if top_pairs >= 0 else 0
+                extra += ["--top", "0", "--top-pairs", str(pair_arg), "--min-mentions", "2", "--pair-mode", "graph"]
             elif mode == "pairs-graph":
                 extra += ["--pairs-only", "--pair-mode", "graph", "--top-pairs", str(top_pairs)]
             elif mode == "single-friend":
@@ -3076,12 +3213,18 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     return self._send_json({"ok": False, "error": "wxid required for single-friend"}, 400)
                 return self._send_json({"ok": False, "error": "use /api/agents/invoke for single-friend"}, 400)
             else:  # top mode (default)
-                extra += ["--top", str(top), "--top-pairs", str(top_pairs), "--min-mentions", "2"]
+                extra += ["--top", str(top), "--top-pairs", str(top_pairs), "--min-mentions", "2", "--pair-mode", pair_mode]
             if force:
                 extra.append("--force")
             cmd = _spawn_etcli_args("batch", *extra)
             env = os.environ.copy()
             env["PYTHONIOENCODING"] = "utf-8"
+            env["PYTHONUNBUFFERED"] = "1"
+            try:
+                port = int(getattr(self.server, "server_address", ("127.0.0.1", 9100))[1])
+                env["ETCLI_URL"] = f"http://127.0.0.1:{port}"
+            except Exception:
+                env["ETCLI_URL"] = os.environ.get("ETCLI_URL", "http://127.0.0.1:9100")
             # Run from a writable user dir, NOT the bundle's read-only Resources
             # dir (cli_dir resolves into _internal/ when frozen). codex/claude
             # spawn child sessions in cwd → fail if cwd isn't writable.
@@ -3095,6 +3238,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                         cwd=str(batch_cwd),
                         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform.startswith("win") else 0,
                     )
+                _BATCH_PROCS[proc.pid] = proc
                 return self._send_json({
                     "ok": True, "pid": proc.pid, "log_path": str(log_path),
                     "cmd": cmd, "started_at": int(_time.time()),
@@ -3111,29 +3255,39 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             log_path = opts.get("log_path")
             running = False
             if pid:
-                try:
-                    if sys.platform.startswith("win"):
-                        # tasklist returns "<exe>","<pid>",...  Check that ANY exe with this PID exists
-                        # (could be python.exe in dev mode, or etcli.exe in PyInstaller bundle).
-                        r = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
-                                            capture_output=True, text=True, encoding="utf-8", errors="replace")
-                        out = (r.stdout or "").lower()
-                        running = ("python" in out) or ("etcli" in out)
-                    else:
-                        os.kill(pid, 0)
-                        running = True
-                except (ProcessLookupError, PermissionError, OSError):
-                    running = False
+                proc = _BATCH_PROCS.get(pid)
+                if proc:
+                    running = proc.poll() is None
+                    if not running:
+                        _BATCH_PROCS.pop(pid, None)
+                else:
+                    try:
+                        if sys.platform.startswith("win"):
+                            # tasklist returns "<exe>","<pid>",...  Check that ANY exe with this PID exists
+                            # (could be python.exe in dev mode, or etcli.exe in PyInstaller bundle).
+                            r = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
+                                                capture_output=True, text=True, encoding="utf-8", errors="replace")
+                            out = (r.stdout or "").lower()
+                            running = ("python" in out) or ("etcli" in out)
+                        else:
+                            os.kill(pid, 0)
+                            running = True
+                    except (ProcessLookupError, PermissionError, OSError):
+                        running = False
             log_tail = ""
+            log_text = ""
             if log_path:
                 p = Path(log_path)
                 if p.exists():
                     try:
-                        log_tail = p.read_text(encoding="utf-8", errors="replace")[-3000:]
+                        log_text = p.read_text(encoding="utf-8", errors="replace")
+                        log_tail = log_text[-3000:]
                     except OSError:
                         pass
-            # Snapshot current report counts
-            reports_root = Path.home() / "Desktop" / "Murmur" / "agent_reports"
+            progress = _batch_progress_from_log(log_text)
+            # Snapshot current report counts. These are all reports in the active
+            # reports directory; progress fields above describe only this run.
+            reports_root = _agent_reports_root()
             n_friends = 0
             n_pairs = 0
             if reports_root.exists():
@@ -3145,7 +3299,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     n_pairs = sum(1 for x in pr.iterdir() if x.suffix.lower() == ".md")
             return self._send_json({
                 "running": running, "n_friends": n_friends, "n_pairs": n_pairs,
-                "log_tail": log_tail,
+                "log_tail": log_tail, "reports_root": str(reports_root), **progress,
             })
 
         if path == "/api/agents/invoke-pair":
@@ -3201,7 +3355,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     state["stage"] = f"running {cli_name}"
                     use_shell = sys.platform.startswith("win") and agent_path.lower().endswith((".cmd", ".bat", ".ps1"))
                     cmd_args = ([agent_path, "--print"] if cli_name == "claude" else
-                                 [agent_path, "exec", "--skip-git-repo-check", "-"] if cli_name == "codex" else
+                                 [agent_path, "exec", "--skip-git-repo-check", "--ephemeral", *_codex_model_args(), "-"] if cli_name == "codex" else
                                  [agent_path])
                     t_start = _time.time()
 
@@ -3243,7 +3397,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                                 if tidx > 0:
                                     clean_output = clean_output[:tidx]
                         clean_output = clean_output.strip()
-                        pairs_root = Path.home() / "Desktop" / "Murmur" / "agent_reports" / "pairs"
+                        pairs_root = _agent_reports_root() / "pairs"
                         pairs_root.mkdir(parents=True, exist_ok=True)
                         safe_a = re.sub(r'[<>:"/\\|?*]', "_", name_a) or a
                         safe_b = re.sub(r'[<>:"/\\|?*]', "_", name_b) or b
@@ -3253,6 +3407,8 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                         md = (
                             f"# {name_a} ↔ {name_b} 关系推断\n\n"
                             f"> 由 {cli_name} 生成 · 用时 {elapsed}s · 触发：app 内点击\n\n"
+                            f"> wxid_a: `{a}`\n"
+                            f"> wxid_b: `{b}`\n\n"
                             f"---\n\n{clean_output}\n"
                         )
                         (pairs_root / fname).write_text(md, encoding="utf-8")
@@ -3355,7 +3511,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     if cli_name == "claude":
                         cmd_args = [agent_path, "--print"]
                     elif cli_name == "codex":
-                        cmd_args = [agent_path, "exec", "--skip-git-repo-check", "-"]
+                        cmd_args = [agent_path, "exec", "--skip-git-repo-check", "--ephemeral", *_codex_model_args(), "-"]
                     else:
                         cmd_args = [agent_path]
 
@@ -3398,7 +3554,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                                 if tidx > 0:
                                     clean_output = clean_output[:tidx]
                         clean_output = clean_output.strip()
-                        reports_root = Path.home() / "Desktop" / "Murmur" / "agent_reports" / "friends"
+                        reports_root = _agent_reports_root() / "friends"
                         reports_root.mkdir(parents=True, exist_ok=True)
                         safe_full = re.sub(r'[<>:"/\\|?*]', "_", name) or wxid
                         report_file = reports_root / f"{safe_full}.md"
@@ -3774,7 +3930,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     self.send_response(200)
                     self.send_header("Content-Type", "image/svg+xml")
                     self.send_header("Content-Length", str(len(placeholder)))
-                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self._send_cors_headers()
                     self.end_headers()
                     self.wfile.write(placeholder)
                     return
@@ -3790,7 +3946,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "max-age=86400")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self._send_cors_headers()
         self.end_headers()
         self.wfile.write(data)
 
@@ -4102,7 +4258,7 @@ def extract_friend_mentions(store: EchoStore, top_n: int = 50,
         # Use a simple score (msgs) as proxy for "important enough to consider"
         candidates.append((s.username, c.display() or s.username, cnt))
     candidates.sort(key=lambda x: -x[2])
-    top = candidates[:top_n]
+    top = candidates if top_n <= 0 else candidates[:top_n]
     top_wxids = {x[0] for x in top}
 
     # Step 2: Build name -> wxid map (multiple names possible per wxid)
@@ -4505,7 +4661,8 @@ def build_relationship_graph(store: EchoStore, *,
     self_node = next((n for n in nodes if n.get("is_self")), None)
     other_nodes = [n for n in nodes if not n.get("is_self")]
     other_nodes.sort(key=lambda n: -n.get("combined_score", 0))
-    other_nodes = other_nodes[:top_n]
+    if top_n > 0:
+        other_nodes = other_nodes[:top_n]
     nodes = ([self_node] if self_node else []) + other_nodes
 
     # Drop edges to filtered-out nodes

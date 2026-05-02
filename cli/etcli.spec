@@ -12,11 +12,12 @@ from pathlib import Path
 
 HERE = Path(SPECPATH)
 
-# Bundle every file in cli/native/ as data → ends up at _internal/native/<file>
-# (Win needs wx_key.dll / go_decrypt.dll; harmless dead weight on Mac.)
+# Bundle native helpers only on Windows → ends up at _internal/native/<file>.
+# Mac/Linux use pure-Python/cryptography paths and should not ship Windows DLL/EXE
+# payloads in the .app resources.
 native_files = []
 native_dir = HERE / "native"
-if native_dir.is_dir():
+if sys.platform.startswith("win") and native_dir.is_dir():
     for f in native_dir.iterdir():
         if f.is_file():
             native_files.append((str(f), "native"))
@@ -41,10 +42,6 @@ a = Analysis(
         "cryptography.hazmat.backends",
         "cryptography.hazmat.backends.openssl",
         "cryptography.hazmat.bindings.openssl.binding",
-        # Image decrypt (pycryptodome) — Win only at runtime but bundle on both
-        "Crypto",
-        "Crypto.Cipher",
-        "Crypto.Cipher.AES",
         # All local cli/ modules — etcli.py imports some lazily (refresh on Win
         # via _spawn_etcli_args, extract_key_mac on Mac via osascript subprocess).
         "paths",
