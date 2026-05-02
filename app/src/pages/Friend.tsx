@@ -3,7 +3,7 @@ import { Avatar } from '../components/Avatar';
 import { MessageCard } from '../components/MessageCard';
 import { RingChart } from '../components/RingChart';
 import { Stamp } from '../components/Stamp';
-import { getFriend, getMessages, getMoments, getReport, getFriendConnections } from '../data/api';
+import { getFriend, getMessages, getMoments, getReport, getFriendConnections, getInvokeStream } from '../data/api';
 import type { FriendConnection } from '../data/api';
 import type { Friend, FriendStats, Moment } from '../data/types';
 import { AIExportDialog } from './AIExportDialog';
@@ -341,6 +341,46 @@ function AIReportCard({ friend, onView, onRerun }: {
   );
 }
 
+function AnalysisProgressCard({ stream, error }: {
+  stream: { output: string; stage: string; elapsed: number } | null;
+  error: string | null;
+}) {
+  const tail = stream?.output?.trim().slice(-1800);
+  return (
+    <div className="et-paper-grain" style={{
+      position: 'relative', padding: '18px 22px',
+      background: 'var(--et-paper)', border: '0.5px solid var(--et-orange-2)',
+      borderRadius: 'var(--et-r)', boxShadow: 'var(--et-shadow-1)',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+        <div>
+          <div className="et-eyebrow">AI 分析进度</div>
+          <div className="et-h2" style={{ marginTop: 4, color: 'var(--et-ink)' }}>
+            {error ? '分析失败' : `${stream?.stage || '运行中'}…`}
+          </div>
+        </div>
+        <div className="et-meta" style={{ fontFamily: 'var(--et-mono)', color: 'var(--et-mute)' }}>
+          {stream?.elapsed || 0}s
+        </div>
+      </div>
+      {error && (
+        <div className="et-meta" style={{ marginTop: 10, color: 'var(--et-rose)' }}>
+          {error.slice(0, 180)}
+        </div>
+      )}
+      {tail && !error && (
+        <div style={{
+          marginTop: 10, padding: '10px 12px', borderRadius: 8,
+          background: 'var(--et-paper-2)', border: '0.5px solid var(--et-line-2)',
+          fontFamily: 'var(--et-mono)', fontSize: 11, lineHeight: 1.55,
+          color: 'var(--et-ink-soft)', whiteSpace: 'pre-wrap',
+          maxHeight: 180, overflow: 'auto',
+        }}>{tail}</div>
+      )}
+    </div>
+  );
+}
+
 function ReportViewerOverlay({ relPath, friendName, onClose }: {
   relPath: string;
   friendName: string;
@@ -450,6 +490,15 @@ function MessagesDrawer({ open, friend, onClose }: { open: boolean; friend: Frie
       .finally(() => setLoading(false));
   }, [open, friend.id]);
 
+  useEffect(() => {
+    if (!open) return;
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') onClose();
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [open, onClose]);
+
   if (!open) return null;
 
   return (
@@ -463,18 +512,26 @@ function MessagesDrawer({ open, friend, onClose }: { open: boolean; friend: Frie
         background: 'var(--et-paper)',
         boxShadow: 'var(--et-shadow-3)',
         height: '100%', overflow: 'auto',
-        padding: '20px 24px',
       }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+        <div style={{
+          position: 'sticky', top: 0, zIndex: 1,
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+          gap: 12, padding: '20px 24px 14px',
+          background: 'var(--et-paper)', borderBottom: '0.5px solid var(--et-line)',
+        }}>
           <div>
             <div className="et-eyebrow">完整聊天记录</div>
             <div className="et-h2" style={{ marginTop: 4, color: 'var(--et-ink)' }}>和 {displayName(friend.id, friend.name)} 的对话</div>
           </div>
-          <button onClick={(e) => { e.stopPropagation(); onClose(); }} style={{ all: 'unset', cursor: 'pointer', padding: 8, color: 'var(--et-mute)' }}>×</button>
+          <button onClick={(e) => { e.stopPropagation(); onClose(); }} style={{
+            all: 'unset', cursor: 'pointer', padding: '8px 12px', borderRadius: 8,
+            color: 'var(--et-mute)', background: 'var(--et-paper-2)',
+            border: '0.5px solid var(--et-line-2)', fontSize: 12, fontWeight: 600,
+          }}>关闭</button>
         </div>
         {loading && <div className="et-meta" style={{ textAlign: 'center', padding: 40 }}>加载中…</div>}
         {!loading && msgs && (
-          <>
+          <div style={{ padding: '16px 24px 24px' }}>
             <div className="et-meta" style={{ marginBottom: 12, color: 'var(--et-mute)' }}>
               显示最早 {msgs.length} 条 · 共 {friend.count.toLocaleString()} 条
               {friend.isGroup && (
@@ -520,7 +577,7 @@ function MessagesDrawer({ open, friend, onClose }: { open: boolean; friend: Frie
                 );
               })}
             </div>
-          </>
+          </div>
         )}
       </div>
     </div>
@@ -550,6 +607,8 @@ export function FriendPage({ friendId, onBack, onOpenFriend }: Props) {
   const [tab, setTab] = useState<FriendTab>('story');
   const [agentInvoke, setAgentInvoke] = useState<string | null>(null);  // 'claude' | 'codex' etc, null = idle
   const [reportOpen, setReportOpen] = useState(false);
+  const [analysisStream, setAnalysisStream] = useState<{ output: string; stage: string; elapsed: number } | null>(null);
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
 
   useEffect(() => {
     setError(null);
@@ -562,6 +621,68 @@ export function FriendPage({ friendId, onBack, onOpenFriend }: Props) {
       .then(setMoments)
       .catch(() => {})
       .finally(() => setMomentsLoading(false));
+  }, [friendId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let pollId: number | null = null;
+
+    async function refreshFriend() {
+      const d = await getFriend(friendId);
+      if (cancelled) return;
+      setFriend(d);
+      setStats(d.stats);
+    }
+
+    async function tick() {
+      try {
+        const s = await getInvokeStream(friendId);
+        if (cancelled) return;
+        if (s.running) {
+          setAnalysisError(null);
+          setAnalysisStream({ output: s.output || '', stage: s.stage || 'running', elapsed: s.elapsed || 0 });
+          return;
+        }
+        if (s.error) {
+          setAnalysisError(s.error);
+          setAnalysisStream({ output: s.output || '', stage: s.stage || 'failed', elapsed: s.elapsed || 0 });
+          if (pollId != null) window.clearInterval(pollId);
+          return;
+        }
+        if (s.stage === 'saved') {
+          await refreshFriend();
+        }
+        setAnalysisStream(null);
+        setAnalysisError(null);
+        if (pollId != null) window.clearInterval(pollId);
+      } catch {
+        // Keep the page usable if the progress endpoint is briefly unavailable.
+      }
+    }
+
+    getInvokeStream(friendId)
+      .then(s => {
+        if (cancelled) return;
+        if (s.running) {
+          setAnalysisError(null);
+          setAnalysisStream({ output: s.output || '', stage: s.stage || 'running', elapsed: s.elapsed || 0 });
+          pollId = window.setInterval(tick, 2000);
+        } else if (s.error) {
+          setAnalysisError(s.error);
+          setAnalysisStream({ output: s.output || '', stage: s.stage || 'failed', elapsed: s.elapsed || 0 });
+        } else if (s.stage === 'saved') {
+          refreshFriend().catch(() => {});
+        } else {
+          setAnalysisStream(null);
+          setAnalysisError(null);
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+      if (pollId != null) window.clearInterval(pollId);
+    };
   }, [friendId]);
 
   async function handleExportChat() {
@@ -604,6 +725,9 @@ export function FriendPage({ friendId, onBack, onOpenFriend }: Props) {
       {tab === 'story' && (
       <div style={{ padding: '24px 28px 32px', display: 'flex', flexDirection: 'column', gap: 18, maxWidth: 1180, margin: '0 auto' }}>
         <PersonCard friend={friend} stats={stats} />
+        {(analysisStream || analysisError) && (
+          <AnalysisProgressCard stream={analysisStream} error={analysisError} />
+        )}
         <AIReportCard friend={friend}
           onView={() => setReportOpen(true)}
           onRerun={() => setExportOpen(true)} />

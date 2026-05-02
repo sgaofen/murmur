@@ -329,6 +329,29 @@ Recent validation on Mac:
   - 25 pair reports,
   - 57 total reports.
 
+Additional Mac fix batch on 2026-05-02:
+
+- Friend detail now attaches fresh `aiReport` metadata at response time, even
+  when the base friend payload came from memory/disk cache. This fixes the case
+  where batch-generated reports existed on disk but `/api/friend/{wxid}` still
+  returned no `aiReport`.
+- Graph friend side panel and self-friend edge panel now resume
+  `/api/agents/invoke-stream` progress after leaving and re-entering the page.
+- Friend profile pages now show an inline `AI 分析进度` card for in-flight
+  single-friend analysis jobs after re-entry, then refresh the saved report once
+  the stream reaches `saved`.
+- The full chat drawer now keeps a sticky close button visible while scrolling
+  and supports `Escape` to close, preventing users from getting trapped in long
+  histories.
+- Browser verification:
+  - `Дари рай / wxid_pc4rk9lqtzft22` now shows its saved report on the friend
+    page, graph node panel, and `你 ↔ Дари рай` private edge panel.
+  - The private edge panel shows the raw `346 条` count and report links.
+  - The full chat drawer opens and closes with both the sticky button and Esc.
+  - A real Codex CLI run for `QQ邮箱提醒 / qqmail` resumed progress after direct
+    navigation back to `#friend/qqmail`, then cleared the progress card and kept
+    the generated report visible after `stage=saved`.
+
 ## Known Mac Gaps / Next Coordination Points
 
 1. Decide whether to port Windows `pair_direct_evidence()` as a hard API gate.
