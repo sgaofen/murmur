@@ -65,6 +65,17 @@ const TIER_COLORS: Record<string, string> = {
   E: '#C8BFAB',
 };
 
+const EDGE_ORDER: Record<string, number> = {
+  private: 0,
+  co_group: 1,
+  co_active: 2,
+  mention: 3,
+  moments_cross: 4,
+  dm_inferred: 5,
+  mutual_reply: 6,
+  close_pair: 7,
+};
+
 interface Projected extends GraphNode {
   proj: { x: number; y: number; depth: number };
 }
@@ -86,7 +97,7 @@ function project(
 ) {
   // Rotate around Y axis (yaw)
   const cosY = Math.cos(rotY), sinY = Math.sin(rotY);
-  let x = p.x * cosY - p.z * sinY;
+  const x = p.x * cosY - p.z * sinY;
   let z = p.x * sinY + p.z * cosY;
   let y = p.y;
   // Rotate around X axis (pitch)
@@ -127,10 +138,10 @@ export function GraphView({ data, dark = false, selected, selectedEdge = null, o
   const [userInteracted, setUserInteracted] = useState(false);
   const [dragging, setDragging] = useState(false);
   const dragRef = useRef<{ x: number; y: number; rotX: number; rotY: number; panX: number; panY: number; mode: 'rotate' | 'pan' } | null>(null);
+  const lastHoverHitTestAtRef = useRef(0);
 
   const [hover, setHover] = useState<string | null>(null);
   const [hoverEdge, setHoverEdge] = useState<{ source: string; target: string } | null>(null);
-  const [tick, setTick] = useState(0);
 
   // Auto-rotate (paused when user interacts OR a panel is open — so the edge/node
   // they clicked doesn't drift away while reading the side panel)
@@ -185,13 +196,6 @@ export function GraphView({ data, dark = false, selected, selectedEdge = null, o
     return () => window.removeEventListener('keydown', onKey);
   }, [onSelect, onSelectEdge]);
 
-  useEffect(() => {
-    let raf = 0;
-    const loop = () => { setTick(Date.now()); raf = requestAnimationFrame(loop); };
-    raf = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(raf);
-  }, []);
-
   function handlePointerDown(e: ReactPointerEvent<SVGSVGElement>) {
     setUserInteracted(true);
     setDragging(true);
@@ -216,6 +220,10 @@ export function GraphView({ data, dark = false, selected, selectedEdge = null, o
     // Not dragging — update node/edge hover preview so user can SEE what their
     // click would select before committing. Hit-tested in screen coords using
     // the same logic as handlePointerUp.
+    const now = performance.now();
+    if (now - lastHoverHitTestAtRef.current < 32) return;
+    lastHoverHitTestAtRef.current = now;
+
     const svg = e.currentTarget as SVGSVGElement;
     const rect = svg.getBoundingClientRect();
     const sx = (e.clientX - rect.left) * (W / rect.width);
@@ -284,6 +292,7 @@ export function GraphView({ data, dark = false, selected, selectedEdge = null, o
   }
 
   function handlePointerLeave() {
+    lastHoverHitTestAtRef.current = 0;
     setHover(null);
     setHoverEdge(null);
   }
@@ -383,7 +392,7 @@ export function GraphView({ data, dark = false, selected, selectedEdge = null, o
 
   const projNodes: Projected[] = useMemo(
     () => data.nodes.map(n => ({ ...n, proj: project(n, rotY, rotX, zoom, pan.x, pan.y, W, H) })),
-    [data.nodes, rotY, rotX, zoom, pan.x, pan.y]
+    [data.nodes, rotY, rotX, zoom, pan.x, pan.y, H]
   );
   const projById = useMemo(() => Object.fromEntries(projNodes.map(n => [n.id, n])), [projNodes]);
   const sortedNodes = useMemo(() => [...projNodes].sort((a, b) => a.proj.depth - b.proj.depth), [projNodes]);
@@ -403,13 +412,12 @@ export function GraphView({ data, dark = false, selected, selectedEdge = null, o
     return new Set([selectedEdge.source, selectedEdge.target]);
   }, [selectedEdge]);
 
-  const edgeOrder: Record<string, number> = { private: 0, co_group: 1, co_active: 2, mention: 3, moments_cross: 4, dm_inferred: 5, mutual_reply: 6, close_pair: 7 };
   const sortedEdges = useMemo(
     () => [...data.edges].sort((a, b) => {
       const aSelected = sameEdge(a, selectedEdge) ? 1 : 0;
       const bSelected = sameEdge(b, selectedEdge) ? 1 : 0;
       if (aSelected !== bSelected) return aSelected - bSelected;
-      return (edgeOrder[a.type] ?? 0) - (edgeOrder[b.type] ?? 0);
+      return (EDGE_ORDER[a.type] ?? 0) - (EDGE_ORDER[b.type] ?? 0);
     }),
     [data.edges, selectedEdge]
   );
@@ -552,16 +560,26 @@ export function GraphView({ data, dark = false, selected, selectedEdge = null, o
 
         {/* Self ping ripples */}
         <g>
-          {[0, 1, 2].map(i => {
-            const offset = ((tick / 1500) + i * 0.33) % 1;
-            return (
-              <circle key={i}
-                cx={W / 2} cy={H / 2} r={20 + offset * 220}
-                fill="none" stroke="#FF6B47"
-                strokeOpacity={(1 - offset) * 0.35}
-                strokeWidth="1" />
-            );
-          })}
+          {[0, 1, 2].map(i => (
+            <circle key={i}
+              cx={W / 2} cy={H / 2} r="20"
+              fill="none" stroke="#FF6B47"
+              strokeOpacity="0.35"
+              strokeWidth="1">
+              <animate
+                attributeName="r"
+                values="20;240"
+                dur="4.5s"
+                begin={`${i * 1.5}s`}
+                repeatCount="indefinite" />
+              <animate
+                attributeName="stroke-opacity"
+                values="0.35;0"
+                dur="4.5s"
+                begin={`${i * 1.5}s`}
+                repeatCount="indefinite" />
+            </circle>
+          ))}
         </g>
 
         {/* Nodes */}

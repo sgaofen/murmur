@@ -3536,6 +3536,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     return self._send_json(disk["_payload"])
                 # Reuse the cached "all" graph if we already built it
                 graph = get_relationship_graph_cached(self.store, scope="all", top_n=600)
+                node_lookup = {n["id"]: n for n in graph["nodes"]}
                 connections = []
                 for e in graph["edges"]:
                     other = None
@@ -3547,7 +3548,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                         continue
                     if other == "self" or other == wxid:
                         continue
-                    other_node = next((n for n in graph["nodes"] if n["id"] == other), None)
+                    other_node = node_lookup.get(other)
                     other_name = other_node["name"] if other_node else other
                     connections.append({
                         "wxid": other,
@@ -4994,20 +4995,13 @@ def build_relationship_graph(store: EchoStore, *,
         if cnt > 0:
             private_strength[s.username] = cnt
 
-    # Step 3: Co-group edges (light signal — same group)
-    co_group: dict[tuple[str, str], list[str]] = {}
-    for group_username, members in group_members.items():
-        members_list = [w for w in members if w in contacts]
-        for i in range(len(members_list)):
-            for j in range(i + 1, len(members_list)):
-                a, b = sorted([members_list[i], members_list[j]])
-                co_group.setdefault((a, b), []).append(group_username)
-
     # Step 4: Aggregate per-person group activity
     msgs_in_groups: dict[str, int] = {}
+    groups_per_friend: dict[str, int] = {}
     for g, per_user in group_msg_count.items():
         for w, n in per_user.items():
             msgs_in_groups[w] = msgs_in_groups.get(w, 0) + n
+            groups_per_friend[w] = groups_per_friend.get(w, 0) + 1
 
     # Step 5: Pull SNS (Moments) signals
     sns_per_friend = get_sns_signals_cached(store)
@@ -5093,7 +5087,7 @@ def build_relationship_graph(store: EchoStore, *,
         c = contacts.get(w)
         priv = private_strength.get(w, 0)
         gmsgs = msgs_in_groups.get(w, 0)
-        ngroups = sum(1 for ms in group_members.values() if w in ms)
+        ngroups = groups_per_friend.get(w, 0)
         sns = sns_per_friend.get(w, {}) if sns_per_friend else {}
         moments_back = (sns.get("they_liked_you", 0) + sns.get("they_commented_you", 0))
         moments_out = (sns.get("you_liked_them", 0) + sns.get("you_commented_them", 0))
@@ -5128,47 +5122,76 @@ def build_relationship_graph(store: EchoStore, *,
             "combined_score": round(combined),
         })
 
+    # Cap nodes before constructing edges. Edges never influence node scoring, so
+    # this avoids creating thousands of large-group pair edges that the top-N
+    # filter would discard anyway.
+    self_node = next((n for n in nodes if n.get("is_self")), None)
+    other_nodes = [n for n in nodes if not n.get("is_self")]
+    other_nodes.sort(key=lambda n: -n.get("combined_score", 0))
+    if top_n > 0:
+        other_nodes = other_nodes[:top_n]
+    nodes = ([self_node] if self_node else []) + other_nodes
+    node_id_set = {n["id"] for n in nodes}
+
     # Step 7: Edges
     edges = []
+    edge_index: dict[tuple[str, str], dict] = {}
+
+    def _pair_key(a: str, b: str) -> tuple[str, str]:
+        return tuple(sorted([a, b]))
+
+    def _add_edge(edge: dict) -> dict:
+        edges.append(edge)
+        if edge["source"] != "self" and edge["target"] != "self":
+            edge_index[_pair_key(edge["source"], edge["target"])] = edge
+        return edge
+
     # private (self ↔ friend)
     for w, cnt in private_strength.items():
         if w == store.me:
             continue
-        edges.append({"source": "self", "target": w, "type": "private", "weight": cnt})
+        if w not in node_id_set:
+            continue
+        _add_edge({"source": "self", "target": w, "type": "private", "weight": cnt})
 
     # mutual_reply (HIGH-VALUE: real friend-to-friend interaction in groups)
-    seen_strong = set()
     for (a, b), n in mutual_reply.items():
         if a == store.me or b == store.me or a not in contacts or b not in contacts:
             continue
+        if a not in node_id_set or b not in node_id_set:
+            continue
         if n < 3:
             continue  # filter out trivial co-presence
-        edges.append({
+        _add_edge({
             "source": a, "target": b, "type": "mutual_reply", "weight": n,
         })
-        seen_strong.add((a, b))
 
     # mention edges (when YOU and A talked ABOUT B — strongest LLM-inferable signal of A↔B)
-    seen_mention = set()
     for pair_key, rec in mention_pairs.items():
         a, b = rec["wxid_a"], rec["wxid_b"]
         cnt = rec["total_mentions"]
+        if a not in node_id_set or b not in node_id_set:
+            continue
         # If pair already has mutual_reply edge: ATTACH mention_count instead of dropping
-        attached = False
-        for e in edges:
-            if {e["source"], e["target"]} == {a, b}:
-                e["mention_count"] = cnt
-                attached = True
-                break
-        if attached:
+        existing = edge_index.get(_pair_key(a, b))
+        if existing is not None:
+            existing["mention_count"] = cnt
             continue
         # Else add mention edge
         weight = min(1.0, cnt / 30.0)
-        edges.append({
+        _add_edge({
             "source": a, "target": b, "type": "mention", "weight": weight,
             "mention_count": cnt,
         })
-        seen_mention.add(tuple(sorted([a, b])))
+
+    # Co-group edges (light signal — same group). Build this after top-N node
+    # selection so large groups only produce pairs that can actually render.
+    co_group: dict[tuple[str, str], list[str]] = {}
+    for group_username, members in group_members.items():
+        members_list = sorted(w for w in members if w in node_id_set and w != "self")
+        for i in range(len(members_list)):
+            for j in range(i + 1, len(members_list)):
+                co_group.setdefault((members_list[i], members_list[j]), []).append(group_username)
 
     # co_group (light: just same group, no actual interaction)
     for (a, b), groups in co_group.items():
@@ -5177,59 +5200,40 @@ def build_relationship_graph(store: EchoStore, *,
         if len(groups) < 2:
             continue
         # Attach to existing edge if any (so mutual_reply also shows shared_group_count)
-        attached = False
-        for e in edges:
-            if {e["source"], e["target"]} == {a, b}:
-                e["shared_group_count"] = len(groups)
-                attached = True
-                break
-        if attached:
+        existing = edge_index.get(_pair_key(a, b))
+        if existing is not None:
+            existing["shared_group_count"] = len(groups)
             continue
-        edges.append({
+        _add_edge({
             "source": a, "target": b, "type": "co_group",
             "shared_group_count": len(groups), "weight": len(groups),
         })
 
     # moments_cross — A and B interacted on each other's Moments (strong evidence,
     # entirely independent of your private/group chats).
-    seen_pairs = {tuple(sorted([e["source"], e["target"]])) for e in edges
-                  if e["source"] != "self" and e["target"] != "self"}
     for (a, b), s in ff_moments.items():
         if a == store.me or b == store.me or a not in contacts or b not in contacts:
+            continue
+        if a not in node_id_set or b not in node_id_set:
             continue
         total = s["a_liked_b"] + s["a_commented_b"] + s["b_liked_a"] + s["b_commented_a"]
         if total < 2:
             continue
-        canon = tuple(sorted([a, b]))
         # If pair already has another edge, augment its meta (and keep the edge)
-        boosted = False
-        for e in edges:
-            if {e["source"], e["target"]} == {a, b}:
-                e["moments_cross"] = total
-                boosted = True
-                break
-        if boosted:
+        existing = edge_index.get(_pair_key(a, b))
+        if existing is not None:
+            existing["moments_cross"] = total
             continue
         # Otherwise add a new edge of type moments_cross
-        edges.append({
+        _add_edge({
             "source": a, "target": b, "type": "moments_cross",
             "weight": min(1.0, total / 30.0),
             "moments_cross": total,
             "moments_a_to_b": s["a_liked_b"] + s["a_commented_b"],
             "moments_b_to_a": s["b_liked_a"] + s["b_commented_a"],
         })
-        seen_pairs.add(canon)
 
-    # Cap nodes to top_n by combined_score (keep self + top friends)
-    self_node = next((n for n in nodes if n.get("is_self")), None)
-    other_nodes = [n for n in nodes if not n.get("is_self")]
-    other_nodes.sort(key=lambda n: -n.get("combined_score", 0))
-    if top_n > 0:
-        other_nodes = other_nodes[:top_n]
-    nodes = ([self_node] if self_node else []) + other_nodes
-
-    # Drop edges to filtered-out nodes
-    node_id_set = {n["id"] for n in nodes}
+    # Drop edges to filtered-out nodes as a final defensive pass.
     edges = [e for e in edges
              if e["source"] in node_id_set and e["target"] in node_id_set]
 

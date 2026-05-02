@@ -84,6 +84,31 @@ Pulled from Mac in this pass:
 - Mac's latest `docs/AGENT_SYNC_MAC.md` is mirrored here so the Mac/Windows
   agents can compare from the same branch snapshot.
 
+## 2026-05-02 Mac graph-performance pass
+
+Reviewed Mac commits `2fb6596`, `a78426f`, and `16d8501`.
+
+Pulled into Windows:
+- Graph idle rendering no longer drives a React `requestAnimationFrame`
+  `setState` loop just for the center ripple; the ripple is now SVG-native
+  animation, reducing idle CPU while the graph is open.
+- Graph hover hit testing is throttled to roughly 30 fps so dense graphs do not
+  run full node/edge hit scans for every pointer event.
+- Graph edge construction now caps visible nodes before generating co-group
+  pair edges. Node scoring is unchanged, but large groups no longer generate
+  thousands of friend-friend edges that would be dropped after the top-N filter.
+- Existing pair edges are indexed by sorted wxid pair, so mention/co-group/
+  moments metadata attaches in O(1) instead of repeatedly scanning the edge
+  array.
+- Friend connection lookup builds a node map before resolving names, avoiding a
+  linear node scan per connection.
+
+Kept Windows-specific:
+- Windows still uses `get_friend_mentions_cached()` and the `graph_v3` /
+  `pairpack_v3` cache semantics.
+- The previous selected-edge glow, selected friend retention, and privacy hook
+  path remain unchanged.
+
 ## Latest Windows sync status
 
 Windows has now absorbed the useful Mac relationship-analysis work in commit
