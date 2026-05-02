@@ -116,7 +116,14 @@ npm install -g @openai/codex               # 可选：用 Codex CLI
 ```
 
 然后在某个朋友页 → 「导出 AI 分析包」 → 顶部会出现「让 Claude Code 直接分析」选项。
-Reports 页面也可以跑批量分析：小样本自检、Top N、全部朋友、以及按关系图权重补全朋友间关系。
+Reports 页面也可以跑批量分析：先选 Claude / Codex / 双引擎对照，再选并发速度（1 / 2 / 4 路），然后点小样本自检、Top N、全部朋友，或按关系图权重补全朋友间关系。双引擎会同时跑 Claude 和 Codex，并在报告文件名追加 `__claude` / `__codex`，避免互相覆盖。
+
+批量报告会把这些上下文喂给 LLM：
+- 你和朋友的私聊时间分布样本、非文本互动（语音 / 图片 / 视频 / 通话）样本；
+- 朋友在共同群聊里的完整历史抽样，不只截前几千条；
+- 你和其他朋友聊到这个人的提及证据；
+- 你和朋友的朋友圈互动明细，以及朋友和朋友之间的朋友圈互动；
+- 朋友间关系报告会同时看提及、共同群聊直接接话、朋友圈互评，而不是只靠聊天量。
 
 Codex CLI 默认用 `gpt-5.2`，避免旧 CLI 默认模型过新导致报错。需要覆盖时：
 
@@ -131,6 +138,16 @@ MURMUR_CODEX_MODEL=gpt-5.4 npm run dev
 python3.12 etcli.py serve --port 9100 --data-dir ~/Documents/Murmur/decrypted/wxid_xxx
 ```
 显式传 `--data-dir`，看具体报错。
+
+### 微信数据目录不在默认位置
+如果 WeChat 的 `xwechat_files` 放在外接盘、迁移目录或别的用户目录，可以先指定源目录：
+
+```bash
+MURMUR_WECHAT_ROOT=/path/to/xwechat_files python3.12 paths.py
+MURMUR_WECHAT_ROOT=/path/to/xwechat_files python3.12 etcli.py serve --port 9100
+```
+
+`MURMUR_WECHAT_ROOT` 也可以直接指向某个 `wxid_*/` 账号目录。
 
 ### 前端报「连不上后端」
 - 确认后端跑了：`curl http://127.0.0.1:9100/api/info`

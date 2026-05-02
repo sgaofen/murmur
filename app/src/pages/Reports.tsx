@@ -14,7 +14,9 @@ export function ReportsPage({ onBack }: Props) {
   const [active, setActive] = useState<{ path: string; content: string } | null>(null);
   const [activeLoading, setActiveLoading] = useState(false);
   const [agents, setAgents] = useState<LocalAgent[]>([]);
-  const [batch, setBatch] = useState<{ pid: number; log_path: string } | null>(null);
+  const [selectedCli, setSelectedCli] = useState<'claude' | 'codex' | 'both' | ''>('');
+  const [parallel, setParallel] = useState(2);
+  const [batch, setBatch] = useState<{ pid: number; log_path: string; pids?: number[]; log_paths?: string[] } | null>(null);
   const [batchStatus, setBatchStatus] = useState<BatchStatus | null>(null);
   const [batchOpen, setBatchOpen] = useState(false);
 
@@ -23,6 +25,14 @@ export function ReportsPage({ onBack }: Props) {
     getAgents().then(setAgents).catch(() => { /* no local agents available */ });
   }, []);
 
+  useEffect(() => {
+    if (selectedCli || agents.length === 0) return;
+    const preferred = agents.find(a => a.cli === 'claude') || agents.find(a => a.cli === 'codex') || agents[0];
+    if (preferred?.cli === 'claude' || preferred?.cli === 'codex') {
+      setSelectedCli(preferred.cli);
+    }
+  }, [agents, selectedCli]);
+
   // Poll batch status while running
   useEffect(() => {
     if (!batch) return;
@@ -30,7 +40,7 @@ export function ReportsPage({ onBack }: Props) {
     const tick = async () => {
       if (stop) return;
       try {
-        const s = await getBatchStatus(batch.pid, batch.log_path);
+        const s = await getBatchStatus(batch.pid, batch.log_path, batch.pids, batch.log_paths);
         setBatchStatus(s);
         if (!s.running) {
           // Refresh report list
@@ -59,14 +69,18 @@ export function ReportsPage({ onBack }: Props) {
       alert('没检测到 claude / codex CLI，请先安装 (npm install -g @anthropic-ai/claude-code)');
       return;
     }
-    const cli = (agents[0].cli as 'claude' | 'codex');
+    if (selectedCli !== 'claude' && selectedCli !== 'codex' && selectedCli !== 'both') {
+      alert('请选择 Claude、Codex 或双引擎');
+      return;
+    }
+    const cli = selectedCli;
     try {
       const r = await startBatch({ cli, mode, top, top_pairs, sample, parallel, force });
       if (!r.ok || !r.pid || !r.log_path) {
         alert('启动失败：' + (r.error || ''));
         return;
       }
-      setBatch({ pid: r.pid, log_path: r.log_path });
+      setBatch({ pid: r.pid, log_path: r.log_path, pids: r.pids, log_paths: r.log_paths });
       setBatchStatus({
         running: true,
         n_friends: 0,
@@ -221,6 +235,9 @@ ${sections}
   const issueText = batchStatus && (batchStatus.crashed || (batchStatus.failures || 0) > 0 || (batchStatus.skipped || 0) > 0)
     ? `${batchStatus.crashed ? '异常退出 · ' : ''}失败 ${batchStatus.failures || 0} · 跳过 ${batchStatus.skipped || 0}`
     : '';
+  const hasClaude = agents.some(a => a.cli === 'claude');
+  const hasCodex = agents.some(a => a.cli === 'codex');
+  const hasBoth = hasClaude && hasCodex;
 
   return (
     <div style={{ position: 'fixed', inset: 0, display: 'flex',
@@ -264,14 +281,29 @@ ${sections}
               border: '0.5px solid var(--et-line-2)', borderRadius: 8,
               fontSize: 11, color: 'var(--et-ink-soft)', lineHeight: 1.6,
             }}>
+              <div style={{ fontWeight: 600, marginBottom: 6 }}>模型：</div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6, marginBottom: 10 }}>
+                <ChoiceBtn label="Claude" active={selectedCli === 'claude'} disabled={!hasClaude || batchRunning}
+                  sub={hasClaude ? '已检测' : '未安装'} onClick={() => setSelectedCli('claude')} />
+                <ChoiceBtn label="Codex" active={selectedCli === 'codex'} disabled={!hasCodex || batchRunning}
+                  sub={hasCodex ? '已检测' : '未安装'} onClick={() => setSelectedCli('codex')} />
+                <ChoiceBtn label="双引擎" active={selectedCli === 'both'} disabled={!hasBoth || batchRunning}
+                  sub={hasBoth ? '对照跑' : '需两者'} onClick={() => setSelectedCli('both')} />
+              </div>
+              <div style={{ fontWeight: 600, marginBottom: 6 }}>速度：</div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6, marginBottom: 10 }}>
+                <ChoiceBtn label="稳妥" active={parallel === 1} disabled={batchRunning} sub="1 路" onClick={() => setParallel(1)} />
+                <ChoiceBtn label="标准" active={parallel === 2} disabled={batchRunning} sub="2 路" onClick={() => setParallel(2)} />
+                <ChoiceBtn label="快跑" active={parallel === 4} disabled={batchRunning} sub="4 路" onClick={() => setParallel(4)} />
+              </div>
               <div style={{ fontWeight: 600, marginBottom: 8 }}>选个量级：</div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 <BatchBtn label="小样本自检" sub="2 朋友 + 2 对 · sample 12" onClick={() => launchBatch('top', 2, 2, 12, 1, true)} disabled={batchRunning} />
-                <BatchBtn label="Top 10 朋友 + 10 对" sub="稳妥跑一轮" onClick={() => launchBatch('top', 10, 10)} disabled={batchRunning} />
-                <BatchBtn label="Top 30 朋友 + 30 对" sub="≈ 1.5 小时" onClick={() => launchBatch('top', 30, 30)} disabled={batchRunning} />
-                <BatchBtn label="全部朋友 + Top 30 对" sub="覆盖所有本人关系" onClick={() => launchBatch('all', 0, 30)} disabled={batchRunning} primary />
-                <BatchBtn label="全部朋友 + 全部朋友间" sub="最完整 · token 很多" onClick={() => launchBatch('all', 0, 0)} disabled={batchRunning} />
-                <BatchBtn label="只朋友间 (按图权重)" sub="补全 pair 报告" onClick={() => launchBatch('pairs-graph', 0, 40)} disabled={batchRunning} />
+                <BatchBtn label="Top 10 朋友 + 10 对" sub="稳妥跑一轮" onClick={() => launchBatch('top', 10, 10, 80, parallel)} disabled={batchRunning} />
+                <BatchBtn label="Top 30 朋友 + 30 对" sub="更完整" onClick={() => launchBatch('top', 30, 30, 80, parallel)} disabled={batchRunning} />
+                <BatchBtn label="全部朋友 + Top 30 对" sub="覆盖本人关系" onClick={() => launchBatch('all', 0, 30, 80, parallel)} disabled={batchRunning} primary />
+                <BatchBtn label="全部朋友 + 全部朋友间" sub="最完整" onClick={() => launchBatch('all', 0, 0, 80, parallel)} disabled={batchRunning} />
+                <BatchBtn label="只朋友间 (按图权重)" sub="补 pair 报告" onClick={() => launchBatch('pairs-graph', 0, 40, 80, parallel)} disabled={batchRunning} />
               </div>
               {batch?.pid && batchStatus && (
                 <div style={{ marginTop: 10, padding: '8px 10px', background: 'var(--et-paper)',
@@ -347,6 +379,26 @@ ${sections}
 
       <style>{MURMUR_MD_CSS}</style>
     </div>
+  );
+}
+
+function ChoiceBtn({ label, sub, active, disabled, onClick }: {
+  label: string; sub: string; active: boolean; disabled?: boolean; onClick: () => void;
+}) {
+  return (
+    <button onClick={onClick} disabled={disabled} style={{
+      all: 'unset', cursor: disabled ? 'not-allowed' : 'pointer',
+      padding: '7px 8px', borderRadius: 6,
+      background: active ? 'var(--et-ink)' : 'var(--et-paper)',
+      color: active ? '#fff' : 'var(--et-ink)',
+      border: active ? 'none' : '0.5px solid var(--et-line-2)',
+      opacity: disabled ? 0.4 : 1,
+      boxSizing: 'border-box',
+      minHeight: 44,
+    }}>
+      <div style={{ fontSize: 12, fontWeight: 700, lineHeight: 1.2 }}>{label}</div>
+      <div style={{ fontSize: 10, opacity: 0.72, marginTop: 3 }}>{sub}</div>
+    </button>
   );
 }
 

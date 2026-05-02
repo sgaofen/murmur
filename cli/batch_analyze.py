@@ -47,7 +47,7 @@ except Exception:
 
 CST = timezone(timedelta(hours=8))
 
-ETCLI_URL = os.environ.get("ETCLI_URL", "http://127.0.0.1:9100")
+ETCLI_URL = os.environ.get("ETCLI_URL", "http://127.0.0.1:9100").rstrip("/")
 NPM_BIN = Path(os.environ.get("APPDATA") or "") / "npm"
 
 
@@ -92,6 +92,18 @@ def _safe_filename(name: str) -> str:
     return re.sub(r'[<>:"/\\|?*\s]+', "_", name)[:80]
 
 
+def _clean_agent_output(cli: str, output: str) -> str:
+    out = (output or "").strip()
+    if cli == "codex":
+        banner = re.search(r"(?:^|\n)codex\s*\n", out, flags=re.IGNORECASE)
+        if banner:
+            out = out[banner.end():]
+        tokens = re.search(r"\ntokens used\b", out, flags=re.IGNORECASE)
+        if tokens:
+            out = out[:tokens.start()]
+    return out.strip()
+
+
 def call_agent(cli: str, agent_path: Path, prompt: str, timeout: int = 900) -> tuple[bool, str]:
     """Call agent via stdin pipe (the proven-working approach). Returns (ok, output).
 
@@ -126,16 +138,7 @@ def call_agent(cli: str, agent_path: Path, prompt: str, timeout: int = 900) -> t
                                timeout=timeout, encoding="utf-8", errors="replace",
                                cwd=str(work_dir))
         ok = r.returncode == 0 and len(r.stdout or "") > 100
-        out = r.stdout or ""
-        # Strip codex banner: keep only between "\ncodex\n" and "\ntokens used\n"
-        if cli == "codex" and ok:
-            cidx = out.rfind("\ncodex\n")
-            if cidx > 0:
-                out = out[cidx + len("\ncodex\n"):]
-                tidx = out.find("\ntokens used\n")
-                if tidx > 0:
-                    out = out[:tidx]
-                out = out.strip()
+        out = _clean_agent_output(cli, r.stdout or "") if ok else (r.stdout or "")
         if r.stderr and not ok:
             out += "\n\n[stderr]\n" + r.stderr
         return ok, out
@@ -175,7 +178,8 @@ def cmd_run(args):
     def process_friend(idx_total: tuple[int, int], f: dict) -> None:
         idx, total = idx_total
         name, wxid = f["name"], f["id"]
-        out_path = friends_dir / f"{idx:02d}_{_safe_filename(name)}.md"
+        suffix = f"__{cli}" if args.tag_cli else ""
+        out_path = friends_dir / f"{idx:02d}_{_safe_filename(name)}{suffix}.md"
         if out_path.exists() and not args.force:
             print(f"  [F {idx}/{total}] {name}: SKIP")
             return
@@ -215,7 +219,8 @@ def cmd_run(args):
         a, b = rec["wxid_a"], rec["wxid_b"]
         an, bn = rec["name_a"], rec["name_b"]
         label = f"{_safe_filename(an)}__{_safe_filename(bn)}"
-        out_path = pairs_dir / f"{idx:02d}_{label}.md"
+        suffix = f"__{cli}" if args.tag_cli else ""
+        out_path = pairs_dir / f"{idx:02d}_{label}{suffix}.md"
         if out_path.exists() and not args.force:
             print(f"  [P {idx}/{total}] {an} ↔ {bn}: SKIP")
             return
@@ -275,21 +280,24 @@ def cmd_run(args):
                 graph_top_n = 0 if args.top_pairs <= 0 else 300
                 graph = _api(f"/api/graph?scope=private&top_n={graph_top_n}")
                 # Build per-pair max-priority edge
-                priority = {"mutual_reply": 4, "mention": 3, "moments_cross": 2, "co_group": 1}
+                priority = {"mutual_reply": 4, "mention": 3, "moments_cross": 2}
                 pair_edges: dict[tuple[str, str], dict] = {}
                 for e in graph.get("edges", []):
                     if e.get("source") == "self" or e.get("target") == "self":
                         continue
+                    if e.get("type") not in priority and not (e.get("mention_count") or e.get("moments_cross")):
+                        continue
                     key = tuple(sorted([e["source"], e["target"]]))
                     cur = pair_edges.get(key)
-                    new_pri = priority.get(e["type"], 0)
-                    cur_pri = priority.get(cur["type"], 0) if cur else -1
+                    new_pri = priority.get(e["type"], 3 if e.get("mention_count") else 2 if e.get("moments_cross") else 0)
+                    cur_pri = (priority.get(cur["type"], 3 if cur.get("mention_count") else 2 if cur.get("moments_cross") else 0)
+                               if cur else -1)
                     if new_pri > cur_pri:
                         pair_edges[key] = e
                 node_lookup = {n["id"]: n.get("name", n["id"]) for n in graph.get("nodes", [])}
                 # Score: priority class × 100 + raw signal magnitude
                 def score(e):
-                    p = priority.get(e["type"], 0)
+                    p = priority.get(e["type"], 3 if e.get("mention_count") else 2 if e.get("moments_cross") else 0)
                     sig = e.get("mention_count") or e.get("moments_cross") or \
                           e.get("shared_group_count") or e["weight"] or 0
                     return p * 1e6 + sig
@@ -307,7 +315,8 @@ def cmd_run(args):
                     })
             else:
                 # Original mention-based mode
-                pairs = _api(f"/api/friend-mentions?top_n=80&min={args.min_mentions}")
+                mention_top_n = 0 if args.top_pairs <= 0 else 80
+                pairs = _api(f"/api/friend-mentions?top_n={mention_top_n}&min={args.min_mentions}")
                 ranked_pairs = sorted(pairs.values(), key=lambda r: -r["total_mentions"])
                 sorted_pairs = ranked_pairs if args.top_pairs <= 0 else ranked_pairs[:args.top_pairs]
         except Exception as e:
@@ -364,6 +373,7 @@ def main():
     p.add_argument("--sample", type=int, default=80, help="Pack sample size (default 80)")
     p.add_argument("--timeout", type=int, default=900, help="Agent timeout per call (default 900s = 15min)")
     p.add_argument("--parallel", type=int, default=5, help="How many agents to run concurrently (default 5)")
+    p.add_argument("--tag-cli", action="store_true", help="Append __claude/__codex to report filenames")
     p.add_argument("--min-mentions", type=int, default=3, help="Min mention count (mention mode only, default 3)")
     p.add_argument("--pair-mode", choices=["mention", "graph"], default="mention",
                     help="How to pick pairs: 'mention' (only pairs cross-mentioned in chat) | "

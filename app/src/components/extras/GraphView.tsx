@@ -111,13 +111,19 @@ interface Props {
   data: GraphData;
   dark?: boolean;
   selected: string | null;
+  selectedEdge?: GraphEdge | null;
   onSelect: (id: string | null) => void;
   onSelectEdge?: (edge: GraphEdge | null) => void;
   autoRotate?: boolean;
   height?: number;
 }
 
-export function GraphView({ data, dark = false, selected, onSelect, onSelectEdge, autoRotate = true, height = 820 }: Props) {
+function edgeKey(edge: Pick<GraphEdge, 'source' | 'target'> | null | undefined): string {
+  if (!edge) return '';
+  return [edge.source, edge.target].sort().join('__');
+}
+
+export function GraphView({ data, dark = false, selected, selectedEdge = null, onSelect, onSelectEdge, autoRotate = true, height = 820 }: Props) {
   const privacy = usePrivacy();
   void privacy;  // re-render when privacy toggle flips (used in label render below)
   const W = 1240, H = height;
@@ -137,7 +143,7 @@ export function GraphView({ data, dark = false, selected, onSelect, onSelectEdge
   // Auto-rotate (paused when user interacts OR a panel is open — so the edge/node
   // they clicked doesn't drift away while reading the side panel)
   useEffect(() => {
-    if (!autoRotate || userInteracted || selected) return;
+    if (!autoRotate || userInteracted || selected || selectedEdge) return;
     let raf = 0;
     const loop = (t: number) => {
       setRotY(t * 0.00008);
@@ -145,7 +151,7 @@ export function GraphView({ data, dark = false, selected, onSelect, onSelectEdge
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, [autoRotate, userInteracted, selected]);
+  }, [autoRotate, userInteracted, selected, selectedEdge]);
 
   // Keyboard nav: arrows = rotate, WASD = pan, +/- = zoom
   useEffect(() => {
@@ -391,6 +397,11 @@ export function GraphView({ data, dark = false, selected, onSelect, onSelectEdge
   );
   const projById = useMemo(() => Object.fromEntries(projNodes.map(n => [n.id, n])), [projNodes]);
   const sortedNodes = useMemo(() => [...projNodes].sort((a, b) => a.proj.depth - b.proj.depth), [projNodes]);
+  const selectedEdgeKey = edgeKey(selectedEdge);
+  const selectedEdgeEndpoints = useMemo(() => {
+    if (!selectedEdge) return new Set<string>();
+    return new Set([selectedEdge.source, selectedEdge.target]);
+  }, [selectedEdge]);
 
   const neighbors = useMemo(() => {
     const s = new Set<string>();
@@ -404,8 +415,13 @@ export function GraphView({ data, dark = false, selected, onSelect, onSelectEdge
   }, [selected, data.edges]);
 
   const sortedEdges = useMemo(
-    () => [...data.edges].sort((a, b) => (EDGE_ORDER[a.type] ?? 0) - (EDGE_ORDER[b.type] ?? 0)),
-    [data.edges]
+    () => [...data.edges].sort((a, b) => {
+      const aSelected = selectedEdgeKey && edgeKey(a) === selectedEdgeKey;
+      const bSelected = selectedEdgeKey && edgeKey(b) === selectedEdgeKey;
+      if (aSelected !== bSelected) return aSelected ? 1 : -1;
+      return (EDGE_ORDER[a.type] ?? 0) - (EDGE_ORDER[b.type] ?? 0);
+    }),
+    [data.edges, selectedEdgeKey]
   );
 
   return (
@@ -477,6 +493,7 @@ export function GraphView({ data, dark = false, selected, onSelect, onSelectEdge
           if (!a || !b) return null;
           const isSelfEdge = e.source === 'self' || e.target === 'self';
           const isHighlight = !!selected && (e.source === selected || e.target === selected);
+          const isSelectedEdge = !!selectedEdgeKey && edgeKey(e) === selectedEdgeKey;
           const isHoverEdge = !!hoverEdge && hoverEdge.source === e.source && hoverEdge.target === e.target;
           const styleByType: Record<string, { stroke: string; width: number; opMul: number; dash: string | null }> = {
             private:      { stroke: '#FF6B47',                                width: 1.2, opMul: 0.5,  dash: e.dashed ? '2 4' : null },
@@ -493,16 +510,17 @@ export function GraphView({ data, dark = false, selected, onSelect, onSelectEdge
           // When a node is selected, drop non-related edges to a faint hint level
           // (was previously hidden entirely — user couldn't hover to compare).
           // Hovered edges always pop above the dim layer.
-          let op = isHoverEdge ? 1 : (isHighlight ? Math.min(1, baseOp * 2.5) : baseOp);
+          let op = isSelectedEdge ? 1 : (isHoverEdge ? 1 : (isHighlight ? Math.min(1, baseOp * 2.5) : baseOp));
           if (selected && !isHighlight && !isHoverEdge) op = baseOp * 0.18;
-          const widthMul = isHoverEdge ? 2.4 : (isHighlight ? 1.8 : 1);
+          const widthMul = isSelectedEdge ? 3.4 : (isHoverEdge ? 2.4 : (isHighlight ? 1.8 : 1));
           if (isSelfEdge) {
             return (
               <line key={i}
                 x1={a.proj.x} y1={a.proj.y} x2={b.proj.x} y2={b.proj.y}
-                stroke={isHoverEdge ? '#FFC857' : s.stroke}
+                stroke={isSelectedEdge || isHoverEdge ? '#FFC857' : s.stroke}
                 strokeOpacity={op}
                 strokeWidth={(s.width * Math.max(0.4, e.weight)) * widthMul}
+                strokeLinecap="round"
                 strokeDasharray={s.dash || undefined} />
             );
           }
@@ -520,9 +538,9 @@ export function GraphView({ data, dark = false, selected, onSelect, onSelectEdge
           return (
             <path key={i}
               d={`M${a.proj.x},${a.proj.y} Q${cx},${cy} ${b.proj.x},${b.proj.y}`}
-              stroke={isHoverEdge ? '#FFC857' : s.stroke}
+              stroke={isSelectedEdge || isHoverEdge ? '#FFC857' : s.stroke}
               strokeOpacity={op}
-              strokeWidth={(s.width * Math.max(0.5, e.weight)) * (isHoverEdge ? 2.6 : (isHighlight ? 2 : 1))}
+              strokeWidth={(s.width * Math.max(0.5, e.weight)) * widthMul}
               strokeDasharray={s.dash || undefined}
               fill="none" strokeLinecap="round" />
           );
@@ -548,6 +566,7 @@ export function GraphView({ data, dark = false, selected, onSelect, onSelectEdge
           const isSel = selected === n.id;
           const isHov = hover === n.id;
           const isNeighbor = neighbors.has(n.id);
+          const isEdgeEndpoint = selectedEdgeEndpoints.has(n.id);
           const dim = !!selected && !isSel && !isNeighbor && !n.is_self;
           const op = dim ? 0.32 : 1;
           const color = n.color || TIER_COLORS[n.tier] || '#9E9583';
@@ -567,6 +586,10 @@ export function GraphView({ data, dark = false, selected, onSelect, onSelectEdge
               {isHov && !isSel && !n.is_self && (
                 <circle cx={n.proj.x} cy={n.proj.y} r={r + 6}
                   fill="none" stroke="#FFC857" strokeWidth="2" opacity="0.85" />
+              )}
+              {isEdgeEndpoint && !n.is_self && (
+                <circle cx={n.proj.x} cy={n.proj.y} r={r + 7}
+                  fill="none" stroke="#FFC857" strokeWidth="2.4" opacity="0.95" />
               )}
               {n.bridge && (
                 <circle cx={n.proj.x} cy={n.proj.y} r={r + 2}
