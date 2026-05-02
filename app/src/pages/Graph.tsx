@@ -125,6 +125,7 @@ function layoutNodes(graph: BackendGraph): GraphData {
          : e.type === 'mention' ? 'mention'
          : e.type === 'moments_cross' ? 'moments_cross'
          : 'co_group') as GraphEdge['type'],
+    raw_weight: e.weight,
     weight: Math.min(1, Math.max(0.05, e.weight / 30)),
     moments_cross: e.moments_cross,
     mention_count: e.mention_count,
@@ -169,7 +170,7 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
   const [loading, setLoading] = useState(true);
   // Batch analysis state
   const [agents, setAgents] = useState<LocalAgent[]>([]);
-  const [batch, setBatch] = useState<{ pid: number; log_path: string } | null>(null);
+  const [batch, setBatch] = useState<{ pid: number; log_path: string; pids?: number[]; log_paths?: string[] } | null>(null);
   const [batchStatus, setBatchStatusState] = useState<BatchStatus | null>(null);
   const [batchPanelOpen, setBatchPanelOpen] = useState(false);
 
@@ -183,7 +184,7 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
     const tick = async () => {
       if (stop) return;
       try {
-        const s = await getBatchStatus(batch.pid, batch.log_path);
+        const s = await getBatchStatus(batch.pid, batch.log_path, batch.pids, batch.log_paths);
         setBatchStatusState(s);
         if (!s.running) return;
       } catch {
@@ -195,15 +196,22 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
     return () => { stop = true; };
   }, [batch]);
 
-  async function startGraphBatch(top_pairs: number, cli: 'claude' | 'codex') {
+  async function startGraphBatch(top_pairs: number, cli: 'claude' | 'codex' | 'both', parallel: number) {
     try {
-      const r = await startBatch({ cli, mode: 'pairs-graph', top: 0, top_pairs, parallel: 2 });
+      const r = await startBatch({ cli, mode: 'pairs-graph', top: 0, top_pairs, parallel });
       if (!r.ok || !r.pid || !r.log_path) {
         alert('启动失败：' + (r.error || ''));
         return;
       }
-      setBatch({ pid: r.pid, log_path: r.log_path });
-      setBatchStatusState({ running: true, n_friends: 0, n_pairs: 0, pairs_done: 0, pairs_total: top_pairs, log_tail: '启动中…' });
+      setBatch({ pid: r.pid, log_path: r.log_path, pids: r.pids, log_paths: r.log_paths });
+      setBatchStatusState({
+        running: true,
+        n_friends: 0,
+        n_pairs: 0,
+        pairs_done: 0,
+        pairs_total: cli === 'both' ? top_pairs * 2 : top_pairs,
+        log_tail: '启动中…',
+      });
       setBatchPanelOpen(true);
     } catch (e: any) {
       alert('错误：' + (e?.message || e));
@@ -326,7 +334,7 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
               : (dark ? '#F4ECDA' : '#1A2B4A'),
             fontWeight: batch && batchStatus?.running ? 600 : 500,
           }} title="一次跑完关系网里所有重要朋友对的 AI 分析">
-            🤖 批量分析关系{batch && batchStatus?.running ? ` (${batchStatus.n_pairs} 已完成)` : ''}
+            🤖 批量分析关系{batch && batchStatus?.running ? ` (${batchStatus.pairs_done ?? batchStatus.n_pairs} 已完成)` : ''}
           </button>
           <button onClick={() => setDark(d => !d)} style={chromeBtn(dark)}>
             {dark ? '☼ 亮' : '☾ 暗'}
@@ -730,8 +738,10 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
   const [analyzeErr, setAnalyzeErr] = useState<string | null>(null);
   const [stream, setStream] = useState<{ output: string; stage: string; elapsed: number } | null>(null);
   const isSelfEdge = edge.source === 'self' || edge.target === 'self';
+  const selfFriendId = edge.source === 'self' ? edge.target : edge.source;
   const meta = EDGE_LABEL[edge.type] || EDGE_LABEL.co_group;
   const otherName = edge.source === 'self' ? bName : aName;
+  const rawWeight = Math.max(0, Math.round(edge.raw_weight ?? edge.weight));
 
   useEffect(() => {
     getAgents().then(setAgents).catch(() => { /* no local agents available */ });
@@ -744,14 +754,19 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
     setShowFullReport(false);
     setAnalyzing('idle');
     setAnalyzeErr(null);
-    if (isSelfEdge) return;
+    if (isSelfEdge) {
+      getFriend(selfFriendId)
+        .then(d => setAIReport(d.aiReport || { available: false }))
+        .catch(() => setAIReport({ available: false }));
+      return;
+    }
     setPackLoading(true);
     getPairPack(edge.source, edge.target)
       .then(r => setPack(r.pack))
       .catch(() => { /* no pair pack available */ })
       .finally(() => setPackLoading(false));
     findPairReport(edge.source, edge.target).then(setAIReport).catch(() => { /* no saved pair report */ });
-  }, [edge.source, edge.target, isSelfEdge]);
+  }, [edge.source, edge.target, isSelfEdge, selfFriendId]);
 
   async function runPairAnalysis(cli: string) {
     setAnalyzing('running');
@@ -799,6 +814,41 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
     }
   }
 
+  async function runSelfAnalysis(cli: string) {
+    setAnalyzing('running');
+    setAnalyzeErr(null);
+    try {
+      const r = await invokeAgent({ cli, wxid: selfFriendId });
+      if (!r.ok) {
+        setAnalyzeErr(r.error || 'failed to queue');
+        setAnalyzing('error');
+        return;
+      }
+      const startedAt = Date.now();
+      const pollId = setInterval(async () => {
+        if (Date.now() - startedAt > 5 * 60 * 1000) {
+          clearInterval(pollId);
+          setAnalyzeErr('5 分钟还没完成');
+          setAnalyzing('error');
+          return;
+        }
+        try {
+          const updated = await getFriend(selfFriendId);
+          if (updated.aiReport?.available) {
+            clearInterval(pollId);
+            setAIReport(updated.aiReport);
+            setAnalyzing('idle');
+          }
+        } catch {
+          // Report may not be visible until the writer flushes it.
+        }
+      }, 5000);
+    } catch (e: any) {
+      setAnalyzeErr(e?.message || String(e));
+      setAnalyzing('error');
+    }
+  }
+
   async function viewFullReport() {
     if (!aiReport?.path) return;
     if (fullReport) { setShowFullReport(true); return; }
@@ -830,18 +880,28 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
       <div style={{ flex: 1, overflow: 'auto', padding: '22px 24px' }}>
         <div className="et-eyebrow">关系连线</div>
         <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 12, fontSize: 18, fontWeight: 600 }}>
-          {!isSelfEdge && onOpenFriend && (
+          {onOpenFriend && (
             <div style={{ position: 'absolute', right: 24, marginTop: -4, display: 'flex', gap: 6 }}>
-              <button onClick={() => onOpenFriend(edge.source)} style={{
-                all: 'unset', cursor: 'pointer', padding: '3px 8px', borderRadius: 6,
-                background: 'var(--et-paper-2)', border: '0.5px solid var(--et-line-2)',
-                fontSize: 10, color: 'var(--et-mute)',
-              }}>📓 看 {aName.length > 8 ? aName.slice(0, 8) + '…' : aName}</button>
-              <button onClick={() => onOpenFriend(edge.target)} style={{
-                all: 'unset', cursor: 'pointer', padding: '3px 8px', borderRadius: 6,
-                background: 'var(--et-paper-2)', border: '0.5px solid var(--et-line-2)',
-                fontSize: 10, color: 'var(--et-mute)',
-              }}>📓 看 {bName.length > 8 ? bName.slice(0, 8) + '…' : bName}</button>
+              {isSelfEdge ? (
+                <button onClick={() => onOpenFriend(selfFriendId)} style={{
+                  all: 'unset', cursor: 'pointer', padding: '3px 8px', borderRadius: 6,
+                  background: 'var(--et-paper-2)', border: '0.5px solid var(--et-line-2)',
+                  fontSize: 10, color: 'var(--et-mute)',
+                }}>📓 完整档案</button>
+              ) : (
+                <>
+                  <button onClick={() => onOpenFriend(edge.source)} style={{
+                    all: 'unset', cursor: 'pointer', padding: '3px 8px', borderRadius: 6,
+                    background: 'var(--et-paper-2)', border: '0.5px solid var(--et-line-2)',
+                    fontSize: 10, color: 'var(--et-mute)',
+                  }}>📓 看 {aName.length > 8 ? aName.slice(0, 8) + '…' : aName}</button>
+                  <button onClick={() => onOpenFriend(edge.target)} style={{
+                    all: 'unset', cursor: 'pointer', padding: '3px 8px', borderRadius: 6,
+                    background: 'var(--et-paper-2)', border: '0.5px solid var(--et-line-2)',
+                    fontSize: 10, color: 'var(--et-mute)',
+                  }}>📓 看 {bName.length > 8 ? bName.slice(0, 8) + '…' : bName}</button>
+                </>
+              )}
             </div>
           )}
           {isSelfEdge ? (
@@ -862,13 +922,13 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
         <div style={{ marginTop: 18, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
           {/* Always-visible interaction breakdown — every dimension at once */}
           {isSelfEdge && edge.type === 'private' && (
-            <Stat label="你们的私聊消息" value={`${edge.weight} 条`} />
+            <Stat label="你们的私聊消息" value={`${rawWeight.toLocaleString()} 条`} />
           )}
-          {!isSelfEdge && edge.type === 'mutual_reply' && (
-            <Stat label="群里互相搭话" value={`${edge.weight} 次`} />
+          {!isSelfEdge && edge.type === 'co_active' && (
+            <Stat label="群里互相搭话" value={`${rawWeight.toLocaleString()} 次`} />
           )}
-          {!isSelfEdge && edge.type !== 'mutual_reply' && edge.weight > 1 && (
-            <Stat label="互动信号强度" value={`${Math.round(edge.weight)}`} />
+          {!isSelfEdge && edge.type !== 'co_active' && rawWeight > 1 && (
+            <Stat label="互动信号强度" value={`${rawWeight.toLocaleString()}`} />
           )}
           {!!edge.moments_cross && (
             <Stat label="朋友圈互动" value={`${edge.moments_cross} 次`} />
@@ -881,6 +941,102 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
           )}
           {edge.type === 'close_pair' && <Stat label="近距离对" value="是" />}
         </div>
+
+        {isSelfEdge && (
+          <div style={{ marginTop: 18 }}>
+            <div className="et-eyebrow">你们的关系档案</div>
+            <div style={{
+              marginTop: 8, padding: '14px 16px', borderRadius: 10,
+              background: 'var(--et-paper-2)', border: '0.5px solid var(--et-line-2)',
+            }}>
+              <div className="et-serif" style={{ fontSize: 13.5, color: 'var(--et-ink-soft)', lineHeight: 1.6 }}>
+                这条线代表你和 {otherName} 的一对一关系。完整分析会合并私聊、共群、朋友圈和时间线。
+              </div>
+              <div style={{ marginTop: 10, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                {onOpenFriend && (
+                  <button onClick={() => onOpenFriend(selfFriendId)} style={{
+                    all: 'unset', cursor: 'pointer',
+                    padding: '7px 14px', borderRadius: 8,
+                    background: 'var(--et-ink)', color: 'var(--et-paper)',
+                    fontSize: 12, fontWeight: 600,
+                  }}>📓 打开完整人物档案</button>
+                )}
+                {aiReport?.available && (
+                  <button onClick={viewFullReport} style={{
+                    all: 'unset', cursor: 'pointer',
+                    padding: '7px 14px', borderRadius: 8,
+                    background: 'var(--et-orange)', color: '#fff',
+                    fontSize: 12, fontWeight: 600,
+                  }}>📖 阅读 AI 关系报告</button>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {isSelfEdge && (
+          <div style={{ marginTop: 18 }}>
+            <div className="et-eyebrow">AI 关系报告</div>
+            {aiReport?.available ? (
+              <>
+                <div className="et-serif" style={{
+                  marginTop: 8, padding: '12px 14px', borderRadius: 10,
+                  background: 'var(--et-orange-soft)', border: '0.5px solid var(--et-orange-2)',
+                  fontSize: 13, lineHeight: 1.7, color: 'var(--et-ink-soft)',
+                  maxHeight: 180, overflow: 'hidden', position: 'relative',
+                }}>
+                  {aiReport.short
+                    ?.replace(/^#[^\n]*\n+/, '').replace(/^>[^\n]*\n+/gm, '')
+                    .replace(/^---+\n+/m, '').replace(/^#{1,6}\s+/gm, '')
+                    .replace(/\*\*([^*]+)\*\*/g, '$1').trim().slice(0, 260)}…
+                </div>
+                <button onClick={viewFullReport} style={{
+                  all: 'unset', cursor: 'pointer', marginTop: 8,
+                  padding: '6px 14px', borderRadius: 8,
+                  background: 'var(--et-ink)', color: 'var(--et-paper)',
+                  fontSize: 12, fontWeight: 600,
+                }}>📖 阅读完整报告</button>
+              </>
+            ) : (
+              <div style={{
+                marginTop: 8, padding: '14px 16px', borderRadius: 10,
+                background: 'var(--et-paper-2)', border: '0.5px dashed var(--et-line-2)',
+              }}>
+                <div className="et-serif" style={{ fontSize: 13.5, color: 'var(--et-mute)', lineHeight: 1.6 }}>
+                  还没让 AI 分析过你和 {otherName} 的关系。
+                </div>
+                {analyzing === 'running' && (
+                  <div className="et-meta" style={{ marginTop: 10, color: 'var(--et-orange-2)' }}>
+                    ⏳ 正在分析…一般 2-3 分钟
+                  </div>
+                )}
+                {analyzing === 'error' && analyzeErr && (
+                  <div className="et-meta" style={{ marginTop: 10, color: 'var(--et-rose)' }}>
+                    失败：{analyzeErr.slice(0, 120)}
+                  </div>
+                )}
+                {analyzing !== 'running' && (
+                  <div style={{ marginTop: 10, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                    {agents.length === 0 ? (
+                      <span className="et-meta" style={{ color: 'var(--et-faint)', fontSize: 11 }}>
+                        没检测到 claude/codex CLI
+                      </span>
+                    ) : (
+                      agents.map(a => (
+                        <button key={a.cli} onClick={() => runSelfAnalysis(a.cli)} style={{
+                          all: 'unset', cursor: 'pointer',
+                          padding: '6px 12px', borderRadius: 8,
+                          background: 'var(--et-orange)', color: '#fff',
+                          fontSize: 12, fontWeight: 600,
+                        }}>🤖 让 {a.name} 分析这段关系</button>
+                      ))
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
 
         {!isSelfEdge && (
           <div style={{ marginTop: 18 }}>
@@ -1000,9 +1156,9 @@ function BatchAnalysisPanel({
 }: {
   dark: boolean;
   agents: LocalAgent[];
-  batch: { pid: number; log_path: string } | null;
+  batch: { pid: number; log_path: string; pids?: number[]; log_paths?: string[] } | null;
   status: BatchStatus | null;
-  onLaunch: (top_pairs: number, cli: 'claude' | 'codex') => void;
+  onLaunch: (top_pairs: number, cli: 'claude' | 'codex' | 'both', parallel: number) => void;
   onReset: () => void;
   onClose: () => void;
 }) {
@@ -1019,9 +1175,10 @@ function BatchAnalysisPanel({
     : '';
   const claudeAgent = agents.find(a => a.cli === 'claude');
   const codexAgent = agents.find(a => a.cli === 'codex');
-  const [selectedCli, setSelectedCli] = useState<'claude' | 'codex'>(
+  const [selectedCli, setSelectedCli] = useState<'claude' | 'codex' | 'both'>(
     claudeAgent ? 'claude' : codexAgent ? 'codex' : 'claude'
   );
+  const [parallel, setParallel] = useState(4);
   return (
     <div style={{
       position: 'absolute', top: 64, right: 28, zIndex: 7, width: 380,
@@ -1062,14 +1219,25 @@ function BatchAnalysisPanel({
               <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
                 <CliPick label="claude" sub="Anthropic" available={!!claudeAgent} selected={selectedCli === 'claude'} onClick={() => setSelectedCli('claude')} dark={dark} />
                 <CliPick label="codex" sub="OpenAI" available={!!codexAgent} selected={selectedCli === 'codex'} onClick={() => setSelectedCli('codex')} dark={dark} />
+                <CliPick label="both" sub="并行双跑" available={!!claudeAgent && !!codexAgent} selected={selectedCli === 'both'} onClick={() => setSelectedCli('both')} dark={dark} />
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
+                <span style={{ fontSize: 11, color: dark ? 'rgba(244,236,218,0.55)' : 'rgba(26,43,74,0.55)' }}>每个 CLI 并发：</span>
+                {[2, 4, 6].map(n => (
+                  <button key={n} onClick={() => setParallel(n)} style={{
+                    all: 'unset', cursor: 'pointer', padding: '3px 8px', borderRadius: 6, fontSize: 11,
+                    background: parallel === n ? (dark ? 'rgba(255,107,71,0.35)' : 'var(--et-orange-soft)') : (dark ? 'rgba(255,255,255,0.06)' : 'rgba(26,43,74,0.06)'),
+                    border: `0.5px solid ${parallel === n ? 'rgba(255,107,71,0.45)' : 'transparent'}`,
+                  }}>{n}</button>
+                ))}
               </div>
               <div style={{ fontSize: 11, color: dark ? 'rgba(244,236,218,0.55)' : 'rgba(26,43,74,0.55)', marginBottom: 8 }}>
                 已有报告自动跳过；想全部重跑去 Reports 页面删 pairs/ 目录。
               </div>
               <div style={{ display: 'grid', gap: 8 }}>
-                <BatchOption label="Top 10 对" sub="约 10 分钟" onClick={() => onLaunch(10, selectedCli)} />
-                <BatchOption label="Top 20 对" sub="约 20 分钟" onClick={() => onLaunch(20, selectedCli)} primary />
-                <BatchOption label="Top 40 对" sub="约 40 分钟" onClick={() => onLaunch(40, selectedCli)} />
+                <BatchOption label="Top 10 对" sub={selectedCli === 'both' ? 'Claude + Codex 并行' : '约 10 分钟'} onClick={() => onLaunch(10, selectedCli, parallel)} />
+                <BatchOption label="Top 20 对" sub={selectedCli === 'both' ? '双模型同时跑' : '约 20 分钟'} onClick={() => onLaunch(20, selectedCli, parallel)} primary />
+                <BatchOption label="Top 40 对" sub={selectedCli === 'both' ? '会生成两套报告' : '约 40 分钟'} onClick={() => onLaunch(40, selectedCli, parallel)} />
               </div>
             </>
           )}
@@ -1084,7 +1252,7 @@ function BatchAnalysisPanel({
           }}>
             <div style={{ fontSize: 18, animation: 'spin 1.4s linear infinite' }}>⏳</div>
             <div>
-              <div style={{ fontWeight: 600, fontSize: 13 }}>正在跑 · 朋友 {friendProgress} · 朋友间 {pairProgress}{issueText}</div>
+              <div style={{ fontWeight: 600, fontSize: 13 }}>正在跑 · 朋友 {friendProgress} · 朋友间报告 {pairProgress}{issueText}</div>
               <div style={{ fontSize: 11, color: dark ? 'rgba(244,236,218,0.65)' : 'rgba(26,43,74,0.65)' }}>
                 关掉这个面板没事，跑在后台{status.last_stage ? ` · ${status.last_stage}` : ''}
               </div>
@@ -1112,7 +1280,7 @@ function BatchAnalysisPanel({
             borderRadius: 8, marginBottom: 10, fontSize: 13,
           }}>
             {pairDone > 0
-              ? <>✓ 跑完了 · 本次 {pairProgress} 对关系档案已完成{issueText}</>
+              ? <>✓ 跑完了 · 本次 {pairProgress} 份朋友间关系档案已完成{issueText}</>
               : <>⚠ 跑完了但 0 份报告 — 看 <code style={{ fontSize: 10 }}>~/Desktop/Murmur/agent_reports/_errors.txt</code> 排错</>
             }
           </div>

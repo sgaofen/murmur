@@ -27,6 +27,7 @@ export interface GraphEdge {
   source: string;
   target: string;
   type: 'private' | 'co_group' | 'co_active' | 'mention' | 'dm_inferred' | 'mutual_reply' | 'close_pair' | 'moments_cross';
+  raw_weight?: number;
   weight: number;
   dashed?: boolean;
   meta?: Record<string, any>;
@@ -465,6 +466,13 @@ export function GraphView({ data, dark = false, selected, selectedEdge = null, o
             <stop offset="0%" stopColor="#FF6B47" stopOpacity="0.5" />
             <stop offset="100%" stopColor="#FF6B47" stopOpacity="0" />
           </radialGradient>
+          <filter id="edge-selected-glow" x="-30%" y="-30%" width="160%" height="160%">
+            <feGaussianBlur stdDeviation="3" result="blur" />
+            <feMerge>
+              <feMergeNode in="blur" />
+              <feMergeNode in="SourceGraphic" />
+            </feMerge>
+          </filter>
         </defs>
 
         {/* Cluster halos */}
@@ -513,15 +521,20 @@ export function GraphView({ data, dark = false, selected, selectedEdge = null, o
           let op = isSelectedEdge ? 1 : (isHoverEdge ? 1 : (isHighlight ? Math.min(1, baseOp * 2.5) : baseOp));
           if (selected && !isHighlight && !isHoverEdge) op = baseOp * 0.18;
           const widthMul = isSelectedEdge ? 3.4 : (isHoverEdge ? 2.4 : (isHighlight ? 1.8 : 1));
+          const edgeStroke = (isSelectedEdge || isHoverEdge) ? '#FFC857' : s.stroke;
+          const edgeFilter = isSelectedEdge ? 'url(#edge-selected-glow)' : undefined;
+          const edgeDash = isSelectedEdge ? undefined : (s.dash || undefined);
           if (isSelfEdge) {
+            const strokeWidth = (s.width * Math.max(0.4, e.weight)) * widthMul;
             return (
               <line key={i}
                 x1={a.proj.x} y1={a.proj.y} x2={b.proj.x} y2={b.proj.y}
-                stroke={isSelectedEdge || isHoverEdge ? '#FFC857' : s.stroke}
+                stroke={edgeStroke}
                 strokeOpacity={op}
-                strokeWidth={(s.width * Math.max(0.4, e.weight)) * widthMul}
+                strokeWidth={isSelectedEdge ? Math.max(strokeWidth, 5.5) : strokeWidth}
                 strokeLinecap="round"
-                strokeDasharray={s.dash || undefined} />
+                strokeDasharray={edgeDash}
+                filter={edgeFilter} />
             );
           }
           // Curve for friend-friend edges
@@ -535,14 +548,16 @@ export function GraphView({ data, dark = false, selected, selectedEdge = null, o
           const cxFromMid = mx - W / 2, cyFromMid = my - H / 2;
           if (nx * cxFromMid + ny * cyFromMid < 0) { nx = -nx; ny = -ny; }
           const cx = mx + nx * bow, cy = my + ny * bow;
+          const strokeWidth = (s.width * Math.max(0.5, e.weight)) * widthMul;
           return (
             <path key={i}
               d={`M${a.proj.x},${a.proj.y} Q${cx},${cy} ${b.proj.x},${b.proj.y}`}
-              stroke={isSelectedEdge || isHoverEdge ? '#FFC857' : s.stroke}
+              stroke={edgeStroke}
               strokeOpacity={op}
-              strokeWidth={(s.width * Math.max(0.5, e.weight)) * widthMul}
-              strokeDasharray={s.dash || undefined}
-              fill="none" strokeLinecap="round" />
+              strokeWidth={isSelectedEdge ? Math.max(strokeWidth, 5.5) : strokeWidth}
+              strokeDasharray={edgeDash}
+              fill="none" strokeLinecap="round"
+              filter={edgeFilter} />
           );
         })}
 
