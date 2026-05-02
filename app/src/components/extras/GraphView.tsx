@@ -200,6 +200,14 @@ export function GraphView({ data, dark = false, selected, selectedEdge = null, o
 
   function svgPoint(e: ReactPointerEvent<SVGSVGElement>) {
     const svg = e.currentTarget as SVGSVGElement;
+    const matrix = svg.getScreenCTM();
+    if (matrix) {
+      const point = svg.createSVGPoint();
+      point.x = e.clientX;
+      point.y = e.clientY;
+      const local = point.matrixTransform(matrix.inverse());
+      return { x: local.x, y: local.y };
+    }
     const rect = svg.getBoundingClientRect();
     return {
       x: (e.clientX - rect.left) * (W / rect.width),
@@ -208,7 +216,7 @@ export function GraphView({ data, dark = false, selected, selectedEdge = null, o
   }
 
   function nodeHitRadius(n: Projected) {
-    return Math.max(n.is_self ? 24 : 26, n.size * n.proj.depth + (n.is_self ? 12 : 18));
+    return Math.max(n.is_self ? 34 : 40, n.size * n.proj.depth + (n.is_self ? 22 : 30));
   }
 
   function nodeLabelHitScore(n: Projected, sx: number, sy: number): number | null {
@@ -218,11 +226,11 @@ export function GraphView({ data, dark = false, selected, selectedEdge = null, o
     if (dim || (!n.is_self && n.tier === 'E')) return null;
     const labelY = n.proj.y + r + (n.is_self ? 18 : 14);
     const label = n.is_self ? '你' : displayName(n.id, n.name);
-    const halfWidth = Math.min(120, Math.max(24, label.length * 7 + 14));
+    const halfWidth = Math.min(150, Math.max(36, label.length * 8 + 22));
     const dx = Math.abs(sx - n.proj.x);
     const dy = Math.abs(sy - labelY);
-    if (dx > halfWidth || dy > 13) return null;
-    return 0.18 + (dx / halfWidth) * 0.35 + (dy / 13) * 0.25;
+    if (dx > halfWidth || dy > 20) return null;
+    return 0.18 + (dx / halfWidth) * 0.35 + (dy / 20) * 0.25;
   }
 
   function findNodeHit(sx: number, sy: number, includeLabels = false): Projected | null {
@@ -366,7 +374,7 @@ export function GraphView({ data, dark = false, selected, selectedEdge = null, o
       // Detect "click vs drag": <5px movement = click → resolve which node was clicked
       const dx = e.clientX - dragRef.current.x;
       const dy = e.clientY - dragRef.current.y;
-      const wasClick = (dx * dx + dy * dy) < 25;
+      const wasClick = (dx * dx + dy * dy) < 256;
       if (wasClick) {
         // Find nearest visible node within hit radius (manually — pointer capture
         // breaks the natural click bubbling, so we resolve the hit ourselves)
