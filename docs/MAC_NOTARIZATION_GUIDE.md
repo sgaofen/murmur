@@ -1,16 +1,16 @@
-# Mac 正式签名与公证发布教程
+# Mac 签名与公证发布流程
 
-目标：让小白从 GitHub Releases 下载 `Murmur_0.2.6_aarch64.dmg` 后，可以像普通 Mac App 一样打开，不再出现：
+目标：让用户从 GitHub Releases 下载 `Murmur_0.2.6_aarch64.dmg` 后，可以像普通 Mac App 一样安装和打开，不再出现：
 
 - `"Murmur" is damaged and can't be opened`
 - `"Murmur" Not Opened. Apple could not verify...`
 
-这件事不能靠 ad-hoc 签名解决。ad-hoc 只能修掉签名结构损坏，不能让 Gatekeeper 认可开发者。真正面向普通用户发布，必须走：
+这件事不能靠 ad-hoc 签名解决。ad-hoc 只能修掉签名结构损坏，不能让 Gatekeeper 认可发布者身份。正式发布必须走：
 
 ```text
 Developer ID Application 证书
 → hardened runtime 签名
-→ Apple notarization
+→ Apple 公证
 → stapler 装订公证票据
 → 上传新的 DMG
 ```
@@ -19,7 +19,7 @@ Developer ID Application 证书
 
 - Apple 说明：Mac App 直接分发时应该使用 Developer ID 签名；未签 Developer ID 的 App 会被 Gatekeeper 拦截。
 - Apple 说明：上传公证前需要 hardened runtime；公证完成后可以用 `stapler` 校验/装订票据。
-- Tauri 说明：免费 Apple Developer 账号不能 notarize；ad-hoc 签名仍会要求用户在隐私与安全里手动放行。
+- Tauri 说明：免费账号不能完成公证；ad-hoc 签名仍会要求用户在「隐私与安全性」里手动放行。
 
 参考链接：
 
@@ -35,9 +35,9 @@ Developer ID Application 证书
 
 1. 一台 Mac。
 2. Xcode 或 Xcode Command Line Tools。
-3. Apple Developer Program 付费账号。
+3. Apple 付费开发者账号。
 4. `Developer ID Application` 证书。
-5. Apple notarization 凭据。
+5. Apple 公证凭据。
 6. 本仓库最新 `main`。
 
 先确认工具：
@@ -58,7 +58,7 @@ xcode-select --install
 
 ## 1. 创建 Developer ID Application 证书
 
-注意：Apple 文档说明只有 Apple Developer Program / Enterprise Program 的 Account Holder 可以创建 Developer ID 证书。如果你的账号不是 Account Holder，需要让账号持有人帮你创建，或把权限配好。
+注意：只有账号持有人或具备相应权限的成员可以创建 Developer ID 证书。如果你的账号权限不够，需要让账号持有人帮你创建，或先调整权限。
 
 在 Mac 上生成 CSR：
 
@@ -69,7 +69,7 @@ xcode-select --install
 5. 选择「存储到磁盘」。
 6. 保存 `CertificateSigningRequest.certSigningRequest`。
 
-到 Apple Developer 网站创建证书：
+到 Apple 开发者网站创建证书：
 
 1. 打开 https://developer.apple.com/account/resources/certificates/list
 2. 点 `+`。
@@ -100,7 +100,7 @@ Developer ID Application: Your Name (TEAMID)
 
 ---
 
-## 2. 准备 notarization 凭据
+## 2. 准备公证凭据
 
 推荐先用 Apple ID + app-specific password，最直观。
 
@@ -182,7 +182,7 @@ export NOTARY_PROFILE="murmur-notary"
 5. 生成 `.app.zip`
 6. 生成 `.dmg`
 7. 给 `.dmg` 签名
-8. 提交 Apple notarization
+8. 提交 Apple 公证
 9. 等 Apple 处理完成
 10. `stapler` 装订公证票据
 11. 打印 SHA256
@@ -202,7 +202,7 @@ SKIP_BUILD=1 ./scripts/macos-notarize-release.sh
 
 ---
 
-## 5. 如果 notarization 失败，怎么看原因
+## 5. 如果公证失败，怎么看原因
 
 `notarytool submit --wait` 失败时会输出 submission id。拿这个 id 查日志：
 
@@ -225,7 +225,7 @@ cat notary-log.json
 | `The binary is not signed with a valid Developer ID certificate` | 用了 ad-hoc、Apple Development、Mac Distribution，或证书没私钥 | 必须用 `Developer ID Application` |
 | `The executable does not have the hardened runtime enabled` | 签名没带 `--options runtime` | 用脚本重新签 |
 | nested `.dylib` / `.so` unsigned | PyInstaller 打包的 Python 动态库没签 | 脚本会逐个签 Mach-O；看漏了哪个再补 |
-| Team not configured | Apple 账号/团队没开通 notarization 或账号状态异常 | 去 Apple Developer 账号检查，必要时联系 Apple Support |
+| Team not configured | Apple 账号/团队没开通公证能力或账号状态异常 | 去 Apple 账号后台检查，必要时联系 Apple Support |
 
 ---
 
@@ -240,7 +240,7 @@ spctl --assess --type open --context context:primary-signature --verbose=4 \
   app/src-tauri/target/release/bundle/dmg/Murmur_0.2.6_aarch64.dmg
 ```
 
-再做一个真正的小白路径测试：
+再做一次真实下载路径测试：
 
 1. 打开 GitHub release 页面。
 2. 用 Chrome/Safari 重新下载 DMG，不要用本地旧文件。
@@ -252,6 +252,7 @@ spctl --assess --type open --context context:primary-signature --verbose=4 \
 
 - 不出现 `damaged`。
 - 不出现 `Apple could not verify`。
+- 不出现只有 `Done` / `Move to Trash` 的 `"Murmur" Not Opened` 弹窗。
 - 能直接打开 Murmur onboarding。
 - `~/Documents/Murmur/logs/serve.log` 出现 `Murmur API listening`。
 
@@ -284,7 +285,7 @@ gh release upload v0.2.6 \
   --clobber
 ```
 
-更新 release notes，把 Mac 状态从“未公证测试包”改成“Developer ID signed + notarized”。
+更新 release notes，把 Mac 状态从“未公证测试包”改成“已签名并公证”。
 
 如果 Windows 包也已经验证并上传，再把 release 从 pre-release 改成正式：
 
@@ -301,4 +302,3 @@ gh release edit v0.2.6 --prerelease=false
 - 不要用 ad-hoc 包当正式 release。
 - 不要只在本机 `open` 测试；必须用浏览器重新下载，因为 Gatekeeper 行为依赖 quarantine。
 - 如果后续上 GitHub Actions，要把证书和密码放到 GitHub Secrets。
-
