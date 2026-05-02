@@ -2745,6 +2745,17 @@ def find_ai_report_for(wxid: str) -> dict | None:
     return None
 
 
+def _friend_detail_with_fresh_ai_report(wxid: str, payload: dict) -> dict:
+    """Attach report metadata at response time so external jobs don't leave stale cache."""
+    out = dict(payload)
+    rep = find_ai_report_for(wxid)
+    if rep:
+        out["aiReport"] = rep
+    else:
+        out.pop("aiReport", None)
+    return out
+
+
 def friend_detail(store: EchoStore, wxid: str) -> dict:
     """Friend card + full local analysis (used by FriendPage)."""
     contact = store.contact(wxid)
@@ -3432,12 +3443,15 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             if not sub:
                 cached = _FRIEND_DETAIL_CACHE.get(wxid)
                 if cached and (_time.time() - cached[0]) < _CACHE_TTL:
-                    return self._send_json(cached[1])
+                    payload = _friend_detail_with_fresh_ai_report(wxid, cached[1])
+                    _FRIEND_DETAIL_CACHE[wxid] = (cached[0], payload)
+                    return self._send_json(payload)
                 disk = _disk_load(f"friend_{wxid}")
                 if disk and (_time.time() - disk["_ts"]) < _CACHE_TTL:
-                    _FRIEND_DETAIL_CACHE[wxid] = (disk["_ts"], disk["_payload"])
-                    return self._send_json(disk["_payload"])
-                payload = friend_detail(self.store, wxid)
+                    payload = _friend_detail_with_fresh_ai_report(wxid, disk["_payload"])
+                    _FRIEND_DETAIL_CACHE[wxid] = (disk["_ts"], payload)
+                    return self._send_json(payload)
+                payload = _friend_detail_with_fresh_ai_report(wxid, friend_detail(self.store, wxid))
                 _FRIEND_DETAIL_CACHE[wxid] = (_time.time(), payload)
                 _disk_save(f"friend_{wxid}", payload)
                 return self._send_json(payload)

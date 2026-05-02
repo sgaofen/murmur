@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { GraphView } from '../components/extras/GraphView';
 import type { GraphData, GraphNode, GraphEdge, GraphCluster } from '../components/extras/GraphView';
-import { API_BASE, getFriend, getPairPack, findPairReport, getReport, getFriendConnections, invokeAgent, getAgents, invokePairAgent, getPairStream, startBatch, getBatchStatus } from '../data/api';
+import { API_BASE, getFriend, getPairPack, findPairReport, getReport, getFriendConnections, invokeAgent, getInvokeStream, getAgents, invokePairAgent, getPairStream, startBatch, getBatchStatus } from '../data/api';
 import type { BatchStatus, LocalAgent } from '../data/api';
 import type { FriendConnection } from '../data/api';
 import type { Friend, FriendStats } from '../data/types';
@@ -393,6 +393,38 @@ function chromeBtn(dark: boolean): React.CSSProperties {
   };
 }
 
+function AnalysisStreamBox({ stream }: { stream: { output: string; stage: string; elapsed: number } | null }) {
+  const tail = stream?.output?.trim().slice(-2000);
+  return (
+    <div style={{ marginTop: 10 }}>
+      <div className="et-meta" style={{
+        color: 'var(--et-orange-2)', display: 'flex',
+        justifyContent: 'space-between', alignItems: 'center',
+      }}>
+        <span>{stream?.stage || '排队中'}…</span>
+        <span style={{ fontFamily: 'var(--et-mono)', fontSize: 10 }}>{stream?.elapsed || 0}s</span>
+      </div>
+      {tail && (
+        <div style={{
+          marginTop: 8, padding: '10px 12px', borderRadius: 6,
+          background: 'var(--et-paper)', border: '0.5px solid var(--et-line-2)',
+          fontFamily: 'var(--et-mono)', fontSize: 11, lineHeight: 1.55,
+          color: 'var(--et-ink-soft)', whiteSpace: 'pre-wrap',
+          maxHeight: 220, overflow: 'auto',
+        }}>
+          {tail}
+          <span style={{
+            display: 'inline-block', width: 6, height: 12,
+            background: 'var(--et-orange)', marginLeft: 2, verticalAlign: 'middle',
+            animation: 'et-blink 1s steps(1) infinite',
+          }} />
+        </div>
+      )}
+      <style>{`@keyframes et-blink { 50% { opacity: 0; } }`}</style>
+    </div>
+  );
+}
+
 function SidePanel({ node, onClose, onOpenFriend, onSelectPeer }: {
   node: GraphNode; onClose: () => void; onOpenFriend: () => void;
   onSelectPeer?: (peerWxid: string) => void;
@@ -407,12 +439,14 @@ function SidePanel({ node, onClose, onOpenFriend, onSelectPeer }: {
   const [agents, setAgents] = useState<LocalAgent[]>([]);
   const [analyzing, setAnalyzing] = useState<'idle' | 'running' | 'error'>('idle');
   const [analyzeError, setAnalyzeError] = useState<string | null>(null);
+  const [analysisStream, setAnalysisStream] = useState<{ output: string; stage: string; elapsed: number } | null>(null);
 
   useEffect(() => {
     getAgents().then(setAgents).catch(() => { /* no local agents available */ });
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
     setDetail(null);
     setReportContent(null);
     setShowFullReport(false);
@@ -420,38 +454,62 @@ function SidePanel({ node, onClose, onOpenFriend, onSelectPeer }: {
     setShowAllConnections(false);
     setAnalyzing('idle');
     setAnalyzeError(null);
-    getFriend(node.id).then(setDetail).catch(() => {});
-    getFriendConnections(node.id).then(r => setConnections(r.connections)).catch(() => setConnections([]));
+    setAnalysisStream(null);
+    getFriend(node.id).then(d => { if (!cancelled) setDetail(d); }).catch(() => {});
+    getFriendConnections(node.id).then(r => { if (!cancelled) setConnections(r.connections); }).catch(() => { if (!cancelled) setConnections([]); });
+    getInvokeStream(node.id).then(s => {
+      if (cancelled) return;
+      if (s.running) {
+        setAnalyzing('running');
+        setAnalysisStream({ output: s.output || '', stage: s.stage || 'running', elapsed: s.elapsed || 0 });
+      } else if (s.error) {
+        setAnalyzeError(s.error);
+        setAnalyzing('error');
+      }
+    }).catch(() => {});
+    return () => { cancelled = true; };
   }, [node.id]);
 
+  useEffect(() => {
+    if (analyzing !== 'running') return;
+    let cancelled = false;
+    async function tick() {
+      try {
+        const s = await getInvokeStream(node.id);
+        if (cancelled) return;
+        setAnalysisStream({ output: s.output || '', stage: s.stage || 'running', elapsed: s.elapsed || 0 });
+        if (!s.running) {
+          if (s.error) {
+            setAnalyzeError(s.error);
+            setAnalyzing('error');
+            return;
+          }
+          const updated = await getFriend(node.id);
+          if (cancelled) return;
+          setDetail(updated);
+          setAnalyzing('idle');
+          setAnalysisStream(null);
+        }
+      } catch {
+        // Keep polling; the stream endpoint can briefly race with process startup.
+      }
+    }
+    tick();
+    const pollId = window.setInterval(tick, 2000);
+    return () => { cancelled = true; window.clearInterval(pollId); };
+  }, [node.id, analyzing]);
+
   async function runAnalysis(cli: string) {
-    setAnalyzing('running');
     setAnalyzeError(null);
+    setAnalysisStream({ output: '', stage: '排队中', elapsed: 0 });
     try {
       const r = await invokeAgent({ cli, wxid: node.id });
       if (!r.ok) {
         setAnalyzeError(r.error || 'failed to queue');
-        setAnalyzing('error');
-        return;
-      }
-      // Async: backend spawned the agent. Poll for the saved aiReport.
-      const startedAt = Date.now();
-      const pollId = setInterval(async () => {
-        if (Date.now() - startedAt > 5 * 60 * 1000) {
-          clearInterval(pollId);
-          setAnalyzeError('5 分钟未完成');
           setAnalyzing('error');
           return;
         }
-        try {
-          const updated = await getFriend(node.id);
-          if (updated.aiReport?.available) {
-            clearInterval(pollId);
-            setDetail(updated);
-            setAnalyzing('idle');
-          }
-        } catch {}
-      }, 5000);
+      setAnalyzing('running');
     } catch (e: any) {
       setAnalyzeError(e?.message || String(e));
       setAnalyzing('error');
@@ -580,9 +638,7 @@ function SidePanel({ node, onClose, onOpenFriend, onSelectPeer }: {
                 还没让 AI 分析过这个人。
               </div>
               {analyzing === 'running' && (
-                <div className="et-meta" style={{ marginTop: 10, color: 'var(--et-orange-2)' }}>
-                  ⏳ 正在分析…一般 2-3 分钟
-                </div>
+                <AnalysisStreamBox stream={analysisStream} />
               )}
               {analyzing === 'error' && analyzeError && (
                 <div className="et-meta" style={{ marginTop: 10, color: 'var(--et-rose)' }}>
@@ -720,11 +776,20 @@ const EDGE_LABEL: Record<string, { label: string; tone: string }> = {
   moments_cross: { label: '朋友圈互动（不经你）', tone: '#D17545' },
 };
 
+function pairEvidenceErrorMessage(e: any): string {
+  const msg = e?.message || String(e);
+  if (msg.includes('no_direct_pair_evidence') || msg.includes('共同群/共同出现') || msg.includes('422')) {
+    return '这条线目前只有共群/共同出现等弱信号，还没有互相回复、名字提及或朋友圈互动这类直接证据。为避免分析串，暂不生成 AI 朋友间关系报告。';
+  }
+  return msg;
+}
+
 function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
   edge: GraphEdge; aName: string; bName: string; onClose: () => void;
   onOpenFriend?: (id: string) => void;
 }) {
   const [pack, setPack] = useState<string | null>(null);
+  const [packError, setPackError] = useState<string | null>(null);
   const [packLoading, setPackLoading] = useState(false);
   const [aiReport, setAIReport] = useState<{ available: boolean; path?: string; short?: string } | null>(null);
   const [showFullReport, setShowFullReport] = useState(false);
@@ -744,25 +809,70 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
     setPack(null);
+    setPackError(null);
     setAIReport(null);
     setFullReport(null);
     setShowFullReport(false);
     setAnalyzing('idle');
     setAnalyzeErr(null);
+    setStream(null);
     if (isSelfEdge) {
       getFriend(selfFriendId)
-        .then(d => setAIReport(d.aiReport || { available: false }))
-        .catch(() => setAIReport({ available: false }));
-      return;
+        .then(d => { if (!cancelled) setAIReport(d.aiReport || { available: false }); })
+        .catch(() => { if (!cancelled) setAIReport({ available: false }); });
+      getInvokeStream(selfFriendId)
+        .then(s => {
+          if (cancelled) return;
+          if (s.running) {
+            setAnalyzing('running');
+            setStream({ output: s.output || '', stage: s.stage || 'running', elapsed: s.elapsed || 0 });
+          } else if (s.error) {
+            setAnalyzeErr(s.error);
+            setAnalyzing('error');
+          }
+        })
+        .catch(() => {});
+      return () => { cancelled = true; };
     }
     setPackLoading(true);
     getPairPack(edge.source, edge.target)
-      .then(r => setPack(r.pack))
-      .catch(() => { /* no pair pack available */ })
-      .finally(() => setPackLoading(false));
-    findPairReport(edge.source, edge.target).then(setAIReport).catch(() => { /* no saved pair report */ });
+      .then(r => { if (!cancelled) setPack(r.pack); })
+      .catch(e => { if (!cancelled) setPackError(pairEvidenceErrorMessage(e)); })
+      .finally(() => { if (!cancelled) setPackLoading(false); });
+    findPairReport(edge.source, edge.target).then(r => { if (!cancelled) setAIReport(r); }).catch(() => { /* no saved pair report */ });
+    return () => { cancelled = true; };
   }, [edge.source, edge.target, isSelfEdge, selfFriendId]);
+
+  useEffect(() => {
+    if (!isSelfEdge || analyzing !== 'running') return;
+    let cancelled = false;
+    async function tick() {
+      try {
+        const s = await getInvokeStream(selfFriendId);
+        if (cancelled) return;
+        setStream({ output: s.output || '', stage: s.stage || 'running', elapsed: s.elapsed || 0 });
+        if (!s.running) {
+          if (s.error) {
+            setAnalyzeErr(s.error);
+            setAnalyzing('error');
+            return;
+          }
+          const updated = await getFriend(selfFriendId);
+          if (cancelled) return;
+          setAIReport(updated.aiReport || { available: false });
+          setAnalyzing('idle');
+          setStream(null);
+        }
+      } catch {
+        // Keep polling; the stream endpoint can briefly race with process startup.
+      }
+    }
+    tick();
+    const pollId = window.setInterval(tick, 2000);
+    return () => { cancelled = true; window.clearInterval(pollId); };
+  }, [isSelfEdge, selfFriendId, analyzing]);
 
   async function runPairAnalysis(cli: string) {
     setAnalyzing('running');
@@ -805,14 +915,14 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
         }
       }, 2000);
     } catch (e: any) {
-      setAnalyzeErr(e?.message || String(e));
+      setAnalyzeErr(pairEvidenceErrorMessage(e));
       setAnalyzing('error');
     }
   }
 
   async function runSelfAnalysis(cli: string) {
-    setAnalyzing('running');
     setAnalyzeErr(null);
+    setStream({ output: '', stage: '排队中', elapsed: 0 });
     try {
       const r = await invokeAgent({ cli, wxid: selfFriendId });
       if (!r.ok) {
@@ -820,25 +930,7 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
         setAnalyzing('error');
         return;
       }
-      const startedAt = Date.now();
-      const pollId = setInterval(async () => {
-        if (Date.now() - startedAt > 5 * 60 * 1000) {
-          clearInterval(pollId);
-          setAnalyzeErr('5 分钟还没完成');
-          setAnalyzing('error');
-          return;
-        }
-        try {
-          const updated = await getFriend(selfFriendId);
-          if (updated.aiReport?.available) {
-            clearInterval(pollId);
-            setAIReport(updated.aiReport);
-            setAnalyzing('idle');
-          }
-        } catch {
-          // Report may not be visible until the writer flushes it.
-        }
-      }, 5000);
+      setAnalyzing('running');
     } catch (e: any) {
       setAnalyzeErr(e?.message || String(e));
       setAnalyzing('error');
@@ -1002,9 +1094,7 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
                   还没让 AI 分析过你和 {otherName} 的关系。
                 </div>
                 {analyzing === 'running' && (
-                  <div className="et-meta" style={{ marginTop: 10, color: 'var(--et-orange-2)' }}>
-                    ⏳ 正在分析…一般 2-3 分钟
-                  </div>
+                  <AnalysisStreamBox stream={stream} />
                 )}
                 {analyzing === 'error' && analyzeErr && (
                   <div className="et-meta" style={{ marginTop: 10, color: 'var(--et-rose)' }}>
@@ -1038,6 +1128,15 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
           <div style={{ marginTop: 18 }}>
             <div className="et-eyebrow">关系证据 / 数据样本</div>
             {packLoading && <div className="et-meta" style={{ marginTop: 8 }}>正在拉取证据…</div>}
+            {packError && (
+              <div className="et-serif" style={{
+                marginTop: 8, padding: '12px 14px', borderRadius: 8,
+                background: 'var(--et-paper-2)', border: '0.5px dashed var(--et-line-2)',
+                fontSize: 13, lineHeight: 1.65, color: 'var(--et-mute)',
+              }}>
+                {packError}
+              </div>
+            )}
             {pack && (
               <article className="murmur-md" style={{
                 marginTop: 8, padding: '12px 14px', borderRadius: 8,
@@ -1081,7 +1180,7 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
                 background: 'var(--et-paper-2)', border: '0.5px dashed var(--et-line-2)',
               }}>
                 <div className="et-serif" style={{ fontSize: 13.5, color: 'var(--et-mute)', lineHeight: 1.6 }}>
-                  这对朋友还没让 AI 推断过。
+                  {packError || '这对朋友还没让 AI 推断过。'}
                 </div>
                 {analyzing === 'running' && (
                   <div style={{ marginTop: 10 }}>
@@ -1113,7 +1212,7 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
                     失败：{analyzeErr.slice(0, 120)}
                   </div>
                 )}
-                {analyzing !== 'running' && (
+                {!packError && analyzing !== 'running' && (
                   <div style={{ marginTop: 10, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                     {agents.length === 0 ? (
                       <span className="et-meta" style={{ color: 'var(--et-faint)', fontSize: 11 }}>

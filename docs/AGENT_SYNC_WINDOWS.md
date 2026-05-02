@@ -4,7 +4,7 @@ Checked on 2026-05-02.
 
 Branches compared:
 - Windows: `origin/codex/windows-progress-2026-05-02`
-- Mac: `origin/mac-llm-batch-progress` at `c4514df`
+- Mac: `origin/mac-llm-batch-progress` at `e30837c`
 
 ## 2026-05-02 latest Mac pass
 
@@ -37,6 +37,52 @@ Still not pulled as-is:
 - Mac's reduced Graph batch parallel defaults (`2/4/6`) were not adopted. The
   Windows UI keeps the more aggressive `3/5/8` options because the user has
   explicitly asked for faster multi-agent runs.
+
+## 2026-05-02 Mac report-refresh pass
+
+Reviewed Mac commit `549c84b` (`Fix report refresh and analysis progress
+recovery`) and ported the shared product fixes into Windows.
+
+Pulled into Windows:
+- `/api/friend/{wxid}` now attaches fresh `aiReport` metadata at response time,
+  even when the base friend detail came from memory or disk cache. Batch-created
+  reports should surface without waiting for cache expiry.
+- Friend page re-checks `/api/agents/invoke-stream` when opened, shows an inline
+  `AI 分析进度` card for active single-friend jobs, and refreshes the saved report
+  when the stream reaches `saved`.
+- Graph node side panel resumes single-friend analysis progress after reopening
+  the node, then refreshes the report card when the job finishes.
+- Graph `你 ↔ friend` edge panel resumes the same single-friend stream for
+  self-edge analysis and shows live tail output instead of a static waiting
+  message.
+- Full chat drawer gained a sticky close button, Escape-to-close, and privacy
+  safe sender/text rendering.
+
+Kept Windows-specific:
+- Privacy hook import remains `components/PrivacyToggle.tsx`; Mac's branch uses
+  `utils/usePrivacy.ts`.
+- Direct-evidence gates, `graph_v3`, `pairpack_v3`, and Yearbook
+  `schema_version=5` remain Windows-side protections and cache boundaries.
+
+## 2026-05-02 Mac direct-evidence confirmation pass
+
+Reviewed Mac commit `e30837c` (`Gate pair analysis on direct evidence`).
+
+Windows already had the backend-critical parts:
+- `pair_direct_evidence()` gates `/api/friend-pair-pack` and
+  `/api/agents/invoke-pair`.
+- Graph caches use `graph_v3:*`; pair packs use `pairpack_v3_*`.
+- Pair inference packs include a `直接证据门槛` section before any LLM prompt
+  context.
+
+Pulled from Mac in this pass:
+- Graph friend-friend edge UI now surfaces the 422/direct-evidence block as a
+  clear "证据不足 / 不调用 LLM" explanation instead of silently looking like a
+  normal un-analyzed pair.
+- The same readable message is used when a user tries to manually run pair
+  analysis on a blocked weak edge.
+- Mac's latest `docs/AGENT_SYNC_MAC.md` is mirrored here so the Mac/Windows
+  agents can compare from the same branch snapshot.
 
 ## Latest Windows sync status
 

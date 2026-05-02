@@ -329,10 +329,50 @@ Recent validation on Mac:
   - 25 pair reports,
   - 57 total reports.
 
+Additional Mac fix batch on 2026-05-02:
+
+- Friend detail now attaches fresh `aiReport` metadata at response time, even
+  when the base friend payload came from memory/disk cache. This fixes the case
+  where batch-generated reports existed on disk but `/api/friend/{wxid}` still
+  returned no `aiReport`.
+- Graph friend side panel and self-friend edge panel now resume
+  `/api/agents/invoke-stream` progress after leaving and re-entering the page.
+- Friend profile pages now show an inline `AI 分析进度` card for in-flight
+  single-friend analysis jobs after re-entry, then refresh the saved report once
+  the stream reaches `saved`.
+- The full chat drawer now keeps a sticky close button visible while scrolling
+  and supports `Escape` to close, preventing users from getting trapped in long
+  histories.
+- Browser verification:
+  - `Дари рай / wxid_pc4rk9lqtzft22` now shows its saved report on the friend
+    page, graph node panel, and `你 ↔ Дари рай` private edge panel.
+  - The private edge panel shows the raw `346 条` count and report links.
+  - The full chat drawer opens and closes with both the sticky button and Esc.
+  - A real Codex CLI run for `QQ邮箱提醒 / qqmail` resumed progress after direct
+    navigation back to `#friend/qqmail`, then cleared the progress card and kept
+    the generated report visible after `stage=saved`.
+
+Windows report review on 2026-05-02:
+
+- Reviewed `origin/codex/windows-progress-2026-05-02` at `adb14ba`.
+- Absorbed the high-risk Windows recommendation that pair LLM reports must have
+  direct A<->B evidence. Mac now has `pair_direct_evidence()` and rejects pair
+  packs / pair invokes when the only signal is co-group or common appearance.
+- Mac graph caches are now `graph_v3:*` so stale `graph_v2` evidence semantics
+  cannot hide the new gate.
+- `build_pair_inference_pack()` now includes a `直接证据门槛` section so any
+  manually inspected pack makes the guardrail explicit.
+- Graph edge UI now shows a clear "证据不足 / 不调用 LLM" message for blocked
+  friend-friend edges instead of silently showing an empty evidence panel.
+- Kept Mac's latest friend report cache/progress fixes from `549c84b`; Windows'
+  report was written against Mac `c4514df`, so that note was slightly behind the
+  newest Mac branch.
+
 ## Known Mac Gaps / Next Coordination Points
 
-1. Decide whether to port Windows `pair_direct_evidence()` as a hard API gate.
-   This is the most important false-positive prevention item.
+1. Continue validating `pair_direct_evidence()` on larger real datasets. The
+   hard API gate is now ported, but thresholds can still be tuned if a real
+   direct relationship is blocked too aggressively.
 
 2. Decide whether to port Windows `sns.friend_context()` into single-friend
    analysis packs.
