@@ -234,7 +234,6 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
   }
   function selectEdge(edge: GraphEdge | null) {
     setSelectedEdge(edge);
-    if (edge) setSelected(null);
   }
   function nameOf(id: string): string {
     const real = backendNodes.find(n => n.id === id)?.name || id;
@@ -274,6 +273,7 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
         data={data}
         dark={dark}
         selected={selected}
+        selectedEdge={selectedEdge}
         onSelect={selectNode}
         onSelectEdge={selectEdge}
         autoRotate={autoRotate}

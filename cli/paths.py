@@ -102,6 +102,23 @@ def _is_wxid_dir(p: Path) -> bool:
     return p.is_dir() and p.name.startswith("wxid_") and (p / "db_storage").exists()
 
 
+def _wechat_root_env_paths() -> list[Path]:
+    """Optional override for users with non-standard WeChat data locations.
+
+    MURMUR_WECHAT_ROOT may point at an xwechat_files directory or directly at a
+    wxid_*/ account directory. Multiple roots are separated by os.pathsep.
+    """
+    raw = os.environ.get("MURMUR_WECHAT_ROOT", "").strip()
+    if not raw:
+        return []
+    out: list[Path] = []
+    for part in raw.split(os.pathsep):
+        p = Path(part).expanduser()
+        if p:
+            out.append(p)
+    return out
+
+
 def _safe_listdir(p: Path, timeout_s: float = 1.5) -> Optional[list[Path]]:
     """Listdir with a thread-based timeout. macOS TCC can BLOCK iterdir on
     ~/Library/Containers/<other-app> while waiting for user consent — without
@@ -136,10 +153,21 @@ def discover_wechat_profiles() -> list[WeChatProfile]:
     """
     global _LAST_TCC_BLOCKED
     _LAST_TCC_BLOCKED = False
-    candidates = (_windows_xwechat_search_paths() if IS_WINDOWS
-                  else _mac_xwechat_search_paths() if IS_MAC
-                  else [])
+    raw_candidates = _wechat_root_env_paths() + (
+        _windows_xwechat_search_paths() if IS_WINDOWS
+        else _mac_xwechat_search_paths() if IS_MAC
+        else []
+    )
+    candidates: list[Path] = []
+    seen_candidates: set[str] = set()
+    for cand in raw_candidates:
+        key = str(cand.expanduser())
+        if key in seen_candidates:
+            continue
+        seen_candidates.add(key)
+        candidates.append(cand)
     profiles: list[WeChatProfile] = []
+    seen_profiles: set[str] = set()
     plat = "windows" if IS_WINDOWS else "macos" if IS_MAC else "linux"
     import re as _re
     for root in candidates:
@@ -149,7 +177,10 @@ def discover_wechat_profiles() -> list[WeChatProfile]:
         except (PermissionError, OSError):
             _LAST_TCC_BLOCKED = True
             continue
-        entries = _safe_listdir(root)
+        if _is_wxid_dir(root):
+            entries = [root]
+        else:
+            entries = _safe_listdir(root)
         if entries is None:
             _LAST_TCC_BLOCKED = True
             continue  # TCC-blocked or hung
@@ -160,6 +191,10 @@ def discover_wechat_profiles() -> list[WeChatProfile]:
             except (PermissionError, OSError):
                 continue
             wxid_full = sub.name
+            profile_key = str(sub)
+            if profile_key in seen_profiles:
+                continue
+            seen_profiles.add(profile_key)
             wxid_short = _re.sub(r"_[0-9a-f]+$", "", wxid_full)
             profiles.append(WeChatProfile(
                 wxid=wxid_full,

@@ -252,7 +252,7 @@ export async function getYearbook(wxid: string): Promise<Yearbook> {
 }
 
 export interface BatchStartReq {
-  cli: 'claude' | 'codex';
+  cli: 'claude' | 'codex' | 'both';
   mode: 'top' | 'all' | 'pairs-graph';
   pair_mode?: 'mention' | 'graph';
   top?: number;
@@ -262,7 +262,7 @@ export interface BatchStartReq {
   force?: boolean;
 }
 export async function startBatch(req: BatchStartReq): Promise<{
-  ok: boolean; pid?: number; log_path?: string; error?: string;
+  ok: boolean; pid?: number; pids?: number[]; log_path?: string; log_paths?: string[]; error?: string;
 }> {
   return j('/api/agents/batch', {
     method: 'POST',
@@ -286,11 +286,16 @@ export interface BatchStatus {
   crashed?: boolean;
 }
 
-export async function getBatchStatus(pid: number, log_path: string): Promise<BatchStatus> {
+export async function getBatchStatus(
+  pid: number,
+  log_path: string,
+  pids?: number[],
+  log_paths?: string[],
+): Promise<BatchStatus> {
   return j('/api/agents/batch/status', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ pid, log_path }),
+    body: JSON.stringify({ pid, log_path, pids, log_paths }),
   });
 }
 
