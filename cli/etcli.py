@@ -3082,11 +3082,17 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             cmd = _spawn_etcli_args("batch", *extra)
             env = os.environ.copy()
             env["PYTHONIOENCODING"] = "utf-8"
+            # Run from a writable user dir, NOT the bundle's read-only Resources
+            # dir (cli_dir resolves into _internal/ when frozen). codex/claude
+            # spawn child sessions in cwd → fail if cwd isn't writable.
+            batch_cwd = Path.home() / "Desktop" / "Murmur"
+            try: batch_cwd.mkdir(parents=True, exist_ok=True)
+            except OSError: batch_cwd = Path.home()
             try:
                 with open(log_path, "wb") as f:
                     proc = subprocess.Popen(
                         cmd, stdout=f, stderr=subprocess.STDOUT, env=env,
-                        cwd=str(cli_dir),
+                        cwd=str(batch_cwd),
                         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform.startswith("win") else 0,
                     )
                 return self._send_json({
@@ -3205,10 +3211,16 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     else:
                         cmd = cmd_args
 
+                    # Run agent from a writable user dir, NOT the bundled .app's
+                    # read-only Resources dir (where etcli's own cwd may live).
+                    # codex creates session dirs in cwd → fails if cwd isn't writable.
+                    _agent_cwd = Path.home() / "Desktop" / "Murmur"
+                    try: _agent_cwd.mkdir(parents=True, exist_ok=True)
+                    except OSError: _agent_cwd = Path.home()
                     proc = subprocess.Popen(
                         cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                         bufsize=1, text=True, encoding="utf-8", errors="replace",
-                        shell=use_shell,
+                        shell=use_shell, cwd=str(_agent_cwd),
                     )
                     if proc.stdin:
                         proc.stdin.write(pack)
@@ -3353,10 +3365,16 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                         cmd = cmd_args
 
                     t_start = _time.time()
+                    # Run agent from a writable user dir, NOT the bundled .app's
+                    # read-only Resources dir (where etcli's own cwd may live).
+                    # codex creates session dirs in cwd → fails if cwd isn't writable.
+                    _agent_cwd = Path.home() / "Desktop" / "Murmur"
+                    try: _agent_cwd.mkdir(parents=True, exist_ok=True)
+                    except OSError: _agent_cwd = Path.home()
                     proc = subprocess.Popen(
                         cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                         bufsize=1, text=True, encoding="utf-8", errors="replace",
-                        shell=use_shell,
+                        shell=use_shell, cwd=str(_agent_cwd),
                     )
                     if proc.stdin:
                         proc.stdin.write(pack)

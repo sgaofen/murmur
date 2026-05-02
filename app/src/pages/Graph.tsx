@@ -339,6 +339,7 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
           batch={batch}
           status={batchStatus}
           onLaunch={startGraphBatch}
+          onReset={() => { setBatch(null); setBatchStatusState(null); }}
           onClose={() => setBatchPanelOpen(false)}
         />
       )}
@@ -980,13 +981,14 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
 }
 
 function BatchAnalysisPanel({
-  dark, agents, batch, status, onLaunch, onClose,
+  dark, agents, batch, status, onLaunch, onReset, onClose,
 }: {
   dark: boolean;
   agents: LocalAgent[];
   batch: { pid: number; log_path: string } | null;
   status: { running: boolean; n_friends: number; n_pairs: number; log_tail: string } | null;
   onLaunch: (top_pairs: number, cli: 'claude' | 'codex') => void;
+  onReset: () => void;
   onClose: () => void;
 }) {
   const running = !!batch && !!status?.running;
@@ -1076,21 +1078,37 @@ function BatchAnalysisPanel({
       {done && (
         <div>
           <div style={{
-            padding: '10px 12px', background: dark ? 'rgba(78,176,109,0.16)' : 'rgba(78,176,109,0.12)',
-            border: `0.5px solid ${dark ? 'rgba(78,176,109,0.4)' : 'rgba(78,176,109,0.3)'}`,
+            padding: '10px 12px',
+            background: status.n_pairs > 0
+              ? (dark ? 'rgba(78,176,109,0.16)' : 'rgba(78,176,109,0.12)')
+              : (dark ? 'rgba(255,107,71,0.16)' : 'rgba(255,107,71,0.10)'),
+            border: `0.5px solid ${status.n_pairs > 0
+              ? (dark ? 'rgba(78,176,109,0.4)' : 'rgba(78,176,109,0.3)')
+              : (dark ? 'rgba(255,107,71,0.4)' : 'rgba(255,107,71,0.3)')}`,
             borderRadius: 8, marginBottom: 10, fontSize: 13,
           }}>
-            ✓ 跑完了 · {status.n_pairs} 对关系档案已落盘
+            {status.n_pairs > 0
+              ? <>✓ 跑完了 · {status.n_pairs} 对关系档案已落盘</>
+              : <>⚠ 跑完了但 0 份报告 — 看 <code style={{ fontSize: 10 }}>~/Desktop/Murmur/agent_reports/_errors.txt</code> 排错</>
+            }
           </div>
-          <div style={{ fontSize: 11, color: dark ? 'rgba(244,236,218,0.6)' : 'rgba(26,43,74,0.6)', marginBottom: 8 }}>
+          <div style={{ fontSize: 11, color: dark ? 'rgba(244,236,218,0.6)' : 'rgba(26,43,74,0.6)', marginBottom: 10 }}>
             报告路径：<code style={{ fontSize: 10 }}>~/Desktop/Murmur/agent_reports/pairs/</code>
           </div>
-          <button onClick={onClose} style={{
-            all: 'unset', cursor: 'pointer', display: 'block', width: '100%',
-            padding: '8px 12px', textAlign: 'center', borderRadius: 6,
-            background: dark ? 'rgba(244,236,218,0.12)' : 'rgba(26,43,74,0.08)',
-            fontSize: 12, fontWeight: 500,
-          }}>关闭</button>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button onClick={onReset} style={{
+              all: 'unset', cursor: 'pointer', flex: 1,
+              padding: '8px 12px', textAlign: 'center', borderRadius: 6,
+              background: 'var(--et-orange)', color: '#fff',
+              fontSize: 12, fontWeight: 600,
+            }}>↻ 再跑一次</button>
+            <button onClick={onClose} style={{
+              all: 'unset', cursor: 'pointer', flex: 1,
+              padding: '8px 12px', textAlign: 'center', borderRadius: 6,
+              background: dark ? 'rgba(244,236,218,0.12)' : 'rgba(26,43,74,0.08)',
+              fontSize: 12, fontWeight: 500,
+            }}>关闭</button>
+          </div>
         </div>
       )}
     </div>

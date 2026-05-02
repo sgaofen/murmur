@@ -78,7 +78,12 @@ def _safe_filename(name: str) -> str:
 
 
 def call_agent(cli: str, agent_path: Path, prompt: str, timeout: int = 900) -> tuple[bool, str]:
-    """Call agent via stdin pipe (the proven-working approach). Returns (ok, output)."""
+    """Call agent via stdin pipe (the proven-working approach). Returns (ok, output).
+
+    IMPORTANT: when called from inside a packaged .app, our cwd is the bundle's
+    read-only Resources dir. codex/claude need to write temp/log files in cwd,
+    so we explicitly switch to a user-writable dir before spawning the agent.
+    """
     use_shell = sys.platform.startswith("win") and agent_path.suffix.lower() in (".cmd", ".bat", ".ps1")
     if cli == "claude":
         cmd_args = [str(agent_path), "--print"]
@@ -87,14 +92,24 @@ def call_agent(cli: str, agent_path: Path, prompt: str, timeout: int = 900) -> t
     else:
         cmd_args = [str(agent_path)]
 
+    # Always run agents from a writable user dir. ~/Desktop/Murmur exists
+    # because batch_analyze itself writes reports there; fall back to $HOME.
+    work_dir = Path.home() / "Desktop" / "Murmur"
+    try:
+        work_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        work_dir = Path.home()
+
     try:
         if use_shell:
             cmd_str = " ".join(f'"{a}"' if " " in a else a for a in cmd_args)
             r = subprocess.run(cmd_str, input=prompt, capture_output=True, text=True,
-                               timeout=timeout, encoding="utf-8", errors="replace", shell=True)
+                               timeout=timeout, encoding="utf-8", errors="replace",
+                               shell=True, cwd=str(work_dir))
         else:
             r = subprocess.run(cmd_args, input=prompt, capture_output=True, text=True,
-                               timeout=timeout, encoding="utf-8", errors="replace")
+                               timeout=timeout, encoding="utf-8", errors="replace",
+                               cwd=str(work_dir))
         ok = r.returncode == 0 and len(r.stdout or "") > 100
         out = r.stdout or ""
         # Strip codex banner: keep only between "\ncodex\n" and "\ntokens used\n"
