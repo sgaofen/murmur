@@ -371,7 +371,7 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
         />
       )}
       {/* Side panel for selected node */}
-      {selectedNode && !selectedNode.is_self && (
+      {selectedNode && !selectedNode.is_self && !selectedEdge && (
         <SidePanel node={selectedNode} onClose={() => setSelected(null)}
                    onOpenFriend={() => onOpenFriend?.(selectedNode.id)}
                    onSelectPeer={(peerWxid) => {

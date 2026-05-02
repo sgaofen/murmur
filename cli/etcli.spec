@@ -42,6 +42,8 @@ a = Analysis(
         "cryptography.hazmat.backends",
         "cryptography.hazmat.backends.openssl",
         "cryptography.hazmat.bindings.openssl.binding",
+        # Windows .dat image AES decrypt via pycryptodome.
+        *(["Crypto", "Crypto.Cipher", "Crypto.Cipher.AES"] if sys.platform.startswith("win") else []),
         # All local cli/ modules — etcli.py imports some lazily (refresh on Win
         # via _spawn_etcli_args, extract_key_mac on Mac via osascript subprocess).
         "paths",

@@ -1,8 +1,10 @@
-# Murmur 微语 — Python dependencies
+# Murmur Python dependencies
 #
 # Install with:  pip install -r requirements.txt
 #
 # zstandard is REQUIRED (zstd-compressed message_content / silk voice files).
-# cryptography is REQUIRED (pure-Python WCDB v4 SQLCipher decrypt — decrypt_py.py).
+# cryptography is REQUIRED (pure-Python WCDB v4 SQLCipher decrypt: decrypt_py.py).
+# pycryptodome is REQUIRED on Windows for WeChat .dat image AES decrypt.
 zstandard>=0.22
 cryptography>=42
+pycryptodome>=3.20

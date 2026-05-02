@@ -50,7 +50,7 @@ fi
 echo "[OK] Node found ($(node --version))"
 
 # --- install python deps ---
-if ! $PY -c "import zstandard, cryptography" 2>/dev/null; then
+if ! $PY -c "import zstandard, cryptography, Crypto" 2>/dev/null; then
     echo "[...] 装 Python 依赖..."
     $PY -m pip install --user -r requirements.txt
 fi
@@ -67,9 +67,8 @@ echo "[OK] Node deps ready"
 if [ ! -d "$HOME/Documents/Murmur/decrypted" ] && [ ! -d "$HOME/Documents/EchoTrace" ]; then
     echo ""
     echo "  ⚠ 没找到解密后的微信数据。"
-    echo "    Mac 上有两个选项："
-    echo "      1. 在 Windows 上跑过 Murmur 后，把 ~/Documents/Murmur/decrypted/ 拷过来"
-    echo "      2. 在 app 内点'引导' → 粘贴 64 位 hex 密钥（要从 Win 上抓出来）"
+    echo "    浏览器打开后会自动进入引导：给完全磁盘访问 → 重签名 WeChat → 自动抓 key → 解密。"
+    echo "    如果你已经从别的机器迁移数据，也可以把 ~/Documents/Murmur/decrypted/ 放到这里。"
     echo ""
 fi
 

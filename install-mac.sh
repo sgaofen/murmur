@@ -107,7 +107,7 @@ fi
 ok "仓库就绪：$DEFAULT_DIR"
 
 # ----------------- Python 依赖 -----------------
-info "装 Python 依赖（zstandard / cryptography；语音转写依赖可之后单独安装）"
+info "装 Python 依赖（zstandard / cryptography / pycryptodome；语音转写依赖可之后单独安装）"
 $PY -m pip install --user --break-system-packages -r requirements.txt > /dev/null 2>&1
 ok "Python 依赖 ready"
 

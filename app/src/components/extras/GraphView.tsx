@@ -635,7 +635,7 @@ export function GraphView({
           const isHov = hover === n.id;
           const isNeighbor = neighbors.has(n.id);
           const isEdgeEndpoint = selectedEdgeEndpoints.has(n.id);
-          const dim = !!selected && !isSel && !isNeighbor && !n.is_self;
+          const dim = !!selected && !isSel && !isNeighbor && !isEdgeEndpoint && !n.is_self;
           const op = dim ? 0.32 : 1;
           const color = n.color || TIER_COLORS[n.tier] || '#9E9583';
           return (

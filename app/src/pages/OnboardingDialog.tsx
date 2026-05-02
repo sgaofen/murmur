@@ -102,7 +102,9 @@ export function OnboardingDialog({ open, onClose, onDone }: Props) {
 
   async function startKeyExtract() {
     setPhase('extract-key');
-    setProgress('扫描 WeChat 进程内存中…');
+    setProgress(diag?.platform === 'windows'
+      ? 'Hook 正在等待登录事件：请去微信里退出登录，然后重新登录一次…'
+      : '扫描 WeChat 进程内存中…');
     try {
       // autoRestart=false: hook the existing WeChat instead of kill+relaunch.
       // Kill+relaunch on Win11 + WeChat 4.1.x sometimes makes the new Weixin.exe die
