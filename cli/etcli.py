@@ -745,7 +745,7 @@ def get_relationship_graph_cached(store: EchoStore, *,
                                   recent_days: int = 365,
                                   top_n: int = 600,
                                   show_clusters: bool = False) -> dict:
-    ck = f"graph:{scope}:{min_private}:{recent_days}:{top_n}:{show_clusters}"
+    ck = f"graph_v3:{scope}:{min_private}:{recent_days}:{top_n}:{show_clusters}"
     cached = _GRAPH_CACHE.get(ck)
     if cached and (_time.time() - cached[0]) < _CACHE_TTL:
         return cached[1]
@@ -1439,7 +1439,7 @@ def find_friend_in_groups(store: EchoStore, friend_wxid: str,
         if not s.is_group:
             continue
         try:
-            all_msgs = list(store.messages(s.username, limit=2000, text_only=True))
+            all_msgs = list(store.messages(s.username, text_only=True))
         except Exception:
             continue
         if not all_msgs:
@@ -1530,6 +1530,173 @@ def find_friend_in_groups(store: EchoStore, friend_wxid: str,
     return out[:max_groups]
 
 
+_MENTION_EXCLUDE = {
+    "你", "我", "他", "她", "好", "对", "嗯", "哈", "啊", "OK", "ok",
+    "nt", "no", "yes", "yo", "hi", "lol", "lmao",
+    "妈妈", "爸爸", "今天", "昨天", "明天", "时候", "什么", "怎么",
+    "狗屎", "傻逼", "卧槽", "牛逼", "牛批", "操", "靠", "妈的", "废物",
+    "垃圾", "tmd", "nmsl", "sb", "wcnm", "cnm", "傻瓜", "傻子", "笨蛋", "白痴",
+}
+
+
+def _mention_names_for_contact(c: Contact) -> list[str]:
+    names: list[str] = []
+    for raw in (c.remark, c.nick_name, c.alias, c.display()):
+        if not raw:
+            continue
+        name = str(raw).strip()
+        if not name or name in names:
+            continue
+        is_ascii = all(ord(ch) < 128 for ch in name)
+        min_len = 3 if is_ascii else 2
+        if len(name) < min_len:
+            continue
+        if name.lower() in _MENTION_EXCLUDE or name in _MENTION_EXCLUDE:
+            continue
+        names.append(name)
+    names.sort(key=len, reverse=True)
+    return names
+
+
+def _text_mentions_name(text: str, name: str) -> bool:
+    if not text or not name:
+        return False
+    is_ascii = all(ord(ch) < 128 for ch in name)
+    if is_ascii:
+        return re.search(
+            rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])",
+            text,
+            flags=re.IGNORECASE,
+        ) is not None
+    return name in text
+
+
+def _scan_mentions_in_chat(store: EchoStore, chat_wxid: str, target_wxid: str,
+                           max_examples: int = 5) -> dict:
+    contact = store.contact(target_wxid)
+    names = _mention_names_for_contact(contact)
+    out = {"count": 0, "examples": [], "names": names}
+    if not names:
+        return out
+    for m in store.messages(chat_wxid, text_only=True):
+        matched = next((n for n in names if _text_mentions_name(m.text, n)), None)
+        if not matched:
+            continue
+        out["count"] += 1
+        if len(out["examples"]) < max_examples:
+            out["examples"].append({
+                "ts": m.create_time,
+                "date": _ts_to_dt(m.create_time).strftime("%Y-%m-%d"),
+                "from": m.sender_name,
+                "text": m.text[:180],
+                "matched_name": matched,
+            })
+    return out
+
+
+def extract_mentions_of_friend(store: EchoStore, target_wxid: str,
+                               min_count: int = 1, max_chats: int = 10) -> list[dict]:
+    """Find private chats with other friends where the target person is mentioned."""
+    contacts = store.contacts()
+    related: list[dict] = []
+    for s in store.sessions():
+        if s.is_group or s.username == target_wxid:
+            continue
+        c = contacts.get(s.username)
+        if not c or not c.is_real_friend:
+            continue
+        rec = _scan_mentions_in_chat(store, s.username, target_wxid, max_examples=3)
+        if rec["count"] >= min_count:
+            related.append({
+                "other": c.display() or s.username,
+                "other_wxid": s.username,
+                "count": rec["count"],
+                "examples": rec["examples"],
+            })
+    related.sort(key=lambda r: -r["count"])
+    return related[:max_chats]
+
+
+def extract_pair_mentions_direct(store: EchoStore, wxid_a: str, wxid_b: str) -> dict:
+    """Rescan one exact pair so long-tail pairs are not hidden by global caches."""
+    canonical = tuple(sorted([wxid_a, wxid_b]))
+    b_in_a_chat = _scan_mentions_in_chat(store, wxid_a, wxid_b, max_examples=5)
+    a_in_b_chat = _scan_mentions_in_chat(store, wxid_b, wxid_a, max_examples=5)
+    return {
+        "wxid_a": canonical[0],
+        "wxid_b": canonical[1],
+        f"mentions_in_chat_with_{wxid_a}": b_in_a_chat["count"],
+        f"mentions_in_chat_with_{wxid_b}": a_in_b_chat["count"],
+        "total_mentions": b_in_a_chat["count"] + a_in_b_chat["count"],
+        "examples": sorted(
+            (b_in_a_chat["examples"] + a_in_b_chat["examples"])[:10],
+            key=lambda x: x.get("ts", 0),
+            reverse=True,
+        ),
+        "names_a": a_in_b_chat["names"],
+        "names_b": b_in_a_chat["names"],
+    }
+
+
+def _pick_spread(items: list, limit: int) -> list:
+    """Pick head/middle/tail samples instead of only old or only recent messages."""
+    if limit <= 0 or len(items) <= limit:
+        return items
+    n_head = max(1, limit // 4)
+    n_tail = max(1, limit // 4)
+    n_mid = max(0, limit - n_head - n_tail)
+    head = items[:n_head]
+    tail = items[-n_tail:] if n_tail else []
+    middle = items[n_head:len(items) - n_tail] if n_tail else items[n_head:]
+    mid = []
+    if n_mid > 0 and middle:
+        step = max(1, len(middle) // n_mid)
+        mid = middle[::step][:n_mid]
+    seen = set()
+    out = []
+    for it in head + mid + tail:
+        key = (getattr(it, "create_time", None), getattr(it, "sender_wxid", None), getattr(it, "msg_type", None))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(it)
+    return out
+
+
+def _pick_spread_indices(indices: list[int], limit: int) -> list[int]:
+    if limit <= 0 or len(indices) <= limit:
+        return indices
+    n_head = max(1, limit // 4)
+    n_tail = max(1, limit // 4)
+    n_mid = max(0, limit - n_head - n_tail)
+    head = indices[:n_head]
+    tail = indices[-n_tail:] if n_tail else []
+    middle = indices[n_head:len(indices) - n_tail] if n_tail else indices[n_head:]
+    mid = []
+    if n_mid > 0 and middle:
+        step = max(1, len(middle) // n_mid)
+        mid = middle[::step][:n_mid]
+    return sorted(dict.fromkeys(head + mid + tail))
+
+
+def sample_non_text_events(store: EchoStore, username: str, limit: int = 12) -> list[dict]:
+    """Time-spread sample of voice/images/videos/calls so LLM sees non-text signals."""
+    try:
+        non_text = [m for m in store.messages(username, text_only=False) if m.msg_type != 1]
+        picked = _pick_spread(non_text, limit)
+    except Exception:
+        picked = []
+    out = []
+    for m in picked:
+        out.append({
+            "date": _ts_to_dt(m.create_time).strftime("%Y-%m-%d"),
+            "from": "你" if m.sender_wxid == "self" or m.sender_wxid == store.me else m.sender_name,
+            "type": m.raw_type_label,
+            "text": m.text,
+        })
+    return out
+
+
 def build_analysis_pack(store: EchoStore, username: str, sample_n: int = 80,
                          include_group_context: bool = True) -> str:
     """Returns a Markdown file (本地分析报告 + 数据样本 + LLM prompt) that any chatbot can ingest.
@@ -1589,6 +1756,17 @@ def build_analysis_pack(store: EchoStore, username: str, sample_n: int = 80,
             who = "你" if m.sender_wxid == "self" else name
             parts.append(f"- `[{m.to_dict()['time'][:16]}]` **{who}**: {m.text}")
 
+        non_text_events = sample_non_text_events(store, username, limit=12)
+        if non_text_events:
+            parts.append("\n---\n")
+            parts.append("## 非文本互动样本（图片 / 语音 / 视频 / 通话）\n")
+            parts.append(
+                "> 非文本消息不展开原始内容，只保留时间、方向和类型。"
+                "语音、图片、视频和通话往往是亲密度、线下协作或实时求助的补充证据。\n"
+            )
+            for ev in non_text_events:
+                parts.append(f"- `[{ev['date']}]` **{ev['from']}**: {ev['text'] or '[' + ev['type'] + ']'}")
+
     # === Cross-scene context: this person's behavior in shared groups ===
     if include_group_context and not a["is_group"]:
         try:
@@ -1626,26 +1804,17 @@ def build_analysis_pack(store: EchoStore, username: str, sample_n: int = 80,
     # === Cross-references: this person being mentioned in your chats with OTHER friends ===
     if not a["is_group"]:
         try:
-            mentions = get_friend_mentions_cached(store, top_n=50, min_mention_count=2)
+            related = extract_mentions_of_friend(store, username, min_count=1, max_chats=10)
         except Exception:
-            mentions = {}
-        # Find pairs where this person is mentioned
-        related: list[dict] = []
-        for pair_key, rec in mentions.items():
-            if rec["wxid_a"] == username:
-                related.append({"other": rec["name_b"], "other_wxid": rec["wxid_b"],
-                                 "count": rec[f"mentions_in_chat_with_{rec['wxid_b']}"],
-                                 "examples": rec["examples"][:2]})
-            elif rec["wxid_b"] == username:
-                related.append({"other": rec["name_a"], "other_wxid": rec["wxid_a"],
-                                 "count": rec[f"mentions_in_chat_with_{rec['wxid_a']}"],
-                                 "examples": rec["examples"][:2]})
-        related.sort(key=lambda r: -r["count"])
+            related = []
         if related:
             parts.append("\n---\n")
             parts.append(f"## 跨场景：你和**别的朋友**聊到「{name}」时\n")
-            parts.append("> 你在和谁聊天时提到这个人？这是推断「他在你社交圈里的角色」的关键证据。\n")
-            for r in related[:5]:
+            parts.append(
+                "> 这是全量扫描你的所有私聊后得到的结果，不再只看 Top 50 好友。"
+                "你在和谁聊天时提到这个人，是推断「他在你社交圈里的角色」的关键证据。\n"
+            )
+            for r in related[:8]:
                 parts.append(f"\n**当你和「{r['other']}」聊天时**，提到「{name}」 {r['count']} 次：")
                 for ex in r["examples"]:
                     parts.append(f"- `[{ex['date']}]` {ex['from']}: {ex['text']}")
@@ -1701,6 +1870,25 @@ def build_analysis_pack(store: EchoStore, username: str, sample_n: int = 80,
                 parts.append("\n**朋友圈@/同框/with样本**：")
                 for item in moments_ctx["with_each_other"][:4]:
                     parts.append(_post_line(item) + f"（{item.get('kind')}）")
+
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            import sns as _sns_mod
+            direct_moments = _sns_mod.direct_interaction_examples(store.dir, store.me or "", username, limit=12)
+        except Exception:
+            direct_moments = []
+        if direct_moments:
+            parts.append("\n---\n")
+            parts.append(f"## 朋友圈互动明细：你 ↔ 「{name}」\n")
+            parts.append(
+                "> 朋友圈互动是独立于聊天的信号。下面列出方向、互动类型、评论原文或朋友圈正文片段，"
+                "供 LLM 判断是否单向、不对等、礼貌性点赞，还是长期真实关注。\n"
+            )
+            for ex in direct_moments:
+                direction = "他/她 → 你" if ex.get("direction") == "friend_to_you" else "你 → 他/她"
+                kind = "评论" if ex.get("type") == "comment" else "点赞"
+                detail = ex.get("text") or ex.get("post_text") or ""
+                parts.append(f"- `[{ex.get('date')}]` **{direction}** {kind}: {detail[:180] or '（无文字）'}")
 
     # === Voice transcripts (Whisper-decoded) ===
     if not a["is_group"]:
@@ -3028,7 +3216,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     "message": evidence["message"],
                     "evidence": evidence,
                 }, 422)
-            ck = "pairpack_" + "__".join(sorted([a, b]))
+            ck = "pairpack_v3_" + "__".join(sorted([a, b]))
             cached = _PAIR_PACK_CACHE.get(ck)
             if cached and (_time.time() - cached[0]) < _CACHE_TTL:
                 return self._send_json(cached[1])
@@ -3037,8 +3225,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 _PAIR_PACK_CACHE[ck] = (disk["_ts"], disk["_payload"])
                 return self._send_json(disk["_payload"])
             with _STORE_READ_LOCK:
-                mentions = get_friend_mentions_cached(self.store, top_n=50, min_mention_count=3)
-                pack = build_pair_inference_pack(self.store, a, b, mentions=mentions)
+                pack = build_pair_inference_pack(self.store, a, b)
             payload = {"pack": pack, "a": a, "b": b, "size": len(pack)}
             _PAIR_PACK_CACHE[ck] = (_time.time(), payload)
             _disk_save(ck, payload)
@@ -3633,8 +3820,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 state = _PAIR_STREAM[pair_key]
                 try:
                     with _STORE_READ_LOCK:
-                        mentions = get_friend_mentions_cached(store_ref, top_n=50, min_mention_count=3)
-                        pack = build_pair_inference_pack(store_ref, a, b, mentions=mentions)
+                        pack = build_pair_inference_pack(store_ref, a, b)
                     state["stage"] = f"running {cli_name}"
                     use_shell = sys.platform.startswith("win") and agent_path.lower().endswith((".cmd", ".bat", ".ps1"))
                     cmd_args = ([agent_path, "--print"] if cli_name == "claude" else
@@ -4376,30 +4562,46 @@ def build_pair_inference_pack(store: EchoStore, wxid_a: str, wxid_b: str,
     else:
         parts.append("> **没有直接证据。不要推断他们认识。** 如果你仍看到这个包，结论必须是「证据不足」。\n")
 
-    # Mentions data
+    # Mentions data. Always rescan this exact pair so long-tail friends are not
+    # missed by the global top-N mention cache used for graph ranking.
+    try:
+        rec = extract_pair_mentions_direct(store, wxid_a, wxid_b)
+    except Exception:
+        rec = {}
     if mentions:
         ab_key = f"{min(wxid_a, wxid_b)}__{max(wxid_a, wxid_b)}"
-        rec = mentions.get(ab_key)
-        if rec:
-            parts.append(f"## 提及证据：你 ↔ 你的朋友 中互相提到对方")
-            parts.append(f"- 你和 {name_a} 的私聊里提到「{name_b}」: **{rec.get(f'mentions_in_chat_with_{wxid_a}', 0)}** 次")
-            parts.append(f"- 你和 {name_b} 的私聊里提到「{name_a}」: **{rec.get(f'mentions_in_chat_with_{wxid_b}', 0)}** 次")
-            if rec.get("examples"):
-                parts.append("- 样例：")
-                for ex in rec["examples"][:5]:
-                    parts.append(f"  - `[{ex['date']}]` {ex['from']}: {ex['text'][:140]}")
-            parts.append("")
+        cached_rec = mentions.get(ab_key) or {}
+        if cached_rec.get("total_mentions", 0) > rec.get("total_mentions", 0):
+            rec = cached_rec
+    parts.append("## 提及证据：你和其中一人的私聊里，是否提到另一人\n")
+    a_chat_mentions = rec.get(f"mentions_in_chat_with_{wxid_a}", 0)
+    b_chat_mentions = rec.get(f"mentions_in_chat_with_{wxid_b}", 0)
+    parts.append(f"- 你和 {name_a} 的私聊里提到「{name_b}」: **{a_chat_mentions}** 次")
+    parts.append(f"- 你和 {name_b} 的私聊里提到「{name_a}」: **{b_chat_mentions}** 次")
+    if rec.get("examples"):
+        parts.append("- 样例：")
+        for ex in rec["examples"][:8]:
+            parts.append(f"  - `[{ex['date']}]` {ex['from']}: {ex['text'][:160]}")
+    else:
+        parts.append("- 未检测到明确名字提及；后续结论需要更多依赖群聊、朋友圈或各自私聊语境。")
+    parts.append("")
 
-    # Each side's basic profile (head + tail samples for context)
+    # Each side's basic profile (time-spread samples for context)
     for wxid, name in [(wxid_a, name_a), (wxid_b, name_b)]:
         msgs = list(store.messages(wxid, text_only=True))
         if not msgs:
             continue
-        parts.append(f"## 你 ↔ {name} 对话样本（首尾各 10 条）\n")
-        for m in msgs[:10] + msgs[-10:]:
+        parts.append(f"## 你 ↔ {name} 对话样本（按时间分布）\n")
+        parts.append("> 头部 + 中段 + 尾部抽样，避免只看早期或近期片段。\n")
+        for m in _pick_spread(msgs, 28):
             who = "你" if m.sender_wxid == "self" else m.sender_name
             date = datetime.fromtimestamp(m.create_time, CST).strftime("%Y-%m-%d")
             parts.append(f"- `[{date}]` **{who}**: {m.text[:120]}")
+        non_text_events = sample_non_text_events(store, wxid, limit=8)
+        if non_text_events:
+            parts.append("\n**非文本互动样本**：")
+            for ev in non_text_events:
+                parts.append(f"- `[{ev['date']}]` **{ev['from']}**: {ev['text'] or '[' + ev['type'] + ']'}")
         parts.append("")
 
     # === Group co-presence: actual A↔B interactions in shared groups ===
@@ -4411,7 +4613,7 @@ def build_pair_inference_pack(store: EchoStore, wxid_a: str, wxid_b: str,
         if not s.is_group:
             continue
         try:
-            ms = list(store.messages(s.username, limit=2000, text_only=True))
+            ms = list(store.messages(s.username, text_only=True))
         except Exception:
             continue
         # Find indices where A or B spoke
@@ -4423,10 +4625,28 @@ def build_pair_inference_pack(store: EchoStore, wxid_a: str, wxid_b: str,
         speakers_in_idxs = {ms[i].sender_wxid for i in idxs}
         if len(speakers_in_idxs) < 2:
             continue
-        # Pull rolling windows of 5 msgs around any A-or-B utterance
+        direct_turn_idxs: set[int] = set()
+        direct_turn_count = 0
+        recent_ab: list[tuple[int, Message]] = []
+        for i, m in enumerate(ms):
+            if m.sender_wxid not in (wxid_a, wxid_b):
+                continue
+            cutoff = m.create_time - 600
+            recent_ab = [(j, pm) for j, pm in recent_ab if pm.create_time >= cutoff]
+            prev = next((j for j, pm in reversed(recent_ab) if pm.sender_wxid != m.sender_wxid), None)
+            if prev is not None:
+                direct_turn_count += 1
+                direct_turn_idxs.update([prev, i])
+            recent_ab.append((i, m))
+
+        # Prefer windows around A/B direct turns; otherwise sample spread-out co-presence.
+        sample_idxs = (
+            _pick_spread_indices(sorted(direct_turn_idxs), 12)
+            if direct_turn_idxs else _pick_spread_indices(idxs, 12)
+        )
         used = set()
         windows: list[list[int]] = []
-        for k in idxs:
+        for k in sample_idxs:
             lo = max(0, k - 2)
             hi = min(len(ms), k + 3)
             window_idxs = [j for j in range(lo, hi) if j not in used]
@@ -4445,12 +4665,23 @@ def build_pair_inference_pack(store: EchoStore, wxid_a: str, wxid_b: str,
             "group": group_name,
             "a_count": a_count,
             "b_count": b_count,
+            "direct_turn_count": direct_turn_count,
+            "first_date": datetime.fromtimestamp(ms[idxs[0]].create_time, CST).strftime("%Y-%m-%d"),
+            "last_date": datetime.fromtimestamp(ms[idxs[-1]].create_time, CST).strftime("%Y-%m-%d"),
             "windows": windows[:6],  # up to 6 dialogue windows per group
             "msgs": ms,
         })
     # Sort by interaction density (a_count + b_count, prefer balanced)
     group_dialogues.sort(key=lambda gd: -(gd["a_count"] + gd["b_count"]))
     if group_dialogues:
+        parts.append("## 共同群聊概览\n")
+        parts.append("> 这里使用完整群聊历史扫描，不再只截前 2000 条；直接接话指 10 分钟内 A/B 互相承接。\n")
+        for gd in group_dialogues[:10]:
+            parts.append(
+                f"- 群「{gd['group']}」：{name_a} {gd['a_count']} 条，{name_b} {gd['b_count']} 条；"
+                f"直接接话 {gd['direct_turn_count']} 次；跨度 {gd['first_date']} → {gd['last_date']}"
+            )
+        parts.append("")
         parts.append(f"## 群里 A↔B 真实对话（不经过你）\n")
         parts.append(
             "> **关键证据**：A 和 B 在你都在的群聊里**互相说话**的样本。"
@@ -4458,7 +4689,10 @@ def build_pair_inference_pack(store: EchoStore, wxid_a: str, wxid_b: str,
             "看他们之间的语气 / 是否互相 @ / 是否搭话能直接推断关系深度。\n"
         )
         for gd in group_dialogues[:5]:
-            parts.append(f"\n### 群「{gd['group']}」（{name_a} 发言 {gd['a_count']} 条 · {name_b} 发言 {gd['b_count']} 条）")
+            parts.append(
+                f"\n### 群「{gd['group']}」（{name_a} 发言 {gd['a_count']} 条 · "
+                f"{name_b} 发言 {gd['b_count']} 条 · 直接接话 {gd['direct_turn_count']} 次）"
+            )
             ms = gd["msgs"]
             for window in gd["windows"]:
                 first_ts = ms[window[0]].create_time
@@ -4474,6 +4708,9 @@ def build_pair_inference_pack(store: EchoStore, wxid_a: str, wxid_b: str,
                     marker = "→" if m.sender_wxid in (wxid_a, wxid_b) else " "
                     parts.append(f"{marker} **{who}**: {m.text[:160]}")
         parts.append("")
+    else:
+        parts.append("## 共同群聊证据\n")
+        parts.append("- 未发现两人在同一个群里都发过言；朋友间关系推断需要主要依赖提及、朋友圈或各自私聊语境。\n")
 
     # === Friend-to-friend Moments interactions (independent evidence) ===
     try:
@@ -4495,8 +4732,12 @@ def build_pair_inference_pack(store: EchoStore, wxid_a: str, wxid_b: str,
                 if s.get("examples"):
                     parts.append("- 评论原文样本：")
                     for ex in s["examples"][:4]:
-                        if ex.get("text"):
-                            parts.append(f"  - 「{ex['text']}」")
+                        ex_date = datetime.fromtimestamp(ex.get("ts", 0), CST).strftime("%Y-%m-%d") if ex.get("ts") else "?"
+                        from_name = name_a if ex.get("from_wxid") == wxid_a else name_b if ex.get("from_wxid") == wxid_b else ex.get("from_name", "对方")
+                        to_name = name_a if ex.get("to_wxid") == wxid_a else name_b if ex.get("to_wxid") == wxid_b else "对方"
+                        kind = "评论" if ex.get("type") == "comment" else "点赞"
+                        text = ex.get("text") or "（无文字）"
+                        parts.append(f"  - `[{ex_date}]` {from_name} → {to_name} {kind}: {text}")
                 parts.append("")
     except Exception:
         pass
@@ -4505,18 +4746,25 @@ def build_pair_inference_pack(store: EchoStore, wxid_a: str, wxid_b: str,
     parts.append("## 任务\n")
     parts.append("```")
     parts.append(f"基于上方所有数据，推断「{name_a}」和「{name_b}」之间的关系。")
-    parts.append("请输出 800-1500 字的中文分析报告，结构如下：")
+    parts.append("请输出 1800-2600 字的中文分析报告，必须结论先行、证据分层、不要偷懒。")
     parts.append("")
-    parts.append(f"1. **直接证据强度** — 提及次数 / 上下文 / 你提到他俩时的语气")
-    parts.append("2. **推断关系类型** — 同事 / 同学 / 同好 / 暧昧 / 朋友圈交集 / 不熟 / 不认识")
-    parts.append("3. **推断他们认识的契机** — 通过什么场合认识？大概什么时间起？")
-    parts.append("4. **关系深度估计** — 仅是「认识」、「点头之交」、「会一起出来」、「真朋友」？")
-    parts.append("5. **置信度** — 高 / 中 / 低，说明依据")
+    parts.append("报告结构必须包含：")
+    parts.append("")
+    parts.append("1. **一句话结论** — 关系类型 + 关系强度 + 置信度。")
+    parts.append("2. **证据矩阵** — 分别评价：名字提及、共同群聊、10 分钟内直接接话、朋友圈互动、各自与你的私聊背景、非文本互动。")
+    parts.append("3. **他们怎么认识 / 主要交集场景** — 从群名、时间跨度、话题和语气推断，不确定就写不确定。")
+    parts.append("4. **关系深度估计** — 不认识 / 认识但不熟 / 点头之交 / 同好或同学同事 / 会私下联系 / 真朋友。")
+    parts.append("5. **关系图可视化摘要** — 给 UI 用的 4 行：`边类型`、`边强度 0-100`、`主要证据`、`风险提示`。")
+    parts.append("6. **不能下结论的地方** — 明确列出缺失证据，避免过度推断。")
     parts.append("")
     parts.append("**严格规则**：")
-    parts.append("- 每条结论必须有数据出处；")
+    parts.append("- 每条结论必须引用至少 1 条带日期的样本或一个明确计数；")
+    parts.append("- 如果名字提及次数是 0，不要因此草草结束，必须继续分析共同群聊、直接接话、朋友圈和各自私聊背景；")
+    parts.append("- 不要把「你 ↔ A」或「你 ↔ B」的亲密度误写成「A ↔ B」的亲密度；只能作为弱背景证据；")
+    parts.append("- 如果共同群里只是同场出现但没有互相接话，要把它标为弱证据；")
     parts.append("- 拿不准就直说「证据不足」，不要为了成稿编造；")
-    parts.append("- 关注隐含线索：对方提到时的语气（亲昵/冷淡）、上下文（一起做事/吐槽/约见面）。")
+    parts.append("- 关注隐含线索：对方提到时的语气（亲昵/冷淡）、上下文（一起做事/吐槽/约见面）；")
+    parts.append("- 最终结论要能直接服务关系网：这条边为什么存在、强不强、哪里可能误判。")
     parts.append("```\n")
     return "\n".join(parts)
 
@@ -4538,8 +4786,7 @@ def extract_friend_mentions(store: EchoStore, top_n: int = 50,
             }
         }
 
-    Top friends only (by combined_score) — full N×N would be 575×575 = 330k pair-scans.
-    Top 50 × top 50 = 2500 pair-scans on 50 chats = manageable.
+    Top friends only by default. Pass top_n <= 0 for all eligible private friends.
     """
     contacts = store.contacts()
 
@@ -4560,40 +4807,16 @@ def extract_friend_mentions(store: EchoStore, top_n: int = 50,
     top = candidates if top_n <= 0 else candidates[:top_n]
     top_wxids = {x[0] for x in top}
 
-    # Step 2: Build name -> wxid map (multiple names possible per wxid)
-    # For matching, we use display name + alias + nick_name.
-    # To avoid false positives, require at least 2-char names and exclude
-    # super-common patterns (single chars, "你", etc.)
-    EXCLUDE = {"你", "我", "他", "她", "好", "对", "嗯", "哈", "啊", "OK", "ok",
-                "nt", "no", "yes", "yo", "hi", "lol", "lmao",
-                # Common Chinese 2-char patterns
-                "妈妈", "爸爸", "今天", "昨天", "明天", "时候", "什么", "怎么",
-                # Curse words / common-Chinese-noun remarks. These are sometimes set
-                # as a friend's remark name (joke / relationship signifier) but they're
-                # also high-frequency words in everyday chat — using them as mention
-                # anchors generates false-positive pairs like 「狗屎」 ↔ random friend.
-                "狗屎", "傻逼", "卧槽", "牛逼", "牛批", "操", "靠", "妈的", "废物",
-                "垃圾", "tmd", "nmsl", "sb", "wcnm", "cnm", "傻瓜", "傻子", "笨蛋", "白痴"}
+    # Step 2: Build name -> wxid map (multiple names possible per wxid).
     name_to_wxids: dict[str, set[str]] = {}
     for wxid, _name, _ in top:
         c = contacts.get(wxid)
         if not c:
             continue
-        for name in (c.remark, c.nick_name, c.alias):
-            if not name:
-                continue
-            n = name.strip()
-            # Require ≥3 chars for ASCII, ≥2 chars for Chinese (each Chinese char is ~1 word)
-            is_ascii = all(ord(c) < 128 for c in n)
-            min_len = 3 if is_ascii else 2
-            if len(n) < min_len:
-                continue
-            if n.lower() in EXCLUDE or n in EXCLUDE:
-                continue
-            name_to_wxids.setdefault(n, set()).add(wxid)
+        for name in _mention_names_for_contact(c):
+            name_to_wxids.setdefault(name, set()).add(wxid)
     if not name_to_wxids:
         return {}
-    mention_pat = re.compile("|".join(re.escape(n) for n in sorted(name_to_wxids, key=len, reverse=True)))
 
     # Step 3: For each top friend, scan their chat with self for mentions of other top friends
     mentions: dict[tuple[str, str], dict] = {}  # (a_wxid, b_wxid) → {count_in_a_chat, examples_in_a}
@@ -4601,8 +4824,9 @@ def extract_friend_mentions(store: EchoStore, top_n: int = 50,
         for m in store.messages(a_wxid, text_only=True):
             if not m.text:
                 continue
-            matched_names = {hit.group(0) for hit in mention_pat.finditer(m.text)}
-            for name in matched_names:
+            for name, target_wxids in name_to_wxids.items():
+                if not _text_mentions_name(m.text, name):
+                    continue
                 target_wxids = name_to_wxids.get(name, set())
                 for b_wxid in target_wxids:
                     if b_wxid == a_wxid:
@@ -4618,23 +4842,19 @@ def extract_friend_mentions(store: EchoStore, top_n: int = 50,
                             "text": m.text[:140],
                         })
 
-    # Step 4: Filter to pairs above min_mention_count
-    pair_data: dict[tuple[str, str], dict] = {}
-    for key, rec in mentions.items():
-        if rec["count_in_a_chat"] >= min_mention_count:
-            pair_data[key] = rec
-
-    # Step 5: Symmetric merge — pair (A,B) gets data from both sides
+    # Step 4: Symmetric merge — pair (A,B) gets data from both sides, then filter
+    # by total mentions so 2+2 evidence is not thrown away by one-direction threshold.
     result: dict[str, dict] = {}
     seen_pairs = set()
-    for (a, b), rec_a in pair_data.items():
+    for (a, b), rec_a in mentions.items():
         canonical = tuple(sorted([a, b]))
         if canonical in seen_pairs:
             continue
         seen_pairs.add(canonical)
-        rec_b = pair_data.get((b, a), {"count_in_a_chat": 0, "examples_in_a": []})
-        a_name = (contacts.get(a).display() if contacts.get(a) else a)
-        b_name = (contacts.get(b).display() if contacts.get(b) else b)
+        rec_b = mentions.get((b, a), {"count_in_a_chat": 0, "examples_in_a": []})
+        total = rec_a["count_in_a_chat"] + rec_b["count_in_a_chat"]
+        if total < min_mention_count:
+            continue
         result[f"{canonical[0]}__{canonical[1]}"] = {
             "wxid_a": canonical[0],
             "wxid_b": canonical[1],
@@ -4642,7 +4862,7 @@ def extract_friend_mentions(store: EchoStore, top_n: int = 50,
             "name_b": (contacts.get(canonical[1]).display() if contacts.get(canonical[1]) else canonical[1]),
             f"mentions_in_chat_with_{canonical[0]}": rec_a["count_in_a_chat"] if a == canonical[0] else rec_b["count_in_a_chat"],
             f"mentions_in_chat_with_{canonical[1]}": rec_a["count_in_a_chat"] if a == canonical[1] else rec_b["count_in_a_chat"],
-            "total_mentions": rec_a["count_in_a_chat"] + rec_b["count_in_a_chat"],
+            "total_mentions": total,
             "examples": (rec_a.get("examples_in_a", []) + rec_b.get("examples_in_a", []))[:6],
         }
     return result
@@ -4691,7 +4911,7 @@ def build_relationship_graph(store: EchoStore, *,
         prev_msgs: list[tuple[int, str]] = []
         per_group_pairs: dict[tuple[str, str], int] = {}
 
-        for m in store.messages(s.username, limit=3000, text_only=False):
+        for m in store.messages(s.username, text_only=False):
             if m.sender_wxid == "self" or not m.sender_wxid:
                 continue
             senders.add(m.sender_wxid)
@@ -4756,7 +4976,11 @@ def build_relationship_graph(store: EchoStore, *,
     # Step 5b: Friend-to-friend mention extraction (deep relationship inference)
     # When you and A talk about B, that's the strongest evidence A↔B know each other.
     try:
-        mention_pairs = get_friend_mentions_cached(store, top_n=50, min_mention_count=3)
+        # If the graph asks for all nodes (top_n <= 0), also scan all eligible
+        # private friends for mention edges. Otherwise match the visible graph
+        # scale while keeping a floor of 50 for useful cross-links.
+        mention_top_n = 0 if top_n <= 0 else max(50, top_n)
+        mention_pairs = get_friend_mentions_cached(store, top_n=mention_top_n, min_mention_count=3)
     except Exception as e:
         sys.stderr.write(f"[mentions] failed: {e}\n")
         mention_pairs = {}
@@ -5072,8 +5296,8 @@ def _run_server(args) -> int:
         try:
             t0 = _time.time()
             for ck, scope, top_n in [
-                ("graph:private:10:365:100:False", "private", 100),
-                ("graph:all:10:365:600:False", "all", 600),
+                ("graph_v3:private:10:365:100:False", "private", 100),
+                ("graph_v3:all:10:365:600:False", "all", 600),
             ]:
                 disk = _disk_load(ck)
                 if disk:

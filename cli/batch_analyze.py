@@ -315,7 +315,8 @@ def cmd_run(args):
                     })
             else:
                 # Original mention-based mode
-                pairs = _api(f"/api/friend-mentions?top_n=80&min={args.min_mentions}")
+                mention_top_n = 0 if args.top_pairs <= 0 else 80
+                pairs = _api(f"/api/friend-mentions?top_n={mention_top_n}&min={args.min_mentions}")
                 ranked_pairs = sorted(pairs.values(), key=lambda r: -r["total_mentions"])
                 sorted_pairs = ranked_pairs if args.top_pairs <= 0 else ranked_pairs[:args.top_pairs]
         except Exception as e:

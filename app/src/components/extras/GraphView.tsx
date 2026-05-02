@@ -398,6 +398,10 @@ export function GraphView({ data, dark = false, selected, selectedEdge = null, o
     }
     return s;
   }, [selected, data.edges]);
+  const selectedEdgeEndpoints = useMemo(() => {
+    if (!selectedEdge) return new Set<string>();
+    return new Set([selectedEdge.source, selectedEdge.target]);
+  }, [selectedEdge]);
 
   const edgeOrder: Record<string, number> = { private: 0, co_group: 1, co_active: 2, mention: 3, moments_cross: 4, dm_inferred: 5, mutual_reply: 6, close_pair: 7 };
   const sortedEdges = useMemo(
@@ -566,7 +570,8 @@ export function GraphView({ data, dark = false, selected, selectedEdge = null, o
           const isSel = selected === n.id;
           const isHov = hover === n.id;
           const isNeighbor = neighbors.has(n.id);
-          const dim = !!selected && !isSel && !isNeighbor && !n.is_self;
+          const isEdgeEndpoint = selectedEdgeEndpoints.has(n.id);
+          const dim = !!selected && !isSel && !isNeighbor && !isEdgeEndpoint && !n.is_self;
           const op = dim ? 0.32 : 1;
           const color = n.color || TIER_COLORS[n.tier] || '#9E9583';
           return (
@@ -585,6 +590,10 @@ export function GraphView({ data, dark = false, selected, selectedEdge = null, o
               {isHov && !isSel && !n.is_self && (
                 <circle cx={n.proj.x} cy={n.proj.y} r={r + 6}
                   fill="none" stroke="#FFC857" strokeWidth="2" opacity="0.85" />
+              )}
+              {isEdgeEndpoint && !n.is_self && (
+                <circle cx={n.proj.x} cy={n.proj.y} r={r + 7}
+                  fill="none" stroke="#FFC857" strokeWidth="2.4" opacity="0.95" />
               )}
               {n.bridge && (
                 <circle cx={n.proj.x} cy={n.proj.y} r={r + 2}
