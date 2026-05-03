@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { extractKey, getDiagnose, openFullDiskAccess, refreshData, resignWechat, saveKey } from '../data/api';
 import type { Diagnose } from '../data/api';
+import { maskText } from '../utils/privacy';
+import { usePrivacy } from '../utils/usePrivacy';
 
 interface Props {
   open: boolean;
@@ -11,6 +13,7 @@ interface Props {
 type Phase = 'welcome' | 'diagnose' | 'mac-no-data' | 'mac-paste-key' | 'mac-auto-extract' | 'mac-resign-prompt' | 'mac-resigning' | 'mac-wait-login' | 'mac-fda-needed' | 'win-need-key' | 'win-decrypt' | 'extract-key' | 'done' | 'error';
 
 export function OnboardingDialog({ open, onClose, onDone }: Props) {
+  void usePrivacy();
   const [phase, setPhase] = useState<Phase>('welcome');
   const [diag, setDiag] = useState<Diagnose | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -316,7 +319,7 @@ function CapabilityList({ diag }: { diag: Diagnose }) {
           <summary style={{ cursor: 'pointer', color: 'var(--et-mute)', marginBottom: 6 }}>已扫描的微信数据位置</summary>
           <div style={{ maxHeight: 140, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 4 }}>
             {diag.wechat_search_roots.slice(0, 30).map((p) => (
-              <code key={p} style={{ fontFamily: 'var(--et-mono)', color: 'var(--et-ink-soft)', wordBreak: 'break-all' }}>{p}</code>
+              <code key={p} style={{ fontFamily: 'var(--et-mono)', color: 'var(--et-ink-soft)', wordBreak: 'break-all' }}>{maskText(p)}</code>
             ))}
           </div>
         </details>
@@ -599,7 +602,7 @@ function Working({ text }: { text: string }) {
   return (
     <div style={{ textAlign: 'center', padding: '32px 0' }}>
       <div style={{ display: 'inline-block', animation: 'spin 1.4s linear infinite', fontSize: 32 }}>⏳</div>
-      <div className="et-h3" style={{ marginTop: 16 }}>{text}</div>
+      <div className="et-h3" style={{ marginTop: 16 }}>{maskText(text)}</div>
       <div className="et-meta" style={{ marginTop: 8 }}>过程中如果看到微信弹窗，记得点「登录」。</div>
       <style>{`@keyframes spin { from { transform: rotate(0); } to { transform: rotate(360deg); } }`}</style>
     </div>
@@ -637,7 +640,7 @@ function ErrorView({ error, diag, onRetry }: { error: string; diag: Diagnose | n
       }}>
         <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--et-rose)', marginBottom: 6 }}>失败原因</div>
         <pre className="et-meta" style={{ fontSize: 11, color: 'var(--et-ink-soft)',
-          whiteSpace: 'pre-wrap', margin: 0 }}>{error}</pre>
+          whiteSpace: 'pre-wrap', margin: 0 }}>{maskText(error)}</pre>
       </div>
       {diag && (
         <details style={{ marginBottom: 14 }}>

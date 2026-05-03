@@ -2,6 +2,8 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import type { ReactNode } from 'react';
 import { getBatchStatus, startBatch as startBatchApi } from '../../data/api';
 import type { BatchStartReq, BatchStatus } from '../../data/api';
+import { maskText } from '../../utils/privacy';
+import { usePrivacy } from '../../utils/usePrivacy';
 
 const STORAGE_KEY = 'murmur.batch.current';
 
@@ -153,6 +155,7 @@ export function useBatchTracker(): BatchTrackerStore {
 }
 
 export function BatchStatusPill({ onOpenReports }: { onOpenReports: () => void }) {
+  void usePrivacy();
   const { batch, status, clearBatch } = useBatchTracker();
   if (!batch || !status) return null;
 
@@ -196,7 +199,7 @@ export function BatchStatusPill({ onOpenReports }: { onOpenReports: () => void }
             }} />
           </div>
           <div style={{ marginTop: 5, fontSize: 11, color: 'var(--et-mute)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {title} · {sub}
+            {maskText(title)} · {maskText(sub)}
           </div>
         </button>
         {!status.running && (

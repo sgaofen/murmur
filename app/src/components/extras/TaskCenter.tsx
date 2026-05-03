@@ -1,5 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
+import { maskText } from '../../utils/privacy';
+import { usePrivacy } from '../../utils/usePrivacy';
 
 // ─── Types ───
 export type TaskIcon = 'key' | 'lock' | 'agent' | 'index';
@@ -121,6 +123,7 @@ const TASK_ICONS: Record<TaskIcon, React.ReactNode> = {
 };
 
 function TaskRow({ task, onCancel, onClear }: { task: Task; onCancel?: () => void; onClear?: () => void }) {
+  void usePrivacy();
   const isDone = task.status === 'done';
   return (
     <div style={{
@@ -148,7 +151,7 @@ function TaskRow({ task, onCancel, onClear }: { task: Task; onCancel?: () => voi
       </div>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
-          <span style={{ fontSize: 12.5, fontWeight: 600, color: isDone ? 'var(--et-mute)' : 'var(--et-ink)' }}>{task.name}</span>
+          <span style={{ fontSize: 12.5, fontWeight: 600, color: isDone ? 'var(--et-mute)' : 'var(--et-ink)' }}>{maskText(task.name)}</span>
           {!isDone && <span className="et-num" style={{ fontSize: 11, color: 'var(--et-mute)' }}>{task.pct}%</span>}
         </div>
         {!isDone && (
@@ -156,13 +159,13 @@ function TaskRow({ task, onCancel, onClear }: { task: Task; onCancel?: () => voi
             <div style={{ width: `${task.pct}%`, height: '100%', background: 'var(--et-orange)', borderRadius: 999, transition: 'width .25s' }} />
           </div>
         )}
-        <div className="et-meta" style={{ fontSize: 11, marginTop: 4, color: 'var(--et-mute)' }}>{task.sub}</div>
+        <div className="et-meta" style={{ fontSize: 11, marginTop: 4, color: 'var(--et-mute)' }}>{maskText(task.sub)}</div>
       </div>
       <button onClick={isDone ? onClear : onCancel} style={{
         all: 'unset', cursor: 'pointer', padding: '4px 10px', borderRadius: 6,
         fontSize: 11, color: isDone ? 'var(--et-mute)' : 'var(--et-ink)',
         border: '0.5px solid var(--et-line-2)', background: 'var(--et-paper)',
-      }}>{isDone ? '清除' : (task.action || '取消')}</button>
+      }}>{isDone ? '清除' : maskText(task.action || '取消')}</button>
     </div>
   );
 }

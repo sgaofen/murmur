@@ -10,7 +10,7 @@ import { AIExportDialog } from './AIExportDialog';
 import { MediaGallery } from './extras/MediaGallery';
 import { AgentReport } from './extras/AgentReport';
 import { mdToHtml, MURMUR_MD_CSS } from '../utils/markdown';
-import { displayName, maskedWxid, maskText } from '../utils/privacy';
+import { displayName, isPrivacyMode, maskedWxid, maskText } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
 
 interface Props {
@@ -71,7 +71,7 @@ function PersonCard({ friend, stats }: { friend: Friend; stats: FriendStats | nu
           paddingLeft: 14, borderLeft: '2.5px solid var(--et-orange)',
           maxWidth: 540, fontStyle: 'italic',
         }}>
-          「{summarySentence}」
+          「{maskText(summarySentence)}」
         </div>
       </div>
     </div>
@@ -188,7 +188,7 @@ function SignalsEvidenceCard({ friend }: { friend: Friend & { relationship_signa
     }}>
       <div className="et-eyebrow">离线证据 · 不靠 AI 也能看的硬信号</div>
       <div className="et-h2" style={{ marginTop: 6, color: 'var(--et-ink)' }}>
-        关系层级 {sig.tier || '—'} <span style={{ fontSize: 13, color: 'var(--et-mute)', fontWeight: 400 }}>· {sig.tier_label || ''}</span>
+        关系层级 {sig.tier || '—'} <span style={{ fontSize: 13, color: 'var(--et-mute)', fontWeight: 400 }}>· {maskText(sig.tier_label || '')}</span>
       </div>
       <div style={{
         marginTop: 14, display: 'grid',
@@ -213,7 +213,7 @@ function SignalsEvidenceCard({ friend }: { friend: Friend & { relationship_signa
           {notes.map((n, i) => (
             <li key={i} className="et-serif" style={{ padding: '4px 0', fontSize: 14,
               color: 'var(--et-ink-soft)', lineHeight: 1.6 }}>
-              <span style={{ color: 'var(--et-orange)', marginRight: 6 }}>▸</span>{n}
+              <span style={{ color: 'var(--et-orange)', marginRight: 6 }}>▸</span>{maskText(n)}
             </li>
           ))}
         </ul>
@@ -315,7 +315,7 @@ function AIReportCard({ friend, onView, onRerun }: {
         whiteSpace: 'pre-wrap', maxHeight: 220, overflow: 'hidden',
         position: 'relative',
       }}>
-        {preview}
+        {maskText(preview)}
         <div style={{
           position: 'absolute', bottom: 0, left: 0, right: 0, height: 60,
           background: 'linear-gradient(to bottom, transparent, var(--et-paper))',
@@ -365,7 +365,7 @@ function AnalysisProgressCard({ stream, error }: {
       </div>
       {error && (
         <div className="et-meta" style={{ marginTop: 10, color: 'var(--et-rose)' }}>
-          {error.slice(0, 180)}
+          {maskText(error.slice(0, 180))}
         </div>
       )}
       {tail && !error && (
@@ -375,7 +375,7 @@ function AnalysisProgressCard({ stream, error }: {
           fontFamily: 'var(--et-mono)', fontSize: 11, lineHeight: 1.55,
           color: 'var(--et-ink-soft)', whiteSpace: 'pre-wrap',
           maxHeight: 180, overflow: 'auto',
-        }}>{tail}</div>
+        }}>{maskText(tail)}</div>
       )}
     </div>
   );
@@ -418,7 +418,7 @@ function ReportViewerOverlay({ relPath, friendName, onClose }: {
         <div style={{ fontFamily: 'var(--et-serif)', fontSize: 13, color: 'var(--et-mute)', marginTop: 4 }}>
           关于 {friendName}
         </div>
-        {error && <div style={{ marginTop: 24, color: 'var(--et-rose)' }}>加载失败：{error}</div>}
+        {error && <div style={{ marginTop: 24, color: 'var(--et-rose)' }}>加载失败：{maskText(error)}</div>}
         {!content && !error && <div className="et-meta" style={{ marginTop: 24 }}>加载中…</div>}
         {content && (
           <article
@@ -427,7 +427,7 @@ function ReportViewerOverlay({ relPath, friendName, onClose }: {
               marginTop: 18, fontFamily: 'var(--et-sans)',
               fontSize: 15, lineHeight: 1.78, color: 'var(--et-ink)',
             }}
-            dangerouslySetInnerHTML={{ __html: mdToHtml(content) }}
+            dangerouslySetInnerHTML={{ __html: mdToHtml(maskText(content)) }}
           />
         )}
       </div>
@@ -696,9 +696,18 @@ export function FriendPage({ friendId, onBack, onOpenFriend }: Props) {
     if (!friend) return;
     try {
       const msgs = await getMessages(friendId, { limit: 5000 });
-      downloadAsFile(`${displayName(friend.id, friend.name)}_chat.json`, JSON.stringify(msgs, null, 2));
+      const privacy = isPrivacyMode();
+      const exported = privacy
+        ? msgs.map((m: any) => ({
+            ...m,
+            from: displayName(m.from_id, m.from),
+            from_id: m.from_id ? maskedWxid(m.from_id) : m.from_id,
+            text: maskText(m.text || ''),
+          }))
+        : msgs;
+      downloadAsFile(`${displayName(friend.id, friend.name)}_chat.json`, JSON.stringify(exported, null, 2));
     } catch (e: any) {
-      alert('导出失败：' + (e?.message || e));
+      alert('导出失败：' + maskText(e?.message || String(e)));
     }
   }
 
@@ -706,7 +715,7 @@ export function FriendPage({ friendId, onBack, onOpenFriend }: Props) {
     return (
       <div style={{ padding: 40 }}>
         <button onClick={onBack} style={{ all: 'unset', cursor: 'pointer', color: 'var(--et-mute)' }}>← 返回</button>
-        <div style={{ marginTop: 20, color: 'var(--et-rose)' }}>加载失败：{error}</div>
+        <div style={{ marginTop: 20, color: 'var(--et-rose)' }}>加载失败：{maskText(error)}</div>
       </div>
     );
   }
@@ -746,7 +755,7 @@ export function FriendPage({ friendId, onBack, onOpenFriend }: Props) {
               <StatTile label="总消息" value={(stats.totalSelf + stats.totalOther).toLocaleString()} sub="含图文/语音" big />
               <StatTile label="时间跨度" value={`${stats.spanDays} 天`} sub="第一次 → 最近一次" />
               <StatTile label="最长沉默" value={`${stats.longestSilenceDays} 天`} sub={`${stats.longestSilenceFrom} 起`} />
-              <StatTile label="高频词" value={`「${stats.topPhrase}」`} sub={`共出现 ${stats.topPhraseCount} 次`} />
+              <StatTile label="高频词" value={`「${maskText(stats.topPhrase)}」`} sub={`共出现 ${stats.topPhraseCount} 次`} />
             </div>
             <RhythmCard friend={friend} stats={stats} />
           </>

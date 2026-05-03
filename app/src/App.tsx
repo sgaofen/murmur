@@ -11,6 +11,7 @@ import { getDiagnose, getInfo } from './data/api';
 import { TaskCenterProvider } from './components/extras/TaskCenter';
 import { BatchStatusPill, BatchTrackerProvider } from './components/extras/BatchTracker';
 import { PrivacyToggle } from './components/PrivacyToggle';
+import { PrivacyIdentityIndex } from './components/extras/PrivacyIdentityIndex';
 
 type Route =
   | { name: 'loading' }
@@ -159,6 +160,7 @@ export default function App() {
   return (
     <TaskCenterProvider>
       <BatchTrackerProvider>
+        <PrivacyIdentityIndex />
         {body}
         <BatchStatusPill onOpenReports={() => go('reports')} />
         {showDevControls && DevControls}

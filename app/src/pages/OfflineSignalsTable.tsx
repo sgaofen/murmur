@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { Friend } from '../data/types';
 import { getAllFriends, getFriend } from '../data/api';
-import { displayName } from '../utils/privacy';
+import { displayName, maskedWxid, maskText } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
 
 interface SignalRow {
@@ -110,9 +110,9 @@ export function OfflineSignalsTable({ onBack, onOpenFriend }: Props) {
     const csv = [
       headers.join(','),
       ...rows.map(r => [
-        JSON.stringify(displayName(r.id, r.name)), r.id, r.tier, r.msg_count, r.span_days, r.longevity_years || 0,
+        JSON.stringify(displayName(r.id, r.name)), maskedWxid(r.id), r.tier, r.msg_count, r.span_days, r.longevity_years || 0,
         r.longest_silence, r.offline_evidence, r.vuln_total, r.call_count, r.apology_count,
-        r.lifecycle_count, JSON.stringify(r.last_active), JSON.stringify(r.signature_summary),
+        r.lifecycle_count, JSON.stringify(r.last_active), JSON.stringify(maskText(r.signature_summary)),
       ].join(','))
     ].join('\n');
     const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' });
@@ -124,7 +124,7 @@ export function OfflineSignalsTable({ onBack, onOpenFriend }: Props) {
   }
 
   if (error) {
-    return <div style={{ padding: 40, color: 'var(--et-rose)' }}>加载失败：{error}</div>;
+    return <div style={{ padding: 40, color: 'var(--et-rose)' }}>加载失败：{maskText(error)}</div>;
   }
 
   return (
@@ -243,7 +243,7 @@ export function OfflineSignalsTable({ onBack, onOpenFriend }: Props) {
                   <td className="et-num" style={{ padding: '8px' }}>{r.lifecycle_count}</td>
                   <td style={{ padding: '8px', color: 'var(--et-mute)', fontSize: 11 }}>{r.last_active}</td>
                   <td style={{ padding: '8px', color: 'var(--et-ink-soft)', fontSize: 11 }}>
-                    {r.signature_summary}
+                    {maskText(r.signature_summary)}
                   </td>
                 </tr>
               ))}
