@@ -101,11 +101,20 @@ export function OnboardingDialog({ open, onClose, onDone }: Props) {
   }
 
   async function startKeyExtract() {
-    setPhase('extract-key');
-    setProgress(diag?.platform === 'windows'
-      ? 'Hook 正在等待登录事件：请保持微信在登录页，然后去微信点击登录 / 扫码登录…'
-      : '扫描 WeChat 进程内存中…');
     try {
+      if (diag?.platform === 'windows') {
+        const latest = await getDiagnose();
+        setDiag(latest);
+        if (latest.capabilities.weixin_running === false) {
+          setError('没有检测到正在运行的 Weixin.exe / WeChat.exe。请先打开微信，让它停在登录页但不要关闭程序；然后回到 Murmur 点「再试一次」。');
+          setPhase('error');
+          return;
+        }
+      }
+      setPhase('extract-key');
+      setProgress(diag?.platform === 'windows'
+        ? 'Hook 正在等待登录事件：请保持微信在登录页，然后去微信点击登录 / 扫码登录…'
+        : '扫描 WeChat 进程内存中…');
       // autoRestart=false: hook the existing WeChat instead of kill+relaunch.
       // Kill+relaunch on Win11 + WeChat 4.1.x sometimes makes the new Weixin.exe die
       // before the hook can attach. The reliable flow is: user logs out first
@@ -119,7 +128,7 @@ export function OnboardingDialog({ open, onClose, onDone }: Props) {
         const fallback = diag?.platform === 'windows'
           ? '没读到密钥 — 请确认微信程序没有关闭：先让微信停在登录页，再点 Murmur 的开始抓密钥，然后在 90 秒内回微信完成登录。'
           : '没读到密钥 — 请确保已登录微信并点开几个对话';
-        setError(r.log?.split('\n').slice(-6).join('\n') || fallback);
+        setError(r.log?.split('\n').slice(-12).join('\n') || fallback);
         setPhase('error');
         return;
       }
@@ -286,9 +295,9 @@ function CapabilityList({ diag }: { diag: Diagnose }) {
     if (diag.capabilities.sip_enabled !== null && diag.capabilities.sip_enabled !== undefined) {
       rows.push(['SIP（系统完整性保护）', diag.capabilities.sip_enabled ? '开启（默认）' : '已关闭', true]);
     }
-    if (diag.capabilities.weixin_running !== null && diag.capabilities.weixin_running !== undefined) {
-      rows.push(['微信进程', diag.capabilities.weixin_running ? '运行中 ✓' : '未运行', !!diag.capabilities.weixin_running]);
-    }
+  }
+  if (diag.capabilities.weixin_running !== null && diag.capabilities.weixin_running !== undefined) {
+    rows.push(['微信进程', diag.capabilities.weixin_running ? '运行中 ✓' : '未运行', !!diag.capabilities.weixin_running]);
   }
   if (diag.wechat_search_roots?.length) {
     rows.push(['扫描路径', `${diag.wechat_search_roots.length} 个`, true]);
@@ -548,6 +557,7 @@ function MacAutoExtract({ diag, onStart, onPaste }: { diag: Diagnose; onStart: (
 }
 
 function WinNeedKey({ diag, onStart }: { diag: Diagnose; onStart: () => void }) {
+  const wechatRunning = diag.capabilities.weixin_running !== false;
   return (
     <>
       <div className="et-serif" style={{ fontSize: 15, lineHeight: 1.7, color: 'var(--et-ink-soft)', marginBottom: 14 }}>
@@ -566,8 +576,21 @@ function WinNeedKey({ diag, onStart }: { diag: Diagnose; onStart: () => void }) 
       }}>
         💡 关键点：先停在登录页，再点开始扫描，最后去微信登录。已经登录着不动，hook 抓不到那一瞬间的 key。
       </div>
+      {!wechatRunning && (
+        <div style={{
+          padding: '10px 14px', background: 'rgba(196,90,63,0.10)',
+          border: '0.5px solid rgba(196,90,63,0.35)', borderRadius: 8,
+          fontSize: 12, color: 'var(--et-rose)', marginBottom: 14, lineHeight: 1.6,
+        }}>
+          现在没有检测到微信进程。请先打开微信，让它停在登录页，然后点「再试一次」重新检测。
+        </div>
+      )}
       <CapabilityList diag={diag} />
-      <button onClick={onStart} style={primaryBtn}>开始抓密钥</button>
+      <button onClick={onStart} disabled={!wechatRunning} style={{
+        ...primaryBtn,
+        opacity: wechatRunning ? 1 : 0.45,
+        cursor: wechatRunning ? 'pointer' : 'not-allowed',
+      }}>开始抓密钥</button>
     </>
   );
 }

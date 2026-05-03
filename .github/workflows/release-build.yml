@@ -1,0 +1,112 @@
+name: Build Release Assets
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to upload assets to"
+        required: true
+        default: "v0.2.9"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            os: windows-latest
+            platform: windows
+          - name: macOS Apple Silicon
+            os: macos-14
+            platform: macos
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set release tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "RELEASE_TAG=${{ inputs.tag }}" >> "$GITHUB_ENV"
+          else
+            echo "RELEASE_TAG=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri -> target
+
+      - name: Install Python backend dependencies
+        run: python -m pip install --upgrade pip pyinstaller -r requirements.txt
+
+      - name: Install frontend dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Build Windows installers
+        if: matrix.platform == 'windows'
+        working-directory: app
+        shell: pwsh
+        run: npm run tauri:build
+
+      - name: Collect Windows assets
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release-assets | Out-Null
+          Get-ChildItem app/src-tauri/target/release/bundle -Recurse -File |
+            Where-Object { $_.Extension -in ".exe", ".msi" } |
+            ForEach-Object { Copy-Item $_.FullName -Destination release-assets }
+          Get-ChildItem release-assets
+
+      - name: Build macOS app and DMG
+        if: matrix.platform == 'macos'
+        working-directory: app
+        run: npm run tauri:build:dmg
+
+      - name: Collect macOS assets
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          APP_PATH="app/src-tauri/target/release/bundle/macos/Murmur.app"
+          if [ -d "$APP_PATH" ]; then
+            ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" release-assets/Murmur_macOS_AppleSilicon.app.zip
+          fi
+          DMG="$(find app/src-tauri/target/release/bundle/dmg -maxdepth 1 -name '*.dmg' -print -quit)"
+          if [ -n "$DMG" ]; then
+            cp "$DMG" release-assets/Murmur_macOS_AppleSilicon.dmg
+          fi
+          ls -lh release-assets
+
+      - name: Upload assets to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          files: release-assets/*
