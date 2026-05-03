@@ -23,6 +23,7 @@ IS_WINDOWS = sys.platform.startswith("win")
 # Win32 process enumeration (same as extract_key.py)
 PROCESS_QUERY_INFORMATION = 0x0400
 PROCESS_VM_READ = 0x0010
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
 if IS_WINDOWS:
     psapi = ctypes.WinDLL("psapi", use_last_error=True)
@@ -59,13 +60,38 @@ def find_weixin_pids() -> list[int]:
                 pids.append(pid)
         finally:
             kernel32.CloseHandle(h)
-    return pids
+    if pids:
+        return sorted(set(int(p) for p in pids))
+    return _tasklist_weixin_pids()
+
+
+def _tasklist_weixin_pids() -> list[int]:
+    """Fallback process discovery that does not require PROCESS_VM_READ."""
+    try:
+        pids: list[int] = []
+        for image in ("Weixin.exe", "WeChat.exe"):
+            r = subprocess.run(
+                ["tasklist", "/FI", f"IMAGENAME eq {image}", "/FO", "CSV", "/NH"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+            )
+            for line in (r.stdout or "").splitlines():
+                parts = [x.strip().strip('"') for x in line.split('","')]
+                if len(parts) >= 2 and parts[0].lower() == image.lower():
+                    try:
+                        pids.append(int(parts[1]))
+                    except ValueError:
+                        pass
+        return sorted(set(pids))
+    except Exception:
+        return []
 
 
 def get_executable_path(pid: int) -> str | None:
     if not IS_WINDOWS or psapi is None or kernel32 is None:
         return None
     h = kernel32.OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, False, pid)
+    if not h:
+        h = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
     if not h:
         return None
     try:
@@ -236,6 +262,20 @@ def hook_and_poll(pid: int, timeout: int = 60) -> str | None:
     return key
 
 
+def hook_candidates_and_poll(pids: list[int], timeout: int = 60) -> str | None:
+    """Try newest WeChat/Weixin PIDs first; launcher/helper PIDs can reject hooks."""
+    candidates = sorted(set(int(p) for p in pids if int(p) > 0), reverse=True)
+    print(f"[*] Candidate WeChat PIDs: {candidates}")
+    for idx, pid in enumerate(candidates, 1):
+        print(f"[*] Trying PID {pid} ({idx}/{len(candidates)})...")
+        key = hook_and_poll(pid, timeout=timeout)
+        if key:
+            return key
+        if idx < len(candidates):
+            print(f"[!] PID {pid} did not yield a key; trying next candidate.")
+    return None
+
+
 def auto_restart_and_extract(timeout: int = 90) -> str | None:
     """Kill Weixin.exe → relaunch → inject hook ASAP → wait for auto-login event."""
     pids = find_weixin_pids()
@@ -331,9 +371,11 @@ def main():
     else:
         pids = [args.pid] if args.pid else find_weixin_pids()
         if not pids:
-            print("[X] Weixin.exe not running. Use --auto-restart to launch it.")
+            print("[X] Weixin.exe / WeChat.exe not running.")
+            print("    Open WeChat and leave it at the login page, but do not close the program.")
+            print("    Then start Murmur's key scan and complete login within the timeout.")
             sys.exit(2)
-        key = hook_and_poll(pids[0], timeout=args.timeout)
+        key = hook_candidates_and_poll(pids, timeout=args.timeout)
 
     if not key:
         sys.exit(1)

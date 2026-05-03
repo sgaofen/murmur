@@ -470,7 +470,7 @@ STOPWORDS.update("这个 那个 一下 还是 就是 没有 什么 怎么 为啥
 STOP_CHARS = set("的了是我你他她也都在就不和与这那一个有没啊吧呀嗯哦嘛呢吗哈呜哇噢哎唉哟唔嗷嘿哼啦喔把被让给从向对跟比又再才还但而或因所以之上下里外中后前时日年月来去到过")
 NON_TEXT = re.compile(r"\[[^\]]+\]")
 URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
-APP_VERSION = "0.2.6"
+APP_VERSION = "0.2.9"
 YEARBOOK_CACHE_VERSION = 5
 
 
@@ -4149,7 +4149,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 # errors="replace" so CP936/GBK output (taskkill, registry strings, Chinese paths)
                 # doesn't crash the reader thread with UnicodeDecodeError on bytes like 0xb4.
                 r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
-                stdout = r.stdout or ""
+                stdout = (r.stdout or "") + (r.stderr or "")
             ms = round((_time.time() - t0) * 1000)
             # Parse output. Two flavours:
             #   Windows (extract_key_dll.py): single line "[KEY] <64hex>"
