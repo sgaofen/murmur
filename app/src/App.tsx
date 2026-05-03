@@ -92,13 +92,14 @@ export default function App() {
         setOnboarding(true);
         return;
       }
+      const hasRuntimeData = Boolean(info.data_dir);
       const d = await probe(() => getDiagnose());
       if (cancelled || !d) return;
-      if (d.platform === 'macos' && d.capabilities.tcc_blocked) {
+      if (d.platform === 'macos' && d.capabilities.tcc_blocked && !hasRuntimeData) {
         setOnboarding(true);
         return;
       }
-      const noData = d.profiles.every(p => !p.has_decrypted_data);
+      const noData = !hasRuntimeData && d.profiles.every(p => !p.has_decrypted_data);
       const noKey = !d.saved_key;
       const isMacWithoutData = d.platform === 'macos' && noData;
       const isWinFirstRun = d.platform === 'windows' && noData && noKey;

@@ -4222,12 +4222,24 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
 
             steps_log = []
             try:
+                import shlex
+                wechat_app = _paths.find_weixin_exe()
+                main_exec = _paths.wechat_main_exec(wechat_app)
+                if not wechat_app or not main_exec:
+                    return self._send_json({
+                        "ok": False,
+                        "error": "没找到 WeChat.app / Weixin.app；请先安装并打开微信，或设置 MURMUR_WECHAT_APP",
+                        "log": steps_log,
+                    })
+
                 # 1. Quit WeChat (graceful, then force)
                 steps_log.append("[1/4] 退出微信…")
-                subprocess.run(["osascript", "-e", 'try\n  tell application "WeChat" to quit\nend try'],
-                               capture_output=True, text=True, timeout=10)
+                for app_name in ("WeChat", "Weixin", "微信"):
+                    subprocess.run(["osascript", "-e", f'try\n  tell application "{app_name}" to quit\nend try'],
+                                   capture_output=True, text=True, timeout=10)
                 _time.sleep(1.5)
                 subprocess.run(["pkill", "-x", "WeChat"], capture_output=True)
+                subprocess.run(["pkill", "-x", "Weixin"], capture_output=True)
                 _time.sleep(0.8)
 
                 # 2. Run codesign with admin privileges via osascript
@@ -4237,11 +4249,12 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 # Fix: first wipe the signature, then ad-hoc re-sign without preserving
                 # flags. Use a chained shell command — osascript runs them as one
                 # admin-elevated subshell so the password prompt only appears once.
+                main_exec_q = shlex.quote(str(main_exec))
                 shell_cmd = (
-                    "codesign --remove-signature /Applications/WeChat.app/Contents/MacOS/WeChat && "
+                    f"codesign --remove-signature {main_exec_q} && "
                     "codesign --force --sign - "
                     "--preserve-metadata=identifier,entitlements,requirements "
-                    "/Applications/WeChat.app/Contents/MacOS/WeChat"
+                    f"{main_exec_q}"
                 )
                 cmd = (f'do shell script "{shell_cmd}" with administrator privileges')
                 t0 = _time.time()
@@ -4260,8 +4273,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 # 3. Verify the runtime flag is now gone (check the main exec, not the bundle)
                 steps_log.append("[3/4] 验证签名…")
                 v = subprocess.run(
-                    ["codesign", "-d", "-v",
-                     "/Applications/WeChat.app/Contents/MacOS/WeChat"],
+                    ["codesign", "-d", "-v", str(main_exec)],
                     capture_output=True, text=True,
                 )
                 v_blob = (v.stdout + "\n" + v.stderr)
@@ -4277,7 +4289,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 # 4. Re-launch
                 if relaunch:
                     steps_log.append("[4/4] 启动微信…")
-                    subprocess.Popen(["open", "/Applications/WeChat.app"])
+                    subprocess.Popen(["open", str(wechat_app)])
 
                 return self._send_json({
                     "ok": True,

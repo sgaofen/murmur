@@ -40,7 +40,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from paths import discover_wechat_profiles, IS_MAC, murmur_config_path  # noqa: E402
+from paths import discover_wechat_profiles, IS_MAC, murmur_config_path, wechat_main_exec  # noqa: E402
 
 PAGE_SIZE = 4096
 SALT_SIZE = 16
@@ -131,11 +131,11 @@ def is_wechat_hardened() -> bool | None:
     Returns True if WeChat.app currently has the `runtime` (hardened) flag set,
     False if ad-hoc / unsigned, None on error.
     """
-    app = Path("/Applications/WeChat.app")
-    if not app.exists():
+    main_exec = wechat_main_exec()
+    if not main_exec:
         return None
     try:
-        r = subprocess.run(["codesign", "-d", "-v", str(app)],
+        r = subprocess.run(["codesign", "-d", "-v", str(main_exec)],
                            capture_output=True, text=True)
     except FileNotFoundError:
         return None
@@ -272,7 +272,7 @@ def main(argv=None) -> int:
         sys.stderr.write(
             "[warn] WeChat.app still has hardened runtime — task_for_pid will fail.\n"
             "[warn] Run this once (you'll be asked for your Mac password):\n"
-            "[warn]   sudo codesign --force --deep --sign - /Applications/WeChat.app\n"
+            "[warn]   use Murmur's 重签名 button, or codesign the detected WeChat executable\n"
             "[warn] Then quit WeChat, re-launch it, log in, and re-run this script.\n"
         )
     elif hardened is False:
@@ -314,7 +314,7 @@ def main(argv=None) -> int:
         print("[ERR] task_for_pid denied.")
         print("      Cause: WeChat.app has hardened runtime — AMFI blocks debugger attach.")
         print("      Fix without rebooting / disabling SIP:")
-        print("         sudo codesign --force --deep --sign - /Applications/WeChat.app")
+        print("         use Murmur's 重签名 button, or codesign the detected WeChat executable")
         print("      then quit + re-launch WeChat, log in, and re-run this script.")
         print(f"      kern_return_t = {kr}")
         return 3
