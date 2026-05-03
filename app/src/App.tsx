@@ -73,7 +73,7 @@ export default function App() {
     // mounts seconds before etcli is listening). Without retry, /api/info
     // fails once, we silently bail, and onboarding never opens even though
     // the user is on a fresh install that needs it.
-    const probe = async <T,>(fn: () => Promise<T>, attempts = 8, delayMs = 750): Promise<T | null> => {
+    const probe = async <T,>(fn: () => Promise<T>, attempts = 80, delayMs = 750): Promise<T | null> => {
       for (let i = 0; i < attempts; i++) {
         if (cancelled) return null;
         try { return await fn(); } catch { /* retry */ }

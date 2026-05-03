@@ -9,7 +9,7 @@ on:
       tag:
         description: "Release tag to upload assets to"
         required: true
-        default: "v0.2.10"
+        default: "v0.2.11"
 
 permissions:
   contents: write
@@ -75,6 +75,40 @@ jobs:
         shell: pwsh
         run: npm run tauri:build
 
+      - name: Smoke test bundled backend (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $exe = "app/src-tauri/etcli/etcli.exe"
+          if (!(Test-Path $exe)) { throw "Missing bundled backend: $exe" }
+          foreach ($required in @(
+            "app/src-tauri/etcli/_internal/native/wx_key.dll",
+            "app/src-tauri/etcli/_internal/native/go_decrypt.dll"
+          )) {
+            if (!(Test-Path $required)) { throw "Missing native dependency: $required" }
+          }
+
+          $proc = Start-Process -FilePath $exe -ArgumentList @("serve", "--port", "19100") -PassThru
+          try {
+            $ok = $false
+            for ($i = 0; $i -lt 60; $i++) {
+              try {
+                $info = Invoke-RestMethod "http://127.0.0.1:19100/api/info" -TimeoutSec 2
+                if ($info.version) {
+                  Write-Host "Backend smoke ok, version=$($info.version)"
+                  $ok = $true
+                  break
+                }
+              } catch {
+                Start-Sleep -Milliseconds 500
+              }
+            }
+            if (!$ok) { throw "Bundled backend did not answer /api/info" }
+          } finally {
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          }
+
       - name: Collect Windows assets
         if: matrix.platform == 'windows'
         shell: pwsh
@@ -89,6 +123,29 @@ jobs:
         if: matrix.platform == 'macos'
         working-directory: app
         run: npm run tauri:build:dmg
+
+      - name: Smoke test bundled backend (macOS)
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x app/src-tauri/etcli/etcli
+          app/src-tauri/etcli/etcli serve --port 19100 >/tmp/murmur-backend-smoke.log 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true' EXIT
+          ok=0
+          for _ in {1..60}; do
+            if curl -fsS http://127.0.0.1:19100/api/info >/tmp/murmur-info.json; then
+              python -c "import json; info=json.load(open('/tmp/murmur-info.json', encoding='utf-8')); assert info.get('version'), info; print('Backend smoke ok, version=' + str(info.get('version')))"
+              ok=1
+              break
+            fi
+            sleep 0.5
+          done
+          if [ "$ok" != "1" ]; then
+            cat /tmp/murmur-backend-smoke.log
+            exit 1
+          fi
 
       - name: Collect macOS assets
         if: matrix.platform == 'macos'

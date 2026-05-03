@@ -125,25 +125,31 @@ const TASK_ICONS: Record<TaskIcon, React.ReactNode> = {
 function TaskRow({ task, onCancel, onClear }: { task: Task; onCancel?: () => void; onClear?: () => void }) {
   void usePrivacy();
   const isDone = task.status === 'done';
+  const isError = task.status === 'error';
+  const isTerminal = isDone || isError;
   return (
     <div style={{
       display: 'flex', alignItems: 'center', gap: 12,
       padding: '12px 14px', borderRadius: 12,
-      background: isDone ? 'transparent' : 'var(--et-paper)',
-      border: isDone ? '0.5px dashed var(--et-line-2)' : '0.5px solid var(--et-line-2)',
+      background: isTerminal ? 'transparent' : 'var(--et-paper)',
+      border: isTerminal ? '0.5px dashed var(--et-line-2)' : '0.5px solid var(--et-line-2)',
       opacity: isDone ? 0.65 : 1,
       transition: 'transform .15s, box-shadow .2s',
     }}
-    onMouseEnter={(e) => { if (!isDone) { e.currentTarget.style.transform = 'translateY(-1px)'; e.currentTarget.style.boxShadow = 'var(--et-shadow-2)'; } }}
+    onMouseEnter={(e) => { if (!isTerminal) { e.currentTarget.style.transform = 'translateY(-1px)'; e.currentTarget.style.boxShadow = 'var(--et-shadow-2)'; } }}
     onMouseLeave={(e) => { e.currentTarget.style.transform = 'none'; e.currentTarget.style.boxShadow = 'none'; }}
     >
       <div style={{
         width: 30, height: 30, borderRadius: 8,
-        background: isDone ? 'rgba(26,43,74,0.06)' : 'var(--et-orange-soft)',
-        color: isDone ? 'var(--et-mute)' : 'var(--et-orange-2)',
+        background: isTerminal ? 'rgba(26,43,74,0.06)' : 'var(--et-orange-soft)',
+        color: isError ? 'var(--et-orange)' : isDone ? 'var(--et-mute)' : 'var(--et-orange-2)',
         display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
       }}>
-        {isDone ? (
+        {isError ? (
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6">
+            <path d="M3 3l6 6M9 3L3 9" strokeLinecap="round" />
+          </svg>
+        ) : isDone ? (
           <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6">
             <path d="M2.5 6.2L4.8 8.5L9.5 3.8" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
@@ -152,20 +158,20 @@ function TaskRow({ task, onCancel, onClear }: { task: Task; onCancel?: () => voi
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
           <span style={{ fontSize: 12.5, fontWeight: 600, color: isDone ? 'var(--et-mute)' : 'var(--et-ink)' }}>{maskText(task.name)}</span>
-          {!isDone && <span className="et-num" style={{ fontSize: 11, color: 'var(--et-mute)' }}>{task.pct}%</span>}
+          {!isTerminal && <span className="et-num" style={{ fontSize: 11, color: 'var(--et-mute)' }}>{task.pct}%</span>}
         </div>
-        {!isDone && (
+        {!isTerminal && (
           <div style={{ height: 4, background: 'rgba(26,43,74,0.08)', borderRadius: 999, overflow: 'hidden', marginTop: 6 }}>
             <div style={{ width: `${task.pct}%`, height: '100%', background: 'var(--et-orange)', borderRadius: 999, transition: 'width .25s' }} />
           </div>
         )}
         <div className="et-meta" style={{ fontSize: 11, marginTop: 4, color: 'var(--et-mute)' }}>{maskText(task.sub)}</div>
       </div>
-      <button onClick={isDone ? onClear : onCancel} style={{
+      <button onClick={isTerminal ? onClear : onCancel} style={{
         all: 'unset', cursor: 'pointer', padding: '4px 10px', borderRadius: 6,
-        fontSize: 11, color: isDone ? 'var(--et-mute)' : 'var(--et-ink)',
+        fontSize: 11, color: isTerminal ? 'var(--et-mute)' : 'var(--et-ink)',
         border: '0.5px solid var(--et-line-2)', background: 'var(--et-paper)',
-      }}>{isDone ? '清除' : maskText(task.action || '取消')}</button>
+      }}>{isTerminal ? '清除' : maskText(task.action || '取消')}</button>
     </div>
   );
 }
@@ -174,6 +180,7 @@ export function TaskCenterDrawer({ onClose }: { onClose: () => void }) {
   const { tasks, removeTask, clearDone } = useTaskCenter();
   const running = tasks.filter(t => t.status === 'run').length;
   const done = tasks.filter(t => t.status === 'done').length;
+  const errors = tasks.filter(t => t.status === 'error').length;
   return (
     <>
       <div onClick={onClose} style={{
@@ -196,7 +203,7 @@ export function TaskCenterDrawer({ onClose }: { onClose: () => void }) {
         }} />
         <div style={{ padding: '14px 18px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '0.5px solid var(--et-line)' }}>
           <div className="et-serif" style={{ fontSize: 14, fontWeight: 600, color: 'var(--et-ink)' }}>后台任务</div>
-          <div className="et-meta">{running} 进行中 · {done} 已完成</div>
+          <div className="et-meta">{running} 进行中 · {done} 已完成{errors ? ` · ${errors} 失败` : ''}</div>
         </div>
         <div style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 10, maxHeight: '60vh', overflowY: 'auto' }}>
           {tasks.length === 0 && (
@@ -209,7 +216,7 @@ export function TaskCenterDrawer({ onClose }: { onClose: () => void }) {
         <div style={{ padding: '10px 18px', borderTop: '0.5px solid var(--et-line)', display: 'flex', justifyContent: 'flex-end' }}>
           <button onClick={clearDone} style={{
             all: 'unset', cursor: 'pointer', fontSize: 11, color: 'var(--et-orange)', fontWeight: 600,
-          }}>清除已完成</button>
+          }}>清除已结束</button>
         </div>
       </div>
     </>

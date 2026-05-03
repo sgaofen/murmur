@@ -101,6 +101,34 @@ def discover_data_dir() -> Optional[Path]:
     return None
 
 
+def _tail_text(path: Path, max_lines: int = 80, max_bytes: int = 64_000) -> str:
+    """Best-effort tail for small diagnostic logs."""
+    try:
+        if not path.exists() or not path.is_file():
+            return ""
+        with path.open("rb") as f:
+            try:
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+                f.seek(max(0, size - max_bytes))
+            except OSError:
+                pass
+            data = f.read(max_bytes)
+        text = data.decode("utf-8", errors="replace")
+        return "\n".join(text.splitlines()[-max_lines:])
+    except Exception as e:
+        return f"(failed to read {path.name}: {e})"
+
+
+def read_diagnostic_logs(max_lines: int = 80) -> dict:
+    logs_dir = _paths.murmur_home() / "logs"
+    return {
+        "logs_dir": str(logs_dir),
+        "serve": _tail_text(logs_dir / "serve.log", max_lines=max_lines),
+        "tauri_shell": _tail_text(logs_dir / "tauri-shell.log", max_lines=max_lines),
+    }
+
+
 def self_wxid(prefs_path: Optional[Path] = None) -> Optional[str]:
     """Best-effort self wxid: legacy echotrace prefs first, else from active profile."""
     p = prefs_path or _flutter_prefs_path()
@@ -470,7 +498,7 @@ STOPWORDS.update("这个 那个 一下 还是 就是 没有 什么 怎么 为啥
 STOP_CHARS = set("的了是我你他她也都在就不和与这那一个有没啊吧呀嗯哦嘛呢吗哈呜哇噢哎唉哟唔嗷嘿哼啦喔把被让给从向对跟比又再才还但而或因所以之上下里外中后前时日年月来去到过")
 NON_TEXT = re.compile(r"\[[^\]]+\]")
 URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
-APP_VERSION = "0.2.10"
+APP_VERSION = "0.2.11"
 YEARBOOK_CACHE_VERSION = 5
 
 
@@ -3098,7 +3126,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 sys.stderr.write(f"[etcli serve] bootstrap auto-promote failed: {e}\n")
 
         # Bootstrap mode: only a small allowlist works without decrypted data.
-        _NO_STORE_GET = {"/api/info", "/api/agents", "/api/diagnose", "/api/reports"}
+        _NO_STORE_GET = {"/api/info", "/api/agents", "/api/diagnose", "/api/reports", "/api/log-tail"}
         if self.store is None and path not in _NO_STORE_GET and not path.startswith("/api/report/"):
             return self._send_json({
                 "error": "no_decrypted_data",
@@ -3125,6 +3153,13 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 "self_wxid": self.store.me,
                 "version": APP_VERSION,
             })
+
+        if path == "/api/log-tail":
+            try:
+                max_lines = max(20, min(200, int(qs.get("lines", [80])[0])))
+            except ValueError:
+                max_lines = 80
+            return self._send_json(read_diagnostic_logs(max_lines=max_lines))
 
         # Onboarding gate: data-needing endpoints return 503 until store is ready.
         # Endpoints that work without a store stay above this gate.
@@ -3300,6 +3335,14 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             caps = _paths.detect_capabilities()
             profiles = _paths.discover_wechat_profiles()
             cfg = _paths.load_config()
+            mac_keys_path = Path.home() / ".murmur" / "decrypted_keys.json"
+            has_mac_keys = False
+            if _paths.IS_MAC and mac_keys_path.exists():
+                try:
+                    mac_keys = json.loads(mac_keys_path.read_text(encoding="utf-8"))
+                    has_mac_keys = bool(mac_keys.get("keys_by_db") or mac_keys.get("keys_by_salt"))
+                except Exception:
+                    has_mac_keys = False
             return self._send_json({
                 "platform": "windows" if _paths.IS_WINDOWS else "macos" if _paths.IS_MAC else "linux",
                 "python": sys.version.split()[0],
@@ -3324,7 +3367,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     }
                     for p in profiles
                 ],
-                "saved_key": bool(cfg.get("decrypt_key")),
+                "saved_key": bool(cfg.get("decrypt_key")) or has_mac_keys,
                 "agents_found": len(_detect_local_agents()),
                 "notes": caps.notes,
                 "wechat_exe": str(_paths.find_weixin_exe()) if _paths.find_weixin_exe() else None,
