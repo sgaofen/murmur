@@ -66,19 +66,107 @@ class WeChatProfile:
     platform: str            # "windows" | "macos"
 
 
+def _dedupe_paths(paths: list[Path]) -> list[Path]:
+    out: list[Path] = []
+    seen: set[str] = set()
+    for p in paths:
+        key = os.path.normcase(str(p.expanduser()))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(p)
+    return out
+
+
+def _windows_drive_roots() -> list[Path]:
+    """Existing Windows drive roots. Falls back to C:..Z: if WinAPI is unavailable."""
+    roots: list[Path] = []
+    if IS_WINDOWS:
+        try:
+            import ctypes
+            mask = int(ctypes.windll.kernel32.GetLogicalDrives())
+            for idx in range(26):
+                if mask & (1 << idx):
+                    roots.append(Path(f"{chr(ord('A') + idx)}:/"))
+        except Exception:
+            pass
+    if not roots:
+        roots = [Path(f"{letter}:/") for letter in "CDEFGHIJKLMNOPQRSTUVWXYZ"]
+    return roots
+
+
+def _windows_xwechat_variants(base: Path, *, include_base: bool = True) -> list[Path]:
+    """Expand a user/registry/drive base into plausible WeChat data roots."""
+    name = base.name.lower()
+    variants = [base] if include_base else []
+    if name not in {"xwechat_files", "wechat files"}:
+        variants.extend([
+            base / "xwechat_files",
+            base / "Documents" / "xwechat_files",
+            base / "WeChat Files",
+            base / "Documents" / "WeChat Files",
+        ])
+    return variants
+
+
+def _windows_registry_xwechat_search_paths() -> list[Path]:
+    """Read WeChat's saved data directory hints from the registry when present."""
+    if not IS_WINDOWS:
+        return []
+    out: list[Path] = []
+    try:
+        import winreg
+        keys = [
+            (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Tencent\Weixin"),
+            (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Tencent\WeChat"),
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Tencent\Weixin"),
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Tencent\WeChat"),
+        ]
+        value_names = (
+            "FileSavePath",
+            "DataSavePath",
+            "PersonalDataPath",
+            "UserDataPath",
+            "SavePath",
+        )
+        for hive, subkey in keys:
+            try:
+                with winreg.OpenKey(hive, subkey) as k:
+                    for value_name in value_names:
+                        try:
+                            value, _ = winreg.QueryValueEx(k, value_name)
+                        except OSError:
+                            continue
+                        if not isinstance(value, str) or not value.strip():
+                            continue
+                        base = Path(os.path.expandvars(value.strip().strip('"')))
+                        out.extend(_windows_xwechat_variants(base))
+            except OSError:
+                continue
+    except ImportError:
+        pass
+    return out
+
+
 def _windows_xwechat_search_paths() -> list[Path]:
-    """Common locations for xwechat_files on Windows."""
-    paths = []
+    """Common locations for xwechat_files on Windows.
+
+    WeChat 4.x often stores data directly at a drive root, e.g.
+    E:/xwechat_files, while older guides tend to mention
+    D:/Documents/xwechat_files. Cover both so first-run diagnosis does not
+    falsely say the user has never logged in.
+    """
+    paths: list[Path] = []
     home = Path.home()
-    # Drive letters D:, E:, F:, ... in addition to default Documents
-    for letter in "DEFGHIJ":
-        paths.append(Path(f"{letter}:/Documents/xwechat_files"))
+    paths.extend(_windows_registry_xwechat_search_paths())
+    for root in _windows_drive_roots():
+        paths.extend(_windows_xwechat_variants(root, include_base=False))
     paths += [
         home / "Documents" / "xwechat_files",
         home / "OneDrive" / "Documents" / "xwechat_files",
         home / "OneDrive - Personal" / "Documents" / "xwechat_files",
     ]
-    return paths
+    return _dedupe_paths(paths)
 
 
 def _mac_xwechat_search_paths() -> list[Path]:
@@ -120,6 +208,16 @@ def _wechat_root_env_paths() -> list[Path]:
     return out
 
 
+def wechat_search_paths() -> list[Path]:
+    """All candidate WeChat data roots Murmur will inspect."""
+    raw_candidates = _wechat_root_env_paths() + (
+        _windows_xwechat_search_paths() if IS_WINDOWS
+        else _mac_xwechat_search_paths() if IS_MAC
+        else []
+    )
+    return _dedupe_paths(raw_candidates)
+
+
 def _safe_listdir(p: Path, timeout_s: float = 1.5) -> Optional[list[Path]]:
     """Listdir with a thread-based timeout. macOS TCC can BLOCK iterdir on
     ~/Library/Containers/<other-app> while waiting for user consent — without
@@ -154,19 +252,7 @@ def discover_wechat_profiles() -> list[WeChatProfile]:
     """
     global _LAST_TCC_BLOCKED
     _LAST_TCC_BLOCKED = False
-    raw_candidates = _wechat_root_env_paths() + (
-        _windows_xwechat_search_paths() if IS_WINDOWS
-        else _mac_xwechat_search_paths() if IS_MAC
-        else []
-    )
-    candidates: list[Path] = []
-    seen_candidates: set[str] = set()
-    for cand in raw_candidates:
-        key = str(cand.expanduser())
-        if key in seen_candidates:
-            continue
-        seen_candidates.add(key)
-        candidates.append(cand)
+    candidates = wechat_search_paths()
     profiles: list[WeChatProfile] = []
     seen_profiles: set[str] = set()
     plat = "windows" if IS_WINDOWS else "macos" if IS_MAC else "linux"

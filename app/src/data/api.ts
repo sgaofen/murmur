@@ -56,6 +56,7 @@ export interface Diagnose {
   notes: string[];
   wechat_exe: string | null;
   murmur_home: string;
+  wechat_search_roots?: string[];
 }
 
 export async function getDiagnose(): Promise<Diagnose> {

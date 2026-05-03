@@ -4,8 +4,9 @@
     python extract_key_dll.py             # 自动找微信进程，30秒内抓 key
     python extract_key_dll.py --pid 12345 # 指定 pid
 
-默认不重启微信：先把 hook 装到正在运行的 Weixin.exe/WeChat.exe，
-然后你手动退出登录再登录一次，hook 才能捕获登录事件里的主密钥。
+默认不重启微信：先让用户把微信停在登录页（不要关闭进程），
+然后把 hook 装到正在运行的 Weixin.exe/WeChat.exe，再让用户点击登录。
+hook 捕获登录事件里的主密钥。
 """
 from __future__ import annotations
 import argparse

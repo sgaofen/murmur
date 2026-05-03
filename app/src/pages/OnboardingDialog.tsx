@@ -103,18 +103,23 @@ export function OnboardingDialog({ open, onClose, onDone }: Props) {
   async function startKeyExtract() {
     setPhase('extract-key');
     setProgress(diag?.platform === 'windows'
-      ? 'Hook 正在等待登录事件：请去微信里退出登录，然后重新登录一次…'
+      ? 'Hook 正在等待登录事件：请保持微信在登录页，然后去微信点击登录 / 扫码登录…'
       : '扫描 WeChat 进程内存中…');
     try {
       // autoRestart=false: hook the existing WeChat instead of kill+relaunch.
       // Kill+relaunch on Win11 + WeChat 4.1.x sometimes makes the new Weixin.exe die
-      // before the hook can attach. We instead ask the user to re-login to trigger key capture.
+      // before the hook can attach. The reliable flow is: user logs out first
+      // and leaves WeChat at the login page, then Murmur installs the hook, then
+      // the user logs in so the hook can catch the login event.
       const r = await extractKey({ autoRestart: false, timeout: 90 });
       // On Mac, extract_key_mac.py writes ~/.murmur/decrypted_keys.json directly.
       // r.ok=true with no r.key means the per-DB JSON was written.
       // On Win, r.key holds the password we still need to save.
       if (!r.ok) {
-        setError(r.log?.split('\n').slice(-6).join('\n') || '没读到密钥 — 请确保已登录微信并点开几个对话');
+        const fallback = diag?.platform === 'windows'
+          ? '没读到密钥 — 请确认微信程序没有关闭：先让微信停在登录页，再点 Murmur 的开始抓密钥，然后在 90 秒内回微信完成登录。'
+          : '没读到密钥 — 请确保已登录微信并点开几个对话';
+        setError(r.log?.split('\n').slice(-6).join('\n') || fallback);
         setPhase('error');
         return;
       }
@@ -285,6 +290,9 @@ function CapabilityList({ diag }: { diag: Diagnose }) {
       rows.push(['微信进程', diag.capabilities.weixin_running ? '运行中 ✓' : '未运行', !!diag.capabilities.weixin_running]);
     }
   }
+  if (diag.wechat_search_roots?.length) {
+    rows.push(['扫描路径', `${diag.wechat_search_roots.length} 个`, true]);
+  }
   rows.push(['本机 AI agents', `${diag.agents_found} 个 ✓`, true]);
   return (
     <div style={{ background: 'var(--et-paper-2)', padding: '12px 16px', borderRadius: 10, fontSize: 12 }}>
@@ -294,6 +302,16 @@ function CapabilityList({ diag }: { diag: Diagnose }) {
           <span style={{ color: ok ? 'var(--et-ink)' : 'var(--et-rose)', fontWeight: 500 }}>{v}</span>
         </div>
       ))}
+      {diag.profiles.length === 0 && diag.wechat_search_roots?.length ? (
+        <details open style={{ marginTop: 8, borderTop: '0.5px solid var(--et-line)', paddingTop: 8 }}>
+          <summary style={{ cursor: 'pointer', color: 'var(--et-mute)', marginBottom: 6 }}>已扫描的微信数据位置</summary>
+          <div style={{ maxHeight: 140, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {diag.wechat_search_roots.slice(0, 30).map((p) => (
+              <code key={p} style={{ fontFamily: 'var(--et-mono)', color: 'var(--et-ink-soft)', wordBreak: 'break-all' }}>{p}</code>
+            ))}
+          </div>
+        </details>
+      ) : null}
     </div>
   );
 }
@@ -533,12 +551,12 @@ function WinNeedKey({ diag, onStart }: { diag: Diagnose; onStart: () => void }) 
   return (
     <>
       <div className="et-serif" style={{ fontSize: 15, lineHeight: 1.7, color: 'var(--et-ink-soft)', marginBottom: 14 }}>
-        请按顺序做：
+        Windows 抓密钥要卡准登录那一刻，请按这个顺序做：
       </div>
       <ol style={{ paddingLeft: 20, lineHeight: 1.9, fontSize: 13, color: 'var(--et-ink)', marginBottom: 14 }}>
-        <li><strong>保持微信开着</strong>（已登录状态）—— 别关</li>
-        <li>点下面的「开始」—— 我会装一个内存 hook 到微信进程</li>
-        <li>看到「等待登录事件」时，<strong>去微信里手动退出登录然后重新登录一次</strong>，hook 会捕获密钥</li>
+        <li>先去微信里<strong>退出登录</strong>，让微信停在登录页；<strong>不要关闭微信程序</strong></li>
+        <li>回到 Murmur，点下面的「开始抓密钥」—— 我会把 hook 装到当前微信进程</li>
+        <li>看到「等待登录事件」后，立刻回微信点<strong>登录 / 扫码登录</strong></li>
         <li>读到密钥后，立即解密所有数据，进入 Murmur 主界面</li>
       </ol>
       <div style={{
@@ -546,7 +564,7 @@ function WinNeedKey({ diag, onStart }: { diag: Diagnose; onStart: () => void }) 
         border: '0.5px solid rgba(138,90,28,0.3)', borderRadius: 8,
         fontSize: 12, color: '#8a5a1c', marginBottom: 14,
       }}>
-        💡 不会自动关你的微信。如果微信没在跑，请先打开微信再回来点「开始」。
+        💡 关键点：先停在登录页，再点开始扫描，最后去微信登录。已经登录着不动，hook 抓不到那一瞬间的 key。
       </div>
       <CapabilityList diag={diag} />
       <button onClick={onStart} style={primaryBtn}>开始抓密钥</button>
