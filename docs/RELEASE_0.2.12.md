@@ -7,7 +7,7 @@ Windows 用户下载：
 - `Murmur_0.2.12_x64-setup.exe`：推荐，双击安装。
 - `Murmur_0.2.12_x64_en-US.msi`：备用，适合 IT 部署；普通用户优先用 `.exe`。
 
-Apple Silicon Mac 用户下载（待发布）：
+Apple Silicon Mac 用户下载：
 
 - `Murmur_macOS_AppleSilicon.dmg`：推荐，M1 / M2 / M3 / M4 Mac 使用。
 - `Murmur_macOS_AppleSilicon.app.zip`：备用，主要用于排错。
@@ -20,7 +20,7 @@ Apple Silicon Mac 用户下载（待发布）：
 四个真 bug + 一个新机制：
 
 - **后端崩了/被杀会自动重启**：Tauri 端加了 watchdog 线程，每 3 秒检测 etcli 进程；非正常退出（segfault / OOM / Python uncaught exception / 用户从 Task Manager 杀）时自动重新拉起，60 秒内最多 5 次重启，超过则进入 60 秒退避并把详情写进 `tauri-shell.log`。
-- **再次启动时清理上一次的僵尸 etcli**：覆盖"上次没干净退出 → 端口 9100 被占用 → 新 etcli 直接 OSError → 前端 Failed to fetch"这条最常见的"一点开始立马 fail"症状。Python 端的 bind 也加了 8 次 × 0.5 秒重试做兜底。
+- **再次启动时清理上一次的僵尸 etcli**：覆盖"上次没干净退出 → 端口 9100 被占用 → 新 etcli 直接 OSError → 前端 Failed to fetch"这条最常见的"一点开始立马 fail"症状。这个清理只在 app 启动时做，watchdog 后续重启不会全局杀进程，避免用户误开两个 Murmur 时互相抢后端。Python 端的 bind 也加了 8 次 × 0.5 秒重试做兜底。
 - **`/api/reports` 在新装用户的 bootstrap 模式下不再 503**。第二道权限 gate 之前没把 `/api/reports` 和 `/api/report/*` 放过，导致用户首次打开「报告」页拿到 503，错误信息很迷惑。
 - **抓 key 失败时如果是 wx_key.dll 被杀软隔离，错误信息现在会明确提示**："最可能的原因：杀毒软件（360 / QQ 管家 / 火绒 / Defender）把 wx_key.dll 隔离了。修复：把 Murmur 安装目录加到杀毒白名单 → 重装 → 再试一次。"之前用户只看到一个空 log + 通用"没读到密钥"。
 - **WinNeedKey 的「再次检测微信」按钮**：之前页面文案让用户「点 再试一次 重新检测」但 UI 根本没那个按钮，用户得完全退出 Murmur 才能重检。现在不仅有按钮，而且在没检测到微信时每 2.5 秒自动 retry —— 用户打开微信几秒后「开始抓密钥」按钮就会自动从灰变橙。
@@ -50,7 +50,24 @@ Apple Silicon Mac 用户下载（待发布）：
 
 ## Mac 安装
 
-参见 v0.2.11 release notes。这版没改动 Mac onboarding 路径。
+1. 下载 `Murmur_macOS_AppleSilicon.dmg`。
+2. 双击打开 dmg。
+3. 把里面的 `Murmur.app` 拖到「应用程序」/ `/Applications`。
+4. 不要直接在 dmg 窗口里运行；拖完后从「应用程序」打开 Murmur。
+5. 如果 macOS 提示无法打开，先点「完成 / Done」，不要点移到废纸篓；然后进入「系统设置」→「隐私与安全性」→ 底部「仍要打开 / Open Anyway」。
+6. 如果没有「仍要打开」，终端执行：
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Murmur.app
+open /Applications/Murmur.app
+```
+
+首次使用 Mac 版时，Murmur 会继续引导你：
+
+1. 给 Murmur「完全磁盘访问」权限，并重启 Murmur。
+2. 一键给 WeChat 重签名；这一步不需要关 SIP，不需要重启电脑。
+3. 回 WeChat 点开 3-5 个私聊、翻一下朋友圈，让 WCDB 把 key 派生到内存。
+4. 回 Murmur 点「开始自动抓取」，等待解密完成。
 
 ## 隐私
 

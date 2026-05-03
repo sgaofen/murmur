@@ -284,7 +284,7 @@ fn start_watchdog(app: AppHandle) {
                 "watchdog: respawning etcli (restart #{} this minute)",
                 restart_window.len()
             ));
-            let new_child = spawn_etcli_serve(&app);
+            let new_child = spawn_etcli_serve(&app, false);
             if let Some(state) = app.try_state::<ServeProcess>() {
                 if let Ok(mut g) = state.0.lock() {
                     *g = new_child;
@@ -309,11 +309,13 @@ fn open_log_for_serve() -> (Stdio, Stdio) {
     (stdout, stderr)
 }
 
-fn spawn_etcli_serve(app: &AppHandle) -> Option<Child> {
-    // First, evict any stale backend that's still squatting port 9100. See
-    // `kill_stale_etcli` for the race this resolves. Safe to call on every
-    // (re)spawn — taskkill returns silently if no match.
-    kill_stale_etcli();
+fn spawn_etcli_serve(app: &AppHandle, evict_stale: bool) -> Option<Child> {
+    // Startup only: evict a backend left behind by a previous Murmur run.
+    // Watchdog respawns deliberately skip this global kill; otherwise two
+    // accidentally-open Murmur windows can keep killing each other's etcli.
+    if evict_stale {
+        kill_stale_etcli();
+    }
 
     // Path A: bundled PyInstaller binary
     if let Some(etcli) = locate_etcli_exe(app) {
@@ -405,7 +407,7 @@ pub fn run() {
                         .build(),
                 )?;
             }
-            let child = spawn_etcli_serve(app.handle());
+            let child = spawn_etcli_serve(app.handle(), true);
             if let Some(state) = app.try_state::<ServeProcess>() {
                 if let Ok(mut guard) = state.0.lock() {
                     *guard = child;
@@ -414,7 +416,7 @@ pub fn run() {
             // Watchdog: respawn etcli if it dies (segfault / OOM / Python
             // uncaught exception). Keep it OUTSIDE the spawn match so the
             // watchdog still runs even if the initial spawn failed — it'll
-            // notice the empty slot, run kill_stale_etcli, and retry.
+            // notice the empty slot and retry without globally killing etcli.
             start_watchdog(app.handle().clone());
             Ok(())
         })

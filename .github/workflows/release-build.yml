@@ -9,7 +9,7 @@ on:
       tag:
         description: "Release tag to upload assets to"
         required: true
-        default: "v0.2.11"
+        default: "v0.2.12"
 
 permissions:
   contents: write
