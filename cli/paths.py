@@ -210,7 +210,10 @@ def _wechat_root_env_paths() -> list[Path]:
 
 def wechat_search_paths() -> list[Path]:
     """All candidate WeChat data roots Murmur will inspect."""
-    raw_candidates = _wechat_root_env_paths() + (
+    env_candidates = _wechat_root_env_paths()
+    if env_candidates and os.environ.get("MURMUR_WECHAT_ROOT_ONLY", "").strip().lower() in {"1", "true", "yes"}:
+        return _dedupe_paths(env_candidates)
+    raw_candidates = env_candidates + (
         _windows_xwechat_search_paths() if IS_WINDOWS
         else _mac_xwechat_search_paths() if IS_MAC
         else []
@@ -344,15 +347,102 @@ def media_index_path(profile: WeChatProfile | None = None) -> Path:
 
 # ---------- WeChat process / executable discovery ----------
 
+_WECHAT_EXE_NAMES = ("Weixin.exe", "WeChat.exe")
+
+
+def _windows_running_weixin_paths() -> list[Path]:
+    """Return full paths for running Weixin/WeChat processes when Windows allows it."""
+    if not IS_WINDOWS:
+        return []
+    out: list[Path] = []
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        psapi = ctypes.WinDLL("psapi", use_last_error=True)
+
+        enum_processes = psapi.EnumProcesses
+        enum_processes.argtypes = [
+            ctypes.POINTER(wintypes.DWORD),
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        enum_processes.restype = wintypes.BOOL
+
+        open_process = kernel32.OpenProcess
+        open_process.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        open_process.restype = wintypes.HANDLE
+
+        query_full_process_image_name = kernel32.QueryFullProcessImageNameW
+        query_full_process_image_name.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.LPWSTR,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        query_full_process_image_name.restype = wintypes.BOOL
+
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [wintypes.HANDLE]
+        close_handle.restype = wintypes.BOOL
+
+        max_count = 4096
+        pids = (wintypes.DWORD * max_count)()
+        needed = wintypes.DWORD()
+        if not enum_processes(pids, ctypes.sizeof(pids), ctypes.byref(needed)):
+            return []
+
+        process_query_limited_information = 0x1000
+        count = min(needed.value // ctypes.sizeof(wintypes.DWORD), max_count)
+        wanted = {name.lower() for name in _WECHAT_EXE_NAMES}
+        seen: set[str] = set()
+
+        for pid in pids[:count]:
+            if not pid:
+                continue
+            handle = open_process(process_query_limited_information, False, int(pid))
+            if not handle:
+                continue
+            try:
+                size = wintypes.DWORD(32768)
+                buf = ctypes.create_unicode_buffer(size.value)
+                if not query_full_process_image_name(handle, 0, buf, ctypes.byref(size)):
+                    continue
+                path = Path(buf.value)
+                if path.name.lower() not in wanted:
+                    continue
+                key = os.path.normcase(str(path))
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(path)
+            finally:
+                close_handle(handle)
+    except Exception:
+        return []
+    return out
+
+
 def find_weixin_exe() -> Path | None:
     """Find the Weixin/WeChat executable for relaunching after kill."""
     if IS_WINDOWS:
-        for cand in [
+        env_roots = [
+            Path(v) for k in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA")
+            if (v := os.environ.get(k))
+        ]
+        candidates = [
             Path(r"C:\Program Files\Tencent\Weixin\Weixin.exe"),
             Path(r"C:\Program Files (x86)\Tencent\Weixin\Weixin.exe"),
             Path(r"C:\Program Files\Tencent\WeChat\WeChat.exe"),
             Path(r"C:\Program Files (x86)\Tencent\WeChat\WeChat.exe"),
-        ]:
+        ]
+        for root in env_roots:
+            candidates.extend([
+                root / "Tencent" / "Weixin" / "Weixin.exe",
+                root / "Tencent" / "WeChat" / "WeChat.exe",
+            ])
+        for cand in _dedupe_paths(candidates):
             if cand.exists():
                 return cand
         # Registry lookup
@@ -375,6 +465,9 @@ def find_weixin_exe() -> Path | None:
                     pass
         except ImportError:
             pass
+        for cand in _windows_running_weixin_paths():
+            if cand.exists():
+                return cand
     elif IS_MAC:
         for cand in [
             Path("/Applications/WeChat.app"),
@@ -452,7 +545,9 @@ def _check_weixin_running() -> Optional[bool]:
                     return True
             return False
         if IS_WINDOWS:
-            for exe in ("Weixin.exe", "WeChat.exe"):
+            if _windows_running_weixin_paths():
+                return True
+            for exe in _WECHAT_EXE_NAMES:
                 r = _sp.run(["tasklist", "/fi", f"imagename eq {exe}"], capture_output=True, text=True)
                 if exe.lower() in (r.stdout or "").lower():
                     return True
@@ -465,7 +560,7 @@ def _check_weixin_running() -> Optional[bool]:
 def detect_capabilities() -> Capabilities:
     profiles = discover_wechat_profiles()
     has_data = bool(profiles)
-    has_install = find_weixin_exe() is not None
+    wechat_exe = find_weixin_exe()
     notes: list[str] = []
 
     # Decryption uses pure-Python (decrypt_py.py) when go_decrypt.dll is unavailable,
@@ -474,6 +569,7 @@ def detect_capabilities() -> Capabilities:
 
     sip = _check_sip_enabled()
     weixin_running = _check_weixin_running()
+    has_install = wechat_exe is not None or (IS_WINDOWS and bool(weixin_running))
     hardened = _check_wechat_hardened() if IS_MAC else None
 
     # Memory scan to extract the key:
@@ -484,7 +580,7 @@ def detect_capabilities() -> Capabilities:
     #       (b) hardened-runtime WeChat: only works with SIP off (rare, requires reboot)
     #   - Linux: WeChat has no Linux client
     if IS_WINDOWS:
-        can_extract = has_install and bool(weixin_running)
+        can_extract = bool(weixin_running)
     elif IS_MAC:
         # Either: WeChat is already ad-hoc signed → can attach right now
         # Or:     SIP is off → can attach even with hardened runtime (after sudo)
@@ -507,8 +603,10 @@ def detect_capabilities() -> Capabilities:
         notes.append("Linux 不在当前支持范围（微信本身没有原生 Linux 客户端）")
     if not has_data:
         notes.append("还没找到微信数据文件夹 — 你可能需要先在 Windows/Mac 上登录一次微信")
+    if IS_WINDOWS and has_install and weixin_running and wechat_exe is None:
+        notes.append("检测到微信正在运行，但安装路径不在默认目录/注册表里；抓密钥可以继续，自动打开或重启微信可能不可用。")
     if not has_install and IS_WINDOWS:
-        notes.append("没找到 Weixin.exe / WeChat.exe，「抓密钥」会失败 — 请确保微信已安装")
+        notes.append("没找到 Weixin.exe / WeChat.exe，也没检测到正在运行的微信进程 — 请确保微信已安装并打开")
     if IS_WINDOWS and has_install and not weixin_running:
         notes.append("微信未在运行 — Windows 抓密钥前请先打开微信并保持已登录状态。")
 

@@ -29,8 +29,8 @@
 |---|---|---|
 | 🪟 Windows 10/11 | **`Murmur_x.x.x_x64-setup.exe`**（推荐）| 22 MB |
 | 🪟 Windows MSI | `Murmur_x.x.x_x64_en-US.msi`（IT 部署用） | 28 MB |
-| 🍎 macOS Apple Silicon | **`Murmur_x.x.x_aarch64.dmg`** | 28 MB |
-| 🍎 macOS Apple Silicon | `Murmur_x.x.x_aarch64.app.zip`（开发者）| 25 MB |
+| 🍎 macOS Apple Silicon | **`Murmur_macOS_AppleSilicon.dmg`** | 28 MB |
+| 🍎 macOS Apple Silicon | `Murmur_macOS_AppleSilicon.app.zip`（开发者）| 25 MB |
 
 > Win MSI 在某些 Win11 装出 1603 错；遇到就用 NSIS 的 .exe。
 > Mac Intel 暂时只能从源码跑。

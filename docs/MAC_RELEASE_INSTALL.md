@@ -1,6 +1,6 @@
 # macOS Release 下载后怎么打开
 
-这份只讲一件事：从 GitHub Release 下载 `Murmur_..._aarch64.dmg` 后，怎么拖进「应用程序」，以及系统拦截时终端里运行什么。
+这份只讲一件事：从 GitHub Release 下载 `Murmur_macOS_AppleSilicon.dmg` 后，怎么拖进「应用程序」，以及系统拦截时终端里运行什么。
 
 正式公证版不需要终端命令。当前验证包如果出现 `"Murmur" Not Opened`，按下面做。
 
@@ -9,16 +9,16 @@
 ## 1. 下载 DMG
 
 1. 打开 [GitHub Releases](https://github.com/sgaofen/murmur/releases/latest)。
-2. 下载最新版本里的 `Murmur_..._aarch64.dmg`。
+2. 下载最新版本里的 `Murmur_macOS_AppleSilicon.dmg`。
 3. 下载完成后，通常会在「下载 / Downloads」文件夹里。
 
-`aarch64` 是 M 系列 Mac 用的版本，包括 M1 / M2 / M3 / M4。
+`AppleSilicon` 是 M 系列 Mac 用的版本，包括 M1 / M2 / M3 / M4。
 
 ---
 
 ## 2. 打开 DMG
 
-1. 双击下载好的 `Murmur_..._aarch64.dmg`。
+1. 双击下载好的 `Murmur_macOS_AppleSilicon.dmg`。
 2. 系统会打开一个新的 Finder 窗口，里面能看到 `Murmur.app`。
 3. 不要直接在这个窗口里双击 `Murmur.app`。这个窗口只是安装盘。
 

@@ -1,6 +1,6 @@
 # Mac 签名与公证发布流程
 
-目标：让用户从 GitHub Releases 下载 `Murmur_0.2.6_aarch64.dmg` 后，可以像普通 Mac App 一样安装和打开，不再出现：
+目标：让用户从 GitHub Releases 下载 `Murmur_macOS_AppleSilicon.dmg` 后，可以像普通 Mac App 一样安装和打开，不再出现：
 
 - `"Murmur" is damaged and can't be opened`
 - `"Murmur" Not Opened. Apple could not verify...`
@@ -190,8 +190,8 @@ export NOTARY_PROFILE="murmur-notary"
 产物在：
 
 ```text
-app/src-tauri/target/release/bundle/macos/Murmur_0.2.6_aarch64.app.zip
-app/src-tauri/target/release/bundle/dmg/Murmur_0.2.6_aarch64.dmg
+app/src-tauri/target/release/bundle/macos/Murmur_<version>_aarch64.app.zip
+app/src-tauri/target/release/bundle/dmg/Murmur_<version>_aarch64.dmg
 ```
 
 如果已经 build 过，只想重新签名/公证：
@@ -234,10 +234,10 @@ cat notary-log.json
 先验证 DMG 自己：
 
 ```bash
-hdiutil verify app/src-tauri/target/release/bundle/dmg/Murmur_0.2.6_aarch64.dmg
-xcrun stapler validate app/src-tauri/target/release/bundle/dmg/Murmur_0.2.6_aarch64.dmg
+hdiutil verify app/src-tauri/target/release/bundle/dmg/Murmur_<version>_aarch64.dmg
+xcrun stapler validate app/src-tauri/target/release/bundle/dmg/Murmur_<version>_aarch64.dmg
 spctl --assess --type open --context context:primary-signature --verbose=4 \
-  app/src-tauri/target/release/bundle/dmg/Murmur_0.2.6_aarch64.dmg
+  app/src-tauri/target/release/bundle/dmg/Murmur_<version>_aarch64.dmg
 ```
 
 再做一次真实下载路径测试：
@@ -272,16 +272,16 @@ xcrun stapler validate /Applications/Murmur.app
 
 ```bash
 shasum -a 256 \
-  app/src-tauri/target/release/bundle/macos/Murmur_0.2.6_aarch64.app.zip \
-  app/src-tauri/target/release/bundle/dmg/Murmur_0.2.6_aarch64.dmg
+  app/src-tauri/target/release/bundle/macos/Murmur_<version>_aarch64.app.zip \
+  app/src-tauri/target/release/bundle/dmg/Murmur_<version>_aarch64.dmg
 ```
 
 上传替换：
 
 ```bash
-gh release upload v0.2.6 \
-  app/src-tauri/target/release/bundle/macos/Murmur_0.2.6_aarch64.app.zip \
-  app/src-tauri/target/release/bundle/dmg/Murmur_0.2.6_aarch64.dmg \
+gh release upload v<version> \
+  app/src-tauri/target/release/bundle/macos/Murmur_<version>_aarch64.app.zip \
+  app/src-tauri/target/release/bundle/dmg/Murmur_<version>_aarch64.dmg \
   --clobber
 ```
 
@@ -290,7 +290,7 @@ gh release upload v0.2.6 \
 如果 Windows 包也已经验证并上传，再把 release 从 pre-release 改成正式：
 
 ```bash
-gh release edit v0.2.6 --prerelease=false
+gh release edit v<version> --prerelease=false
 ```
 
 ---
