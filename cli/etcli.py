@@ -3936,6 +3936,15 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             agent = next((a for a in _detect_local_agents() if a["cli"] == cli_name), None)
             if not agent:
                 return self._send_json({"ok": False, "error": f"{cli_name} not installed"}, 404)
+            existing_state = _FRIEND_STREAM.get(wxid)
+            if existing_state and existing_state.get("running"):
+                return self._send_json({
+                    "ok": True,
+                    "queued": False,
+                    "already_running": True,
+                    "wxid": wxid,
+                    "message": f"{cli_name} 已经在分析「{existing_state.get('name') or wxid}」，请稍等或查看当前进度",
+                })
 
             name = contact.display() or wxid
             agent_path = agent["path"]

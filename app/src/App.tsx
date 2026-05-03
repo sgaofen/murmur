@@ -9,6 +9,7 @@ import { ReportsPage } from './pages/Reports';
 import { YearbookPage } from './pages/Yearbook';
 import { getDiagnose, getInfo } from './data/api';
 import { TaskCenterProvider } from './components/extras/TaskCenter';
+import { BatchStatusPill, BatchTrackerProvider } from './components/extras/BatchTracker';
 import { PrivacyToggle } from './components/PrivacyToggle';
 
 type Route =
@@ -157,14 +158,17 @@ export default function App() {
 
   return (
     <TaskCenterProvider>
-      {body}
-      {showDevControls && DevControls}
-      <PrivacyToggle position={showDevControls ? 'top-right' : 'bottom-right'} />
-      <OnboardingDialog
-        open={onboarding}
-        onClose={() => { localStorage.setItem(ONBOARDING_SEEN_KEY, '1'); setOnboarding(false); }}
-        onDone={() => window.location.reload()}
-      />
+      <BatchTrackerProvider>
+        {body}
+        <BatchStatusPill onOpenReports={() => go('reports')} />
+        {showDevControls && DevControls}
+        <PrivacyToggle position={showDevControls ? 'top-right' : 'bottom-right'} />
+        <OnboardingDialog
+          open={onboarding}
+          onClose={() => { localStorage.setItem(ONBOARDING_SEEN_KEY, '1'); setOnboarding(false); }}
+          onDone={() => window.location.reload()}
+        />
+      </BatchTrackerProvider>
     </TaskCenterProvider>
   );
 }
