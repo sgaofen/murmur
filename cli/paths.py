@@ -469,12 +469,73 @@ def find_weixin_exe() -> Path | None:
             if cand.exists():
                 return cand
     elif IS_MAC:
-        for cand in [
-            Path("/Applications/WeChat.app"),
-            Path("/Applications/Weixin.app"),
-        ]:
+        env_app = os.environ.get("MURMUR_WECHAT_APP", "").strip()
+        candidates: list[Path] = []
+        if env_app:
+            candidates.append(Path(os.path.expanduser(env_app.strip('"'))))
+        for root in [Path("/Applications"), Path.home() / "Applications"]:
+            for name in ["WeChat.app", "Weixin.app", "微信.app"]:
+                candidates.append(root / name)
+        candidates.extend(_mac_running_wechat_apps())
+        for cand in _dedupe_paths(candidates):
             if cand.exists():
                 return cand
+    return None
+
+
+def _mac_app_bundle_for_executable(exe: Path) -> Path | None:
+    """Return the enclosing .app bundle for a macOS executable path."""
+    for parent in [exe, *exe.parents]:
+        if parent.name.endswith(".app"):
+            return parent
+    return None
+
+
+def _mac_running_wechat_apps() -> list[Path]:
+    """Locate the running WeChat/Weixin .app bundle from process argv."""
+    if not IS_MAC:
+        return []
+    out: list[Path] = []
+    try:
+        import subprocess as _sp
+        for name in ("WeChat", "Weixin"):
+            r = _sp.run(["pgrep", "-x", name], capture_output=True, text=True, timeout=3)
+            if r.returncode != 0:
+                continue
+            for pid in r.stdout.split():
+                ps = _sp.run(["ps", "-p", pid, "-o", "args="],
+                             capture_output=True, text=True, timeout=3)
+                argv0 = (ps.stdout or "").strip().split(" ", 1)[0]
+                if not argv0:
+                    continue
+                app = _mac_app_bundle_for_executable(Path(argv0))
+                if app:
+                    out.append(app)
+    except Exception:
+        return out
+    return _dedupe_paths(out)
+
+
+def wechat_main_exec(app: Path | None = None) -> Path | None:
+    """Return the main macOS WeChat executable inside a .app bundle."""
+    if not IS_MAC:
+        return None
+    app = app or find_weixin_exe()
+    if not app:
+        return None
+    if app.is_file():
+        return app
+    macos_dir = app / "Contents" / "MacOS"
+    for name in ("WeChat", "Weixin"):
+        cand = macos_dir / name
+        if cand.exists():
+            return cand
+    try:
+        for cand in macos_dir.iterdir():
+            if cand.is_file() and os.access(cand, os.X_OK):
+                return cand
+    except OSError:
+        pass
     return None
 
 
@@ -521,8 +582,8 @@ def _check_wechat_hardened() -> Optional[bool]:
     """
     if not IS_MAC:
         return None
-    main_exec = Path("/Applications/WeChat.app/Contents/MacOS/WeChat")
-    if not main_exec.exists():
+    main_exec = wechat_main_exec()
+    if not main_exec or not main_exec.exists():
         return None
     try:
         import subprocess as _sp

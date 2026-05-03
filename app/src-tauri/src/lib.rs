@@ -18,7 +18,7 @@ use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, RunEvent};
 
 struct ServeProcess(Mutex<Option<Child>>);
 
@@ -149,6 +149,34 @@ fn spawn_etcli_serve(app: &AppHandle) -> Option<Child> {
     cmd.spawn().ok()
 }
 
+fn stop_etcli_serve(app: &AppHandle, reason: &str) {
+    log_line(&format!("stopping etcli: {}", reason));
+    if let Some(state) = app.try_state::<ServeProcess>() {
+        if let Ok(mut guard) = state.0.lock() {
+            if let Some(mut child) = guard.take() {
+                let pid = child.id();
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        log_line(&format!("etcli pid={} already exited: {}", pid, status));
+                    }
+                    Ok(None) => {
+                        log_line(&format!("killing etcli pid={}", pid));
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
+                    Err(e) => {
+                        log_line(&format!("etcli pid={} status check failed: {}", pid, e));
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
+                }
+            } else {
+                log_line("no managed etcli process to stop");
+            }
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -172,16 +200,14 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
-                let app = window.app_handle();
-                if let Some(state) = app.try_state::<ServeProcess>() {
-                    if let Ok(mut guard) = state.0.lock() {
-                        if let Some(mut child) = guard.take() {
-                            let _ = child.kill();
-                        }
-                    }
-                }
+                stop_etcli_serve(window.app_handle(), "window destroyed");
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| match event {
+            RunEvent::ExitRequested { .. } => stop_etcli_serve(app, "exit requested"),
+            RunEvent::Exit => stop_etcli_serve(app, "event loop exit"),
+            _ => {}
+        });
 }
