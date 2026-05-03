@@ -59,7 +59,7 @@ function HomeChromeBar({ onRefresh, refreshing, refreshMsg, onExtractKey, onTogg
           border: '0.5px solid var(--et-line-2)',
         }}>📊 表格</a>
         <TaskCenterBell onClick={onToggleTaskCenter} active={taskCenterActive} />
-        <button onClick={onExtractKey} title="重新读取微信密钥（要重启微信一次）" style={{
+        <button onClick={onExtractKey} title="重新读取微信密钥，按引导操作" style={{
           all: 'unset', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6,
           color: 'var(--et-mute)', fontSize: 12, fontWeight: 500,
         }}>
@@ -283,14 +283,27 @@ export function HomePage({ dark = false, onOpenFriend }: Props) {
     return () => { if (debounceRef.current) window.clearTimeout(debounceRef.current); };
   }, [search]);
 
-  // Fetch friends when tab or debounced search changes
+  // Fetch friends only after the boot probe succeeds. Otherwise this request
+  // can race the 60s startup retry and falsely flip the page into error state.
   useEffect(() => {
+    if (!summary) return;
+    let cancelled = false;
     setLoadingFriends(true);
     getAllFriends({ kind: tab === 'time' ? 'all' : tab, q: searchDebounced })
-      .then(fs => { setAllFriends(fs); setError(null); })
-      .catch(e => setError(String(e.message || e)))
-      .finally(() => setLoadingFriends(false));
-  }, [tab, searchDebounced]);
+      .then(fs => {
+        if (!cancelled) {
+          setAllFriends(fs);
+          setError(null);
+        }
+      })
+      .catch(e => {
+        if (!cancelled) setError(String(e.message || e));
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingFriends(false);
+      });
+    return () => { cancelled = true; };
+  }, [summary, tab, searchDebounced]);
 
   async function handleRefresh() {
     setRefreshing(true);
@@ -306,11 +319,15 @@ export function HomePage({ dark = false, onOpenFriend }: Props) {
       const r = await refreshData();
       window.clearInterval(progT);
       const failure = r.ok ? '' : summarizeRefreshFailure(r.details || '');
+      const partial = r.ok && (r.details || '').includes('[WARN]');
+      const successMsg = partial
+        ? '已更新，但部分数据库未解密；可多打开聊天/朋友圈后重抓密钥'
+        : `已更新 · ${(r.ms / 1000).toFixed(1)}s`;
       taskCenter.updateTask(taskId, {
         pct: 100, status: r.ok ? 'done' : 'error',
-        sub: r.ok ? `用时 ${(r.ms / 1000).toFixed(1)}s` : failure,
+        sub: r.ok ? successMsg : failure,
       });
-      setRefreshMsg(r.ok ? `已更新 · ${(r.ms / 1000).toFixed(1)}s` : failure);
+      setRefreshMsg(r.ok ? successMsg : failure);
       if (r.ok) {
         const [s, fs] = await Promise.all([
           getHomeSummary(),

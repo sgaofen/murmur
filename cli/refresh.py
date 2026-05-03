@@ -196,6 +196,11 @@ def _decrypt_per_db(profile: WeChatProfile, per_db: dict) -> int:
     if missing_core:
         print(f"[ERR] 核心数据库未解密: {', '.join(missing_core)}")
         return 1
+    if n_fail:
+        print(
+            f"[WARN] 部分数据库未解密: {n_fail} 个。"
+            "已保留可用核心数据；如果缺消息或朋友圈，请回微信多点开几个聊天/朋友圈后重新抓密钥。"
+        )
     return 0
 
 

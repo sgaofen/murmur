@@ -167,11 +167,11 @@ function TaskRow({ task, onCancel, onClear }: { task: Task; onCancel?: () => voi
         )}
         <div className="et-meta" style={{ fontSize: 11, marginTop: 4, color: 'var(--et-mute)' }}>{maskText(task.sub)}</div>
       </div>
-      <button onClick={isTerminal ? onClear : onCancel} style={{
+      <button onClick={isTerminal ? onClear : onCancel} title={isTerminal ? '清除这条记录' : '只隐藏这条任务，不会中止后台进程'} style={{
         all: 'unset', cursor: 'pointer', padding: '4px 10px', borderRadius: 6,
         fontSize: 11, color: isTerminal ? 'var(--et-mute)' : 'var(--et-ink)',
         border: '0.5px solid var(--et-line-2)', background: 'var(--et-paper)',
-      }}>{isTerminal ? '清除' : maskText(task.action || '取消')}</button>
+      }}>{isTerminal ? '清除' : maskText(task.action || '隐藏')}</button>
     </div>
   );
 }

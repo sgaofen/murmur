@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { Friend } from '../../data/types';
-import { API_BASE } from '../../data/api';
+import { API_BASE, indexMedia } from '../../data/api';
+import { useTaskCenter } from '../../components/extras/TaskCenter';
 import { displayName, maskText } from '../../utils/privacy';
 import { usePrivacy } from '../../utils/usePrivacy';
 
@@ -43,12 +44,15 @@ function groupByMonth(items: MediaItem[]): MediaGroup[] {
 
 export function MediaGallery({ friend }: Props) {
   void usePrivacy();
+  const taskCenter = useTaskCenter();
   const [items, setItems] = useState<MediaItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [indexing, setIndexing] = useState(false);
+  const [indexError, setIndexError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [active, setActive] = useState<MediaItem | null>(null);
 
-  useEffect(() => {
+  const loadMedia = useCallback(() => {
     setLoading(true);
     fetch(API_BASE + '/api/friend/' + encodeURIComponent(friend.id) + '/media')
       .then(r => r.ok ? r.json() : [])
@@ -56,6 +60,43 @@ export function MediaGallery({ friend }: Props) {
       .catch(() => setItems([]))
       .finally(() => setLoading(false));
   }, [friend.id]);
+
+  useEffect(() => {
+    loadMedia();
+  }, [loadMedia]);
+
+  async function handleIndexMedia() {
+    setIndexing(true);
+    setIndexError(null);
+    const taskId = taskCenter.addTask({
+      icon: 'index',
+      name: '正在建立媒体索引',
+      sub: '扫描微信图片和视频缓存…',
+      pct: 10,
+      status: 'run',
+    });
+    const timer = window.setInterval(() => {
+      taskCenter.updateTask(taskId, { pct: Math.min(90, 25 + Math.floor(Math.random() * 60)) });
+    }, 700);
+    try {
+      const r = await indexMedia();
+      window.clearInterval(timer);
+      if (!r.ok) throw new Error(r.error || r.details || '媒体索引失败');
+      taskCenter.updateTask(taskId, {
+        pct: 100,
+        status: 'done',
+        sub: `已索引 ${r.indexed ?? r.total ?? 0} 项`,
+      });
+      loadMedia();
+    } catch (e: any) {
+      window.clearInterval(timer);
+      const msg = e?.message || String(e);
+      setIndexError(msg);
+      taskCenter.updateTask(taskId, { pct: 100, status: 'error', sub: msg });
+    } finally {
+      setIndexing(false);
+    }
+  }
 
   const filtered = useMemo(() => {
     if (!search.trim()) return items;
@@ -99,10 +140,27 @@ export function MediaGallery({ friend }: Props) {
         <div style={{ padding: '60px 28px', textAlign: 'center' }}>
           <div className="et-h3" style={{ color: 'var(--et-ink)', marginBottom: 8 }}>这里还没有媒体</div>
           <div className="et-meta" style={{ maxWidth: 480, margin: '0 auto' }}>
-            视频和图片需要先建立索引。在终端跑：
-            <code style={{ display: 'block', marginTop: 10, padding: '8px 12px', background: 'var(--et-paper-2)', borderRadius: 6, fontFamily: 'var(--et-mono)' }}>
-              python3 cli/media.py index
-            </code>
+            视频和图片需要先建立本地索引。
+            <div style={{ marginTop: 14 }}>
+              <button onClick={handleIndexMedia} disabled={indexing} style={{
+                all: 'unset',
+                cursor: indexing ? 'wait' : 'pointer',
+                padding: '9px 18px',
+                borderRadius: 999,
+                background: indexing ? 'var(--et-paper-2)' : 'var(--et-orange)',
+                color: indexing ? 'var(--et-mute)' : '#fff',
+                fontWeight: 700,
+                fontSize: 12,
+                boxShadow: indexing ? 'none' : 'var(--et-shadow-2)',
+              }}>
+                {indexing ? '正在建立索引…' : '一键建立媒体索引'}
+              </button>
+            </div>
+            {indexError && (
+              <div style={{ marginTop: 12, color: 'var(--et-orange)', fontSize: 11 }}>
+                {maskText(indexError)}
+              </div>
+            )}
           </div>
         </div>
       )}

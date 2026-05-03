@@ -184,6 +184,52 @@ fn kill_stale_etcli() {
     std::thread::sleep(Duration::from_millis(400));
 }
 
+fn port_9100_listener_snapshot() -> Option<String> {
+    #[cfg(target_os = "windows")]
+    let output = Command::new("cmd")
+        .args(["/C", "netstat -ano -p tcp | findstr \":9100\""])
+        .output()
+        .ok()?;
+
+    #[cfg(target_os = "macos")]
+    let output = Command::new("lsof")
+        .args(["-nP", "-iTCP:9100", "-sTCP:LISTEN"])
+        .output()
+        .ok()?;
+
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    let output = Command::new("sh")
+        .args([
+            "-c",
+            "ss -ltnp '( sport = :9100 )' 2>/dev/null || \
+             lsof -nP -iTCP:9100 -sTCP:LISTEN 2>/dev/null",
+        ])
+        .output()
+        .ok()?;
+
+    let mut text = String::new();
+    text.push_str(&String::from_utf8_lossy(&output.stdout));
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn log_if_port_9100_busy(stage: &str) -> bool {
+    if let Some(snapshot) = port_9100_listener_snapshot() {
+        log_line(&format!(
+            "PORT 9100 BUSY ({}). Murmur cannot start its backend until this listener exits:\n{}",
+            stage, snapshot
+        ));
+        true
+    } else {
+        false
+    }
+}
+
 /// Background watchdog that respawns etcli if it dies unexpectedly.
 ///
 /// Polls `Child::try_wait()` every 3 seconds. If the child exited and we are
@@ -298,7 +344,7 @@ fn open_log_for_serve() -> (Stdio, Stdio) {
     let log_path = log_dir().map(|d| d.join("serve.log"));
     let stdout: Stdio = log_path
         .as_ref()
-        .and_then(|p| std::fs::File::create(p).ok())
+        .and_then(|p| OpenOptions::new().create(true).append(true).open(p).ok())
         .map(Stdio::from)
         .unwrap_or_else(Stdio::null);
     let stderr: Stdio = log_path
@@ -315,6 +361,11 @@ fn spawn_etcli_serve(app: &AppHandle, evict_stale: bool) -> Option<Child> {
     // accidentally-open Murmur windows can keep killing each other's etcli.
     if evict_stale {
         kill_stale_etcli();
+        if log_if_port_9100_busy("after stale etcli cleanup") {
+            return None;
+        }
+    } else if log_if_port_9100_busy("before watchdog respawn") {
+        return None;
     }
 
     // Path A: bundled PyInstaller binary

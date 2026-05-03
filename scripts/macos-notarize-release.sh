@@ -77,6 +77,19 @@ echo "== Create zip and dmg =="
 mkdir -p "$DMG_DIR"
 rm -f "$ZIP" "$DMG"
 ditto -c -k --keepParent "$APP" "$ZIP"
+
+echo "== Submit app zip to Apple notarization =="
+xcrun notarytool submit "$ZIP" --keychain-profile "$NOTARY_PROFILE" --wait
+
+echo "== Staple and validate app ticket =="
+xcrun stapler staple "$APP"
+xcrun stapler validate "$APP"
+spctl --assess --type execute --verbose=4 "$APP"
+
+echo "== Recreate zip with stapled app =="
+rm -f "$ZIP"
+ditto -c -k --keepParent "$APP" "$ZIP"
+
 hdiutil create -volname Murmur -srcfolder "$APP" -ov -format UDZO "$DMG"
 
 echo "== Sign dmg =="

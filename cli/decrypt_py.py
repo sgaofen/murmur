@@ -76,64 +76,75 @@ def decrypt_db(src_path: Path, dst_path: Path, key_hex: str, *, pre_derived: boo
     except ValueError as e:
         raise ValueError(f"key is not valid hex: {e}") from e
 
-    raw = src_path.read_bytes()
-    if len(raw) < PAGE_SIZE:
+    src_size = src_path.stat().st_size
+    if src_size < PAGE_SIZE:
         raise ValueError(f"{src_path} too small to be a SQLCipher db")
-    if len(raw) % PAGE_SIZE != 0:
-        raise ValueError(f"{src_path} size {len(raw)} not a multiple of {PAGE_SIZE}")
+    if src_size % PAGE_SIZE != 0:
+        raise ValueError(f"{src_path} size {src_size} not a multiple of {PAGE_SIZE}")
 
-    salt = raw[:SALT_SIZE]
+    with src_path.open("rb") as src_f:
+        salt = src_f.read(SALT_SIZE)
+    if len(salt) != SALT_SIZE:
+        raise ValueError(f"{src_path} cannot read SQLCipher salt")
     if pre_derived:
         aes_key = key_bytes
         hmac_key = _hmac_key_from_aes(aes_key, salt)
     else:
         aes_key, hmac_key = _derive_keys(key_bytes, salt)
 
-    n_pages = len(raw) // PAGE_SIZE
-    out = bytearray()
+    n_pages = src_size // PAGE_SIZE
 
     # Pre-create AES backend
     backend = default_backend()
 
-    for page_idx in range(n_pages):
-        offset = page_idx * PAGE_SIZE
-        page = raw[offset:offset + PAGE_SIZE]
-
-        # Page 1 has the salt as its first 16 bytes; body starts at byte 16.
-        # All other pages: body starts at byte 0.
-        body_start = SALT_SIZE if page_idx == 0 else 0
-        body_end = PAGE_SIZE - RESERVE
-        body = page[body_start:body_end]
-
-        # Reserve area: [IV (16) | HMAC (64)]
-        iv = page[body_end:body_end + AES_BLOCK]
-        stored_hmac = page[body_end + AES_BLOCK:body_end + AES_BLOCK + HMAC_HASH_SIZE]
-
-        # Verify HMAC: HMAC-SHA512 over (body + iv + page_no_le32)
-        page_no_bytes = (page_idx + 1).to_bytes(4, "little")
-        mac = hmac.new(hmac_key, digestmod=hashlib.sha512)
-        mac.update(body)
-        mac.update(iv)
-        mac.update(page_no_bytes)
-        if not hmac.compare_digest(mac.digest(), stored_hmac):
-            raise ValueError(
-                f"HMAC mismatch on page {page_idx + 1} of {src_path.name} "
-                f"— wrong key, or DB is corrupted"
-            )
-
-        # Decrypt
-        cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv), backend=backend)
-        dec = cipher.decryptor()
-        plain = dec.update(body) + dec.finalize()
-
-        # Page 1: prepend the standard SQLite header, then decrypted body + zero reserve
-        if page_idx == 0:
-            out.extend(SQLITE_HEADER)
-        out.extend(plain)
-        out.extend(b"\x00" * RESERVE)
-
     dst_path.parent.mkdir(parents=True, exist_ok=True)
-    dst_path.write_bytes(bytes(out))
+    tmp_path = dst_path.with_name(dst_path.name + ".tmp")
+    try:
+        with src_path.open("rb") as src_f, tmp_path.open("wb") as dst_f:
+            for page_idx in range(n_pages):
+                page = src_f.read(PAGE_SIZE)
+                if len(page) != PAGE_SIZE:
+                    raise ValueError(f"{src_path} ended unexpectedly on page {page_idx + 1}")
+
+                # Page 1 has the salt as its first 16 bytes; body starts at byte 16.
+                # All other pages: body starts at byte 0.
+                body_start = SALT_SIZE if page_idx == 0 else 0
+                body_end = PAGE_SIZE - RESERVE
+                body = page[body_start:body_end]
+
+                # Reserve area: [IV (16) | HMAC (64)]
+                iv = page[body_end:body_end + AES_BLOCK]
+                stored_hmac = page[body_end + AES_BLOCK:body_end + AES_BLOCK + HMAC_HASH_SIZE]
+
+                # Verify HMAC: HMAC-SHA512 over (body + iv + page_no_le32)
+                page_no_bytes = (page_idx + 1).to_bytes(4, "little")
+                mac = hmac.new(hmac_key, digestmod=hashlib.sha512)
+                mac.update(body)
+                mac.update(iv)
+                mac.update(page_no_bytes)
+                if not hmac.compare_digest(mac.digest(), stored_hmac):
+                    raise ValueError(
+                        f"HMAC mismatch on page {page_idx + 1} of {src_path.name} "
+                        f"— wrong key, or DB is corrupted"
+                    )
+
+                # Decrypt
+                cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv), backend=backend)
+                dec = cipher.decryptor()
+                plain = dec.update(body) + dec.finalize()
+
+                # Page 1: prepend the standard SQLite header, then decrypted body + zero reserve
+                if page_idx == 0:
+                    dst_f.write(SQLITE_HEADER)
+                dst_f.write(plain)
+                dst_f.write(b"\x00" * RESERVE)
+        tmp_path.replace(dst_path)
+    except Exception:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def decrypt_directory(src_root: Path, dst_root: Path, key_hex: str,

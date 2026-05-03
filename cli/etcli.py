@@ -339,8 +339,8 @@ class EchoStore:
         # Aggregate rows from ALL matching dbs (chronologically), merge, then yield.
         # WeChat 4.x can have the same Msg_<md5> table in multiple message_*.db files
         # (one per rolled period). We need to read every one and merge.
-        all_rows: list[tuple[int, int, str, str]] = []  # (ts, mtype, content, sender_name)
-        seen_keys: set[tuple[int, int, int]] = set()  # dedupe by (ts, sender_id, content_hash)
+        all_rows: list[tuple[int, int, str, str, str]] = []  # (ts, mtype, sender_wxid, sender_name, text)
+        seen_keys: set[tuple[int, int, str]] = set()  # dedupe by (ts, sender_id, stable_content_hash)
 
         for fname, table in locs:
             c = self._conn(fname)
@@ -356,15 +356,21 @@ class EchoStore:
                     params.append(until)
                 if text_only:
                     wheres.append("local_type = 1")
-                sql = f"SELECT create_time, real_sender_id, local_type, message_content FROM {table}"
+                sql = f"SELECT local_id, create_time, real_sender_id, local_type, message_content FROM {table}"
                 if wheres:
                     sql += " WHERE " + " AND ".join(wheres)
                 sql += " ORDER BY create_time ASC, local_id ASC"
                 # Don't apply limit here; we'll cap after merging
-                for ts, sender_id, mtype, content in c.execute(sql, params):
+                for local_id, ts, sender_id, mtype, content in c.execute(sql, params):
                     # Light dedup against duplicates that may sit at db-rollover boundaries
-                    content_str = content if isinstance(content, str) else (content or b"")
-                    key = (ts, int(sender_id or 0), hash(content_str[:100]) if isinstance(content_str, (str, bytes)) else 0)
+                    if isinstance(content, bytes):
+                        content_bytes = content
+                    elif content is None:
+                        content_bytes = b""
+                    else:
+                        content_bytes = str(content).encode("utf-8", errors="replace")
+                    content_hash = hashlib.sha1(content_bytes).hexdigest()
+                    key = (int(ts or 0), int(sender_id or 0), content_hash)
                     if key in seen_keys:
                         continue
                     seen_keys.add(key)
@@ -382,7 +388,8 @@ class EchoStore:
         # Sort chronologically and yield
         all_rows.sort(key=lambda r: r[0])
         if limit:
-            all_rows = all_rows[: int(limit)]
+            n = max(0, int(limit))
+            all_rows = all_rows[-n:] if n else []
         for ts, mtype, sender_wxid, sender_name, text in all_rows:
             yield Message(ts, sender_wxid, sender_name, mtype, text,
                           MSG_TYPES.get(mtype, f"type_{mtype}"))
@@ -3589,6 +3596,56 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 "ms": dt,
                 "details": (r.stdout + (r.stderr if not ok else "")).strip()[-2000:],
             })
+
+        if path == "/api/media/index":
+            # Productized replacement for "open Terminal and run python cli/media.py index".
+            # Keep this in-process so packaged users do not need Python or the repo checkout.
+            t0 = _time.time()
+            try:
+                import media as _media
+
+                selected_profile = None
+                try:
+                    store_dir = self.store.dir.resolve() if self.store else None
+                    for prof in _paths.discover_wechat_profiles():
+                        dec = _paths.decrypted_root_for(prof, must_exist=False).resolve()
+                        if (store_dir and dec == store_dir) or (self.store and prof.wxid_short in str(store_dir or "")):
+                            selected_profile = prof
+                            break
+                    if selected_profile is None:
+                        profiles = _paths.discover_wechat_profiles()
+                        selected_profile = profiles[0] if profiles else None
+                except Exception:
+                    selected_profile = None
+                if selected_profile is not None:
+                    _media._PROFILE = selected_profile
+
+                idx = _media.index_hardlinks()
+                out_path = _paths.media_index_path()
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                existing = {}
+                if out_path.exists():
+                    try:
+                        existing = json.loads(out_path.read_text(encoding="utf-8"))
+                    except Exception:
+                        existing = {}
+                merged = {**existing, **idx}
+                out_path.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+                existing_count = sum(1 for r in merged.values() if isinstance(r, dict) and r.get("exists"))
+                return self._send_json({
+                    "ok": True,
+                    "total": len(merged),
+                    "indexed": len(idx),
+                    "existing": existing_count,
+                    "ms": round((_time.time() - t0) * 1000),
+                    "path": str(out_path),
+                })
+            except Exception as e:
+                return self._send_json({
+                    "ok": False,
+                    "error": f"{type(e).__name__}: {e}",
+                    "ms": round((_time.time() - t0) * 1000),
+                }, 500)
 
         if path.startswith("/api/friend/") and path.endswith("/analyze-pack"):
             wxid_raw = path[len("/api/friend/"):-len("/analyze-pack")]

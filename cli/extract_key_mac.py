@@ -288,8 +288,14 @@ def main(argv=None) -> int:
         except Exception as e:
             print(f"[ERR] failed to read --salts {args.salts}: {e}")
             return 2
-        # JSON format: {salt_hex: db_name}
-        salt_to_db = {salt: {"name": name} for salt, name in preloaded.items()}
+        # JSON format: {salt_hex: db_name, "__wxid__": "..."}.
+        # Keep metadata out of the salt count/match table; otherwise logs say
+        # we loaded one more database than actually exists.
+        salt_to_db = {
+            salt: {"name": name}
+            for salt, name in preloaded.items()
+            if isinstance(salt, str) and re.fullmatch(r"[0-9a-fA-F]{32}", salt)
+        }
         profile_wxid = preloaded.get("__wxid__", "(provided via --salts)") if "__wxid__" in preloaded else "(unknown)"
         sys.stderr.write(f"[info] {len(salt_to_db)} salts loaded from --salts file\n")
     else:
