@@ -1,24 +1,16 @@
-# Murmur 微语
+# Murmur v0.2.13
 
-微信聊天记录本地解密、关系图和关系分析工具。
-
-## 最新版本
-
-下载最新版：<https://github.com/sgaofen/murmur/releases/latest>
-
-当前推荐版本：`v0.2.13`
-
-## 下载哪个文件
+## 下载
 
 Windows 用户：
 
 - 推荐下载：`Murmur_0.2.13_x64-setup.exe`
-- 不推荐普通用户下载：`Murmur_0.2.13_x64_en-US.msi`
+- 备用：`Murmur_0.2.13_x64_en-US.msi`
 
 Mac 用户：
 
 - Apple Silicon Mac 下载：`Murmur_macOS_AppleSilicon.dmg`
-- 备用排错文件：`Murmur_macOS_AppleSilicon.app.zip`
+- 备用：`Murmur_macOS_AppleSilicon.app.zip`
 
 Intel Mac 暂时没有安装包，需要从源码运行。
 
@@ -65,7 +57,3 @@ open /Applications/Murmur.app
 4. 回 WeChat 点开 3-5 个私聊，再翻一下朋友圈。
 5. 回 Murmur 点「开始自动抓取」。
 6. 等待解密完成后进入主界面。
-
-## 数据和隐私
-
-Murmur 默认在本机处理数据。只有你主动点击 AI 分析时，样本才会交给你本机已登录的 Claude Code 或 Codex CLI。
