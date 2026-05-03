@@ -25,6 +25,32 @@ export function OnboardingDialog({ open, onClose, onDone }: Props) {
     setError(null);
   }, [open]);
 
+  useEffect(() => {
+    if (
+      !open ||
+      phase !== 'win-need-key' ||
+      diag?.platform !== 'windows' ||
+      diag.capabilities.weixin_running !== false
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+    const timer = window.setInterval(async () => {
+      try {
+        const d = await getDiagnose();
+        if (!cancelled) setDiag(d);
+      } catch {
+        // Keep the current diagnostic card visible; the manual button can still retry.
+      }
+    }, 2500);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [open, phase, diag?.platform, diag?.capabilities.weixin_running]);
+
   if (!open) return null;
 
   async function startDiagnose() {
@@ -585,7 +611,7 @@ function WinNeedKey({ diag, onStart, onRetry }: { diag: Diagnose; onStart: () =>
           border: '0.5px solid rgba(196,90,63,0.35)', borderRadius: 8,
           fontSize: 12, color: 'var(--et-rose)', marginBottom: 14, lineHeight: 1.6,
         }}>
-          现在没有检测到微信进程。请打开微信，让它停在登录页，然后点下面的「再次检测微信」让 Murmur 重新识别。
+          现在没有检测到微信进程。请打开微信，让它停在登录页；Murmur 会每 2.5 秒自动重检，也可以点下面的「再次检测微信」立刻重试。
         </div>
       )}
       <CapabilityList diag={diag} />
