@@ -31,7 +31,7 @@ Murmur 兼容 EchoTrace 的旧数据布局，但 onboarding 不再要求用户�
 | 空数据目录 | root-only 指向空目录 | `has_wechat_data=false`，onboarding 应提示先登录微信 |
 | 微信装在非默认路径但进程存在 | 单元模拟：`find_weixin_exe=None` + `weixin_running=true` | 仍允许抓 key |
 | 微信进程不存在 | 单元模拟：`weixin_running=false` | 不允许抓 key，提示打开微信 |
-| 打包后端启动 | `app/src-tauri/etcli/etcli.exe serve` 独立端口 | `/api/info` 返回 `0.2.10`，`/api/diagnose` 正常 |
+| 打包后端启动 | `app/src-tauri/etcli/etcli.exe serve` 独立端口 | `/api/info` 返回 `0.2.11`，`/api/diagnose` 正常 |
 | Tauri shell 启动后端 | release `Murmur.exe` + 隔离 `USERPROFILE/APPDATA/LOCALAPPDATA` | shell 能自动拉起后端，`9100/api/info` 正常 |
 
 ## 给朋友排查时先收集
@@ -45,7 +45,7 @@ tasklist | findstr /i "Weixin WeChat Murmur etcli"
 
 优先确认：
 
-- 下载的是 `Murmur_0.2.10_x64-setup.exe`，不是旧包。
+- 下载的是 `Murmur_0.2.11_x64-setup.exe`，不是旧包。
 - 微信任务管理器里能看到 `Weixin.exe` 或 `WeChat.exe`。
 - 端口 `9100` 没被其他程序占用。
 - 杀软/Defender 没把 `etcli.exe` 或 `wx_key.dll` 隔离。

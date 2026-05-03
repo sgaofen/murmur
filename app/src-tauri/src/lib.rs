@@ -14,13 +14,20 @@
 // On window close the spawned backend child is killed cleanly.
 
 use std::fs::OpenOptions;
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager, RunEvent};
 
 struct ServeProcess(Mutex<Option<Child>>);
+
+#[derive(serde::Serialize)]
+struct LogTail {
+    logs_dir: String,
+    serve: String,
+    tauri_shell: String,
+}
 
 fn log_dir() -> Option<PathBuf> {
     let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
@@ -36,6 +43,43 @@ fn log_line(s: &str) {
         {
             let _ = writeln!(f, "{}", s);
         }
+    }
+}
+
+fn tail_text(path: PathBuf, max_lines: usize, max_bytes: u64) -> String {
+    let mut f = match std::fs::File::open(&path) {
+        Ok(f) => f,
+        Err(_) => return String::new(),
+    };
+    let size = f.metadata().map(|m| m.len()).unwrap_or(0);
+    if size > max_bytes {
+        let _ = std::io::Seek::seek(&mut f, std::io::SeekFrom::Start(size - max_bytes));
+    }
+    let mut buf = Vec::new();
+    let _ = f.take(max_bytes).read_to_end(&mut buf);
+    let text = String::from_utf8_lossy(&buf);
+    let mut lines: Vec<&str> = text.lines().collect();
+    if lines.len() > max_lines {
+        lines = lines.split_off(lines.len() - max_lines);
+    }
+    lines.join("\n")
+}
+
+#[tauri::command]
+fn read_log_tail(lines: Option<usize>) -> LogTail {
+    let max_lines = lines.unwrap_or(80).clamp(20, 200);
+    let dir = log_dir();
+    match dir {
+        Some(d) => LogTail {
+            logs_dir: d.to_string_lossy().to_string(),
+            serve: tail_text(d.join("serve.log"), max_lines, 64_000),
+            tauri_shell: tail_text(d.join("tauri-shell.log"), max_lines, 64_000),
+        },
+        None => LogTail {
+            logs_dir: String::new(),
+            serve: String::new(),
+            tauri_shell: String::new(),
+        },
     }
 }
 
@@ -181,6 +225,7 @@ fn stop_etcli_serve(app: &AppHandle, reason: &str) {
 pub fn run() {
     tauri::Builder::default()
         .manage(ServeProcess(Mutex::new(None)))
+        .invoke_handler(tauri::generate_handler![read_log_tail])
         .setup(|app| {
             log_line("=== Murmur startup ===");
             if cfg!(debug_assertions) {

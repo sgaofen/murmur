@@ -4,7 +4,8 @@ import { FriendCard } from '../components/FriendCard';
 import { Postmark } from '../components/Postmark';
 import { Ribbon } from '../components/Ribbon';
 import { Sparkline } from '../components/Sparkline';
-import { APP_VERSION, getAllFriends, getHomeSummary, refreshData } from '../data/api';
+import { APP_VERSION, getAllFriends, getHomeSummary, getLogTail, getTauriLogTail, refreshData } from '../data/api';
+import type { LogTailResponse } from '../data/api';
 import type { Friend, HomeSummary } from '../data/types';
 import { ExtractKeyDialog } from './ExtractKeyDialog';
 import { TaskCenterBell, TaskCenterDrawer, useTaskCenter } from '../components/extras/TaskCenter';
@@ -228,6 +229,8 @@ export function HomePage({ dark = false, onOpenFriend }: Props) {
   const [allFriends, setAllFriends] = useState<Friend[]>([]);
   const [loadingFriends, setLoadingFriends] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [bootWaitSec, setBootWaitSec] = useState(0);
+  const [bootLogs, setBootLogs] = useState<LogTailResponse | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshMsg, setRefreshMsg] = useState('');
   const [extractOpen, setExtractOpen] = useState(false);
@@ -237,24 +240,32 @@ export function HomePage({ dark = false, onOpenFriend }: Props) {
 
   // Initial load
   useEffect(() => {
-    // Retry up to 8 times with 750ms backoff for the first fetch — covers the
-    // boot race where the Tauri shell shows the React app a few seconds before
-    // the spawned etcli backend has bound to port 9100. Without this, users
-    // see "Load failed" for the first 1-3 seconds of every cold launch.
+    // Retry for up to 60 seconds on cold launch. On Windows the bundled
+    // PyInstaller etcli.exe can be slowed down by Defender/AV scanning, and
+    // on slower machines the webview may render long before port 9100 is ready.
     let cancelled = false;
     let attempts = 0;
     const tryFetch = async () => {
-      while (!cancelled && attempts < 8) {
+      setBootLogs(null);
+      while (!cancelled && attempts < 80) {
         attempts++;
+        setBootWaitSec(Math.ceil((attempts - 1) * 0.75));
         try {
           const r = await getHomeSummary();
-          if (!cancelled) { setSummary(r); setError(null); }
+          if (!cancelled) { setSummary(r); setError(null); setBootWaitSec(0); }
           return;
         } catch (e: any) {
           if (cancelled) return;
           // Last attempt — surface the error
-          if (attempts >= 8) {
+          if (attempts >= 80) {
             setError(String(e?.message || e));
+            getTauriLogTail(80)
+              .then(localLogs => localLogs || getLogTail(80))
+              .then(logs => {
+                if (!cancelled) setBootLogs(logs);
+              }).catch(() => {
+                if (!cancelled) setBootLogs(null);
+              });
             return;
           }
           await new Promise(resolve => setTimeout(resolve, 750));
@@ -294,21 +305,25 @@ export function HomePage({ dark = false, onOpenFriend }: Props) {
     try {
       const r = await refreshData();
       window.clearInterval(progT);
+      const failure = r.ok ? '' : summarizeRefreshFailure(r.details || '');
       taskCenter.updateTask(taskId, {
-        pct: 100, status: 'done',
-        sub: r.ok ? `用时 ${(r.ms / 1000).toFixed(1)}s` : `失败：${r.details.slice(0, 60)}`,
+        pct: 100, status: r.ok ? 'done' : 'error',
+        sub: r.ok ? `用时 ${(r.ms / 1000).toFixed(1)}s` : failure,
       });
-      setRefreshMsg(r.ok ? `已更新 · ${(r.ms / 1000).toFixed(1)}s` : `失败：${r.details.slice(0, 60)}`);
-      const [s, fs] = await Promise.all([
-        getHomeSummary(),
-        getAllFriends({ kind: tab === 'time' ? 'all' : tab, q: searchDebounced }),
-      ]);
-      setSummary(s);
-      setAllFriends(fs);
+      setRefreshMsg(r.ok ? `已更新 · ${(r.ms / 1000).toFixed(1)}s` : failure);
+      if (r.ok) {
+        const [s, fs] = await Promise.all([
+          getHomeSummary(),
+          getAllFriends({ kind: tab === 'time' ? 'all' : tab, q: searchDebounced }),
+        ]);
+        setSummary(s);
+        setAllFriends(fs);
+      }
     } catch (e: any) {
       window.clearInterval(progT);
-      taskCenter.updateTask(taskId, { status: 'done', pct: 100, sub: `失败：${e?.message || e}`.slice(0, 80) });
-      setRefreshMsg(`失败：${e?.message || e}`.slice(0, 80));
+      const failure = summarizeRefreshFailure(e?.message || String(e));
+      taskCenter.updateTask(taskId, { status: 'error', pct: 100, sub: failure });
+      setRefreshMsg(failure);
     } finally {
       setRefreshing(false);
       setTimeout(() => setRefreshMsg(''), 6000);
@@ -330,14 +345,48 @@ export function HomePage({ dark = false, onOpenFriend }: Props) {
           4. 把日志贴 issue 给作者 sgaofen
         </div>
         <div className="et-meta" style={{ color: 'var(--et-faint)' }}>{maskText(error)}</div>
+        {bootLogs && (
+          <details style={{ width: 'min(760px, 92vw)' }}>
+            <summary className="et-meta" style={{ cursor: 'pointer', color: 'var(--et-orange)', textAlign: 'center' }}>
+              查看启动诊断日志
+            </summary>
+            <div className="et-meta" style={{ color: 'var(--et-mute)', marginTop: 8, textAlign: 'center' }}>
+              日志目录：{maskText(bootLogs.logs_dir)}
+            </div>
+            <pre style={{
+              marginTop: 10,
+              padding: 12,
+              maxHeight: 260,
+              overflow: 'auto',
+              borderRadius: 8,
+              border: '0.5px solid var(--et-line-2)',
+              background: 'var(--et-paper-2)',
+              color: 'var(--et-ink-soft)',
+              fontSize: 11,
+              lineHeight: 1.55,
+              whiteSpace: 'pre-wrap',
+            }}>{maskText([
+              '--- serve.log ---',
+              bootLogs.serve || '(empty)',
+              '',
+              '--- tauri-shell.log ---',
+              bootLogs.tauri_shell || '(empty)',
+            ].join('\n'))}</pre>
+          </details>
+        )}
       </div>
     );
   }
 
   if (!summary) {
     return (
-      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        <div className="et-meta">正在加载你的年代记…</div>
+      <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10 }}>
+        <div className="et-meta">正在启动本地服务…</div>
+        <div className="et-meta" style={{ color: 'var(--et-faint)', fontSize: 11 }}>
+          {bootWaitSec >= 8
+            ? `首次打开时，本地后端正在启动；Windows 杀毒/Defender 扫描 etcli.exe 时可能要等 10-60 秒。已等待 ${bootWaitSec} 秒`
+            : '正在连接 127.0.0.1:9100'}
+        </div>
       </div>
     );
   }
@@ -379,4 +428,22 @@ export function HomePage({ dark = false, onOpenFriend }: Props) {
       {taskCenterOpen && <TaskCenterDrawer onClose={() => setTaskCenterOpen(false)} />}
     </div>
   );
+}
+
+function summarizeRefreshFailure(details: string): string {
+  const text = details || '';
+  if (text.includes('找不到 Mac 解密密钥') || text.includes('decrypted_keys.json')) {
+    return '缺少 Mac 解密密钥：先点「密钥」→「开始自动抓取」，抓到后再更新数据。';
+  }
+  if (text.includes('找不到密钥') || text.toLowerCase().includes('no key')) {
+    return '缺少解密密钥：先完成密钥抓取，再更新数据。';
+  }
+  if (text.includes('核心数据库未解密')) {
+    return '核心数据库未解密：请重新抓密钥后再更新数据。';
+  }
+  const firstUsefulLine = text
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .find(line => line && !line.startsWith('[INFO]'));
+  return `更新失败：${(firstUsefulLine || text || '未知错误').slice(0, 80)}`;
 }

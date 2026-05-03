@@ -217,6 +217,13 @@ def main():
 
     key_hex = find_decrypt_key(profile, override=args.key)
     if not key_hex:
+        if IS_MAC:
+            raise SystemExit(
+                "找不到 Mac 解密密钥。\n"
+                "请先回到 Murmur 点「密钥」→「开始自动抓取」，按提示在微信里点开几个聊天/朋友圈后再抓取。\n"
+                "抓到后会生成 ~/.murmur/decrypted_keys.json，然后再点「更新数据」。\n"
+                "已有解密数据仍可继续浏览；只有更新最新微信数据时才需要这个密钥。"
+            )
         raise SystemExit(
             "找不到密钥。请先运行：\n"
             "    python extract_key_dll.py --auto-restart --save-to ~/.murmur/key.json\n"

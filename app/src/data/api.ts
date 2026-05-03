@@ -30,6 +30,26 @@ export async function getInfo(): Promise<InfoResponse> {
   return j('/api/info');
 }
 
+export interface LogTailResponse {
+  logs_dir: string;
+  serve: string;
+  tauri_shell: string;
+}
+
+export async function getLogTail(lines = 80): Promise<LogTailResponse> {
+  return j(`/api/log-tail?lines=${encodeURIComponent(String(lines))}`);
+}
+
+export async function getTauriLogTail(lines = 80): Promise<LogTailResponse | null> {
+  try {
+    const invoke = (window as any).__TAURI__?.core?.invoke;
+    if (!invoke) return null;
+    return await invoke('read_log_tail', { lines });
+  } catch {
+    return null;
+  }
+}
+
 export interface Diagnose {
   platform: 'windows' | 'macos' | 'linux';
   python: string;
@@ -151,7 +171,7 @@ export async function generateAIPack(id: string, opts: { sample?: number } = {})
 }
 
 export async function extractKey(opts: { autoRestart?: boolean; timeout?: number } = {}): Promise<{
-  ok: boolean; key?: string; ms?: number; log?: string;
+  ok: boolean; key?: string; mac_keys_count?: number; ms?: number; log?: string;
 }> {
   return j('/api/extract-key', {
     method: 'POST',
@@ -356,4 +376,4 @@ export async function openFolder(path?: string): Promise<{ ok: boolean; opened?:
   });
 }
 
-export const APP_VERSION = 'v0.2.9 · Murmur 微语';
+export const APP_VERSION = 'v0.2.11 · Murmur 微语';
