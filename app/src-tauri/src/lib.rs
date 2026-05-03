@@ -17,7 +17,9 @@ use std::fs::OpenOptions;
 use std::io::{Read as _, Write as _};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, RunEvent};
 
 struct ServeProcess(Mutex<Option<Child>>);
@@ -28,6 +30,12 @@ struct LogTail {
     serve: String,
     tauri_shell: String,
 }
+
+/// Set to true by `stop_etcli_serve` so the watchdog stops attempting to
+/// respawn the backend after the user closes the window or quits the app.
+/// Without this, the watchdog races with shutdown and may resurrect a child
+/// that the cleanup just killed.
+static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
 fn log_dir() -> Option<PathBuf> {
     let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
@@ -133,6 +141,159 @@ fn locate_dev_etcli_py() -> Option<PathBuf> {
     None
 }
 
+/// Kill any leftover etcli process from a previous Murmur run that didn't shut
+/// down cleanly (force-quit, crash, killed from Task Manager, etc.).
+///
+/// Why this matters: `_run_server` uses `ThreadingHTTPServer((host, port), …)`
+/// which raises `OSError [Errno 10048]` on a port-already-in-use bind. The
+/// Python process then exits non-zero, BUT `cmd.spawn()` here returns Ok
+/// regardless — Tauri has no way to notice the child died. The webview then
+/// fetches `http://127.0.0.1:9100` and gets a confusing "fail to fetch".
+///
+/// This was the most-reported "一点开始立马 fail" symptom in 0.2.5–0.2.10.
+/// `our_pid` is excluded from the kill so we don't accidentally kill ourselves
+/// on Windows where some confused state might match the image filter.
+fn kill_stale_etcli() {
+    let our_pid = std::process::id();
+    log_line(&format!("kill_stale_etcli (our pid={})", our_pid));
+
+    #[cfg(target_os = "windows")]
+    {
+        let r = Command::new("taskkill")
+            .args(["/F", "/IM", "etcli.exe", "/T", "/FI", &format!("PID ne {}", our_pid)])
+            .stdout(Stdio::null()).stderr(Stdio::null())
+            .status();
+        log_line(&format!("  taskkill /IM etcli.exe: {:?}", r));
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // pgrep -f matches the full command line, so this catches both the
+        // PyInstaller bundle (`.../etcli serve …`) and the dev-mode invocation
+        // (`python3 cli/etcli.py serve …`). We can't easily exclude our own
+        // pid here — but pkill -f 'etcli.*serve' won't match the Murmur app
+        // binary, so it's fine.
+        let _ = Command::new("pkill")
+            .args(["-f", "etcli.*serve"])
+            .stdout(Stdio::null()).stderr(Stdio::null())
+            .status();
+        log_line("  pkill -f 'etcli.*serve' done");
+    }
+
+    // Give the OS ~400ms to actually release port 9100. Without this, the
+    // immediately-following bind can still race and fail.
+    std::thread::sleep(Duration::from_millis(400));
+}
+
+/// Background watchdog that respawns etcli if it dies unexpectedly.
+///
+/// Polls `Child::try_wait()` every 3 seconds. If the child exited and we are
+/// not in the middle of a shutdown, kills any zombie + spawns a fresh etcli +
+/// updates the managed state.
+///
+/// Throttles restarts: max 5 in any 60-second window. Beyond that, sleeps 60s
+/// before trying again — protects against tight crash loops (e.g. wx_key.dll
+/// missing → every spawn dies in 200ms → would otherwise burn CPU and spam logs).
+///
+/// This is the answer to "如果 etcli 挂了怎么办". 90% coverage of crash modes
+/// (segfault, OOM, uncaught Python exception). Doesn't catch true hangs
+/// (deadlock without exit) — for that we'd need an HTTP health probe, which
+/// is a much bigger lift.
+fn start_watchdog(app: AppHandle) {
+    std::thread::spawn(move || {
+        let mut restart_window: Vec<Instant> = Vec::new();
+        let mut backoff_until: Option<Instant> = None;
+
+        loop {
+            std::thread::sleep(Duration::from_secs(3));
+
+            if SHUTTING_DOWN.load(Ordering::Relaxed) {
+                log_line("watchdog: shutdown flagged, exiting");
+                return;
+            }
+
+            if let Some(until) = backoff_until {
+                if Instant::now() < until {
+                    continue;
+                }
+                backoff_until = None;
+                restart_window.clear();
+                log_line("watchdog: backoff window over, resuming health checks");
+            }
+
+            let needs_restart = match app.try_state::<ServeProcess>() {
+                Some(state) => match state.0.lock() {
+                    Ok(mut guard) => match guard.as_mut() {
+                        Some(child) => match child.try_wait() {
+                            Ok(Some(status)) => {
+                                let pid = child.id();
+                                log_line(&format!(
+                                    "watchdog: etcli pid={} exited unexpectedly with {}",
+                                    pid, status
+                                ));
+                                *guard = None;
+                                true
+                            }
+                            Ok(None) => false, // healthy
+                            Err(e) => {
+                                log_line(&format!("watchdog: try_wait err: {}", e));
+                                false
+                            }
+                        },
+                        // Slot empty + not shutting down = either (a) the
+                        // initial spawn at startup failed, or (b) a previous
+                        // watchdog cycle's respawn returned None. Either way,
+                        // try again. Throttle below prevents tight loops.
+                        None => true,
+                    },
+                    Err(e) => {
+                        log_line(&format!("watchdog: state lock poisoned: {}", e));
+                        false
+                    }
+                },
+                None => {
+                    log_line("watchdog: app state gone, exiting");
+                    return;
+                }
+            };
+
+            if !needs_restart {
+                continue;
+            }
+
+            // Re-check shutdown flag after detection — user may have quit
+            // while we were noticing the crash.
+            if SHUTTING_DOWN.load(Ordering::Relaxed) {
+                log_line("watchdog: shutdown flagged after crash detect, NOT restarting");
+                return;
+            }
+
+            // Throttle: drop restart entries older than 60s, then check count.
+            let now = Instant::now();
+            restart_window.retain(|t| now.duration_since(*t) < Duration::from_secs(60));
+            if restart_window.len() >= 5 {
+                log_line(
+                    "watchdog: 5+ restarts in last 60s — entering 60s backoff. \
+                     etcli is crash-looping; user should check serve.log."
+                );
+                backoff_until = Some(now + Duration::from_secs(60));
+                continue;
+            }
+            restart_window.push(now);
+
+            log_line(&format!(
+                "watchdog: respawning etcli (restart #{} this minute)",
+                restart_window.len()
+            ));
+            let new_child = spawn_etcli_serve(&app);
+            if let Some(state) = app.try_state::<ServeProcess>() {
+                if let Ok(mut g) = state.0.lock() {
+                    *g = new_child;
+                }
+            }
+        }
+    });
+}
+
 fn open_log_for_serve() -> (Stdio, Stdio) {
     let log_path = log_dir().map(|d| d.join("serve.log"));
     let stdout: Stdio = log_path
@@ -149,6 +310,11 @@ fn open_log_for_serve() -> (Stdio, Stdio) {
 }
 
 fn spawn_etcli_serve(app: &AppHandle) -> Option<Child> {
+    // First, evict any stale backend that's still squatting port 9100. See
+    // `kill_stale_etcli` for the race this resolves. Safe to call on every
+    // (re)spawn — taskkill returns silently if no match.
+    kill_stale_etcli();
+
     // Path A: bundled PyInstaller binary
     if let Some(etcli) = locate_etcli_exe(app) {
         log_line(&format!("etcli located: {:?}", etcli));
@@ -195,6 +361,10 @@ fn spawn_etcli_serve(app: &AppHandle) -> Option<Child> {
 
 fn stop_etcli_serve(app: &AppHandle, reason: &str) {
     log_line(&format!("stopping etcli: {}", reason));
+    // Tell the watchdog to stop trying to respawn. Must be set BEFORE we
+    // take the child out of the mutex, otherwise the watchdog could observe
+    // the empty slot and respawn before noticing the shutdown.
+    SHUTTING_DOWN.store(true, Ordering::Relaxed);
     if let Some(state) = app.try_state::<ServeProcess>() {
         if let Ok(mut guard) = state.0.lock() {
             if let Some(mut child) = guard.take() {
@@ -241,6 +411,11 @@ pub fn run() {
                     *guard = child;
                 }
             }
+            // Watchdog: respawn etcli if it dies (segfault / OOM / Python
+            // uncaught exception). Keep it OUTSIDE the spawn match so the
+            // watchdog still runs even if the initial spawn failed — it'll
+            // notice the empty slot, run kill_stale_etcli, and retry.
+            start_watchdog(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| {

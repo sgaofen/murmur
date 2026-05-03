@@ -498,7 +498,7 @@ STOPWORDS.update("这个 那个 一下 还是 就是 没有 什么 怎么 为啥
 STOP_CHARS = set("的了是我你他她也都在就不和与这那一个有没啊吧呀嗯哦嘛呢吗哈呜哇噢哎唉哟唔嗷嘿哼啦喔把被让给从向对跟比又再才还但而或因所以之上下里外中后前时日年月来去到过")
 NON_TEXT = re.compile(r"\[[^\]]+\]")
 URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
-APP_VERSION = "0.2.11"
+APP_VERSION = "0.2.12"
 YEARBOOK_CACHE_VERSION = 5
 
 
@@ -3163,7 +3163,14 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
 
         # Onboarding gate: data-needing endpoints return 503 until store is ready.
         # Endpoints that work without a store stay above this gate.
-        if path == "/api/diagnose" or path == "/api/agents":
+        # NOTE: keep this allowlist in sync with `_NO_STORE_GET` above. They
+        # describe the same intent — endpoints reachable in bootstrap mode —
+        # and historically diverged: /api/reports + /api/report/* were in
+        # _NO_STORE_GET but missing here, so users hit 503 the moment they
+        # opened the Reports page on a fresh install.
+        _gate_pass = (path in {"/api/diagnose", "/api/agents", "/api/reports", "/api/log-tail"}
+                      or path.startswith("/api/report/"))
+        if _gate_pass:
             pass  # these don't need store, fall through to their handlers
         elif self.store is None:
             return self._send_json({
