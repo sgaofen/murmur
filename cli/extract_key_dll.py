@@ -178,8 +178,28 @@ except Exception:
 
 class WxKey:
     def __init__(self):
+        dll_path = NATIVE_DIR / "wx_key.dll"
+        # Friendly error if the DLL is missing — most often this means an antivirus
+        # (360 / QQ管家 / 火绒 / Defender) quarantined wx_key.dll because it looks
+        # like a process-injection tool. Without this check the user sees a bare
+        # FileNotFoundError traceback that doesn't suggest a fix.
+        if not dll_path.exists():
+            raise FileNotFoundError(
+                f"找不到 {dll_path}。\n"
+                f"最可能的原因：杀毒软件（360 / QQ管家 / 火绒 / Defender）把 wx_key.dll 隔离了。\n"
+                f"修复：把 Murmur 安装目录加到杀毒白名单 → 重装 Murmur → 再试一次。\n"
+                f"（wx_key.dll 是用来读微信进程内存的合法工具，但确实长得像注入木马，所以 AV 经常误杀。）"
+            )
         self._dll_dir_handle = os.add_dll_directory(str(NATIVE_DIR)) if hasattr(os, "add_dll_directory") else None
-        self.dll = ctypes.WinDLL(str(NATIVE_DIR / "wx_key.dll"))
+        try:
+            self.dll = ctypes.WinDLL(str(dll_path))
+        except OSError as e:
+            raise OSError(
+                f"加载 wx_key.dll 失败 ({e}).\n"
+                f"DLL 在 {dll_path}，但 LoadLibrary 拒绝加载。\n"
+                f"最可能的原因：杀毒软件实时防护拦截了 DLL 注入。\n"
+                f"修复：把 Murmur 安装目录加到杀毒白名单后重启 Murmur。"
+            ) from e
 
         # InitializeHook(uint32 pid) -> bool
         self.dll.InitializeHook.argtypes = [ctypes.c_uint32]

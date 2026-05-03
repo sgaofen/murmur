@@ -234,7 +234,7 @@ export function OnboardingDialog({ open, onClose, onDone }: Props) {
           {phase === 'mac-resigning' && <Working text={progress || '正在重签名…'} />}
           {phase === 'mac-wait-login' && <MacWaitLogin onContinue={startKeyExtract} />}
           {phase === 'mac-fda-needed' && <MacFDANeeded onOpenSettings={openFDAAndWait} onRetry={startDiagnose} />}
-          {phase === 'win-need-key' && diag && <WinNeedKey diag={diag} onStart={startKeyExtract} />}
+          {phase === 'win-need-key' && diag && <WinNeedKey diag={diag} onStart={startKeyExtract} onRetry={startDiagnose} />}
           {phase === 'extract-key' && <Working text={progress} />}
           {phase === 'win-decrypt' && <Working text={progress || "正在解密所有微信数据库…"} />}
           {phase === 'done' && <Done onDone={() => { onClose(); onDone?.(); }} />}
@@ -559,7 +559,7 @@ function MacAutoExtract({ diag, onStart, onPaste }: { diag: Diagnose; onStart: (
   );
 }
 
-function WinNeedKey({ diag, onStart }: { diag: Diagnose; onStart: () => void }) {
+function WinNeedKey({ diag, onStart, onRetry }: { diag: Diagnose; onStart: () => void; onRetry: () => void }) {
   const wechatRunning = diag.capabilities.weixin_running !== false;
   return (
     <>
@@ -585,7 +585,7 @@ function WinNeedKey({ diag, onStart }: { diag: Diagnose; onStart: () => void }) 
           border: '0.5px solid rgba(196,90,63,0.35)', borderRadius: 8,
           fontSize: 12, color: 'var(--et-rose)', marginBottom: 14, lineHeight: 1.6,
         }}>
-          现在没有检测到微信进程。请先打开微信，让它停在登录页，然后点「再试一次」重新检测。
+          现在没有检测到微信进程。请打开微信，让它停在登录页，然后点下面的「再次检测微信」让 Murmur 重新识别。
         </div>
       )}
       <CapabilityList diag={diag} />
@@ -594,6 +594,13 @@ function WinNeedKey({ diag, onStart }: { diag: Diagnose; onStart: () => void }) 
         opacity: wechatRunning ? 1 : 0.45,
         cursor: wechatRunning ? 'pointer' : 'not-allowed',
       }}>开始抓密钥</button>
+      {!wechatRunning && (
+        <button onClick={onRetry} style={{
+          ...primaryBtn, marginTop: 8, background: 'transparent',
+          color: 'var(--et-ink)', boxShadow: 'none',
+          border: '1px solid var(--et-line-2)',
+        }}>再次检测微信</button>
+      )}
     </>
   );
 }
