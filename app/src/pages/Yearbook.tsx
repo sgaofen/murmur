@@ -25,7 +25,7 @@ export function YearbookPage({ friendId, onBack }: Props) {
     return (
       <div style={{ padding: 40 }}>
         <button onClick={onBack} style={{ all: 'unset', cursor: 'pointer', color: 'var(--et-mute)' }}>← 返回</button>
-        <div style={{ marginTop: 20, color: 'var(--et-rose)' }}>加载失败：{error}</div>
+        <div style={{ marginTop: 20, color: 'var(--et-rose)' }}>加载失败：{maskText(error)}</div>
       </div>
     );
   }
@@ -274,12 +274,12 @@ function SignatureBlock({ sig }: {
         {sig.reason && (
           <>
             <span className="yb-meta-dot" />
-            <span className="yb-reason">依据 · <b>{sig.reason}</b></span>
+            <span className="yb-reason">依据 · <b>{maskText(sig.reason)}</b></span>
           </>
         )}
         {!!sig.terms?.length && (
           <span className="yb-term-wrap">
-            {sig.terms.slice(0, 3).map((t, i) => <span key={`${t}-${i}`} className="yb-term">{t}</span>)}
+            {sig.terms.slice(0, 3).map((t, i) => <span key={`${t}-${i}`} className="yb-term">{maskText(t)}</span>)}
           </span>
         )}
       </div>

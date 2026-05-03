@@ -1,5 +1,6 @@
 import { Avatar } from './Avatar';
 import type { Friend } from '../data/types';
+import { maskText } from '../utils/privacy';
 import { useDisplayName } from '../utils/usePrivacy';
 
 interface Props {
@@ -56,7 +57,7 @@ export function FriendCard({ friend, rank, big = false, onClick }: Props) {
             {friend.count.toLocaleString()}
             <span style={{ fontSize: 11, fontWeight: 500, color: 'var(--et-mute)', marginLeft: 4, fontFamily: 'var(--et-sans)' }}>条</span>
           </div>
-          <div className="et-meta" style={{ marginTop: 4 }}>{friend.bond}</div>
+          <div className="et-meta" style={{ marginTop: 4 }}>{maskText(friend.bond)}</div>
         </div>
         <span className={`et-chip ${friend.tagKind || ''}`}>{friend.tag}</span>
       </div>

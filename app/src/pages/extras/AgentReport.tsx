@@ -4,7 +4,7 @@ import { Ribbon } from '../../components/Ribbon';
 import { MessageCard } from '../../components/MessageCard';
 import { invokeAgent, getInvokeStream } from '../../data/api';
 import type { Friend } from '../../data/types';
-import { displayName } from '../../utils/privacy';
+import { displayName, isPrivacyMode, maskText } from '../../utils/privacy';
 import { usePrivacy } from '../../utils/usePrivacy';
 
 interface Props {
@@ -42,7 +42,7 @@ function parseChapters(md: string): Chapter[] {
 }
 
 export function AgentReport({ friend, cli, onClose }: Props) {
-  void usePrivacy();
+  const privacy = usePrivacy();
   const [phase, setPhase] = useState<'running' | 'done' | 'error'>('running');
   const [streamed, setStreamed] = useState<string>('');
   const [output, setOutput] = useState<string>('');
@@ -116,7 +116,7 @@ export function AgentReport({ friend, cli, onClose }: Props) {
       <div style={{ padding: 28 }}>
         <button onClick={onClose} style={{ all: 'unset', cursor: 'pointer', color: 'var(--et-mute)' }}>← 返回</button>
         <div className="et-h2" style={{ marginTop: 18, color: 'var(--et-rose)' }}>分析失败</div>
-        <pre style={{ marginTop: 12, padding: 12, background: 'var(--et-paper-2)', borderRadius: 8, fontSize: 12, whiteSpace: 'pre-wrap' }}>{error}</pre>
+        <pre style={{ marginTop: 12, padding: 12, background: 'var(--et-paper-2)', borderRadius: 8, fontSize: 12, whiteSpace: 'pre-wrap' }}>{maskText(error || '')}</pre>
       </div>
     );
   }
@@ -158,13 +158,13 @@ export function AgentReport({ friend, cli, onClose }: Props) {
             borderRadius: 'var(--et-r)', padding: '24px 28px',
             whiteSpace: 'pre-wrap', fontSize: 14, lineHeight: 1.78, color: 'var(--et-ink-soft)',
           }}>
-            {output}
+            {maskText(output)}
           </div>
         )}
       </div>
       {/* dock */}
       <div style={{ margin: '0 28px 32px', display: 'flex', gap: 10, justifyContent: 'center' }}>
-        <ReportBtn label="拷贝全文" icon="⎘" onClick={() => navigator.clipboard.writeText(output)} />
+        <ReportBtn label="拷贝全文" icon="⎘" onClick={() => navigator.clipboard.writeText(privacy || isPrivacyMode() ? maskText(output) : output)} />
         <ReportBtn label="再来一次" icon="↻" onClick={() => window.location.reload()} />
         <ReportBtn label="关闭" icon="×" onClick={onClose} />
       </div>
@@ -210,7 +210,7 @@ function Streaming({ friend, agentName, text, secs, onClose }: { friend: Friend;
         </div>
         <div className="et-eyebrow">助手发言</div>
         <div className="et-serif" style={{ marginTop: 14, fontSize: 15, lineHeight: 1.85, color: 'var(--et-ink)', whiteSpace: 'pre-wrap' }}>
-          {text}
+          {maskText(text)}
           <span style={{ display: 'inline-block', width: 8, height: 16, background: 'var(--et-orange)', marginLeft: 2, verticalAlign: 'middle', animation: 'et-blink 1s steps(1) infinite' }} />
         </div>
         <div style={{ marginTop: 22, paddingTop: 16, borderTop: '0.5px solid var(--et-line)', display: 'flex', alignItems: 'center', gap: 14 }}>
@@ -239,10 +239,10 @@ function ReportChapter({ num, title, body }: Chapter) {
       <div className="et-serif" style={{ fontSize: 32, fontWeight: 600, color: 'var(--et-orange)', lineHeight: 1, fontVariantNumeric: 'tabular-nums' }}>{num}</div>
       <div>
         <div className="et-h2" style={{ color: 'var(--et-ink)' }}>{title}</div>
-        <div className="et-body" style={{ marginTop: 10, fontSize: 14.5, lineHeight: 1.78, color: 'var(--et-ink-soft)', maxWidth: 720, whiteSpace: 'pre-wrap' }}>{cleanBody}</div>
+        <div className="et-body" style={{ marginTop: 10, fontSize: 14.5, lineHeight: 1.78, color: 'var(--et-ink-soft)', maxWidth: 720, whiteSpace: 'pre-wrap' }}>{maskText(cleanBody)}</div>
         {quote && (
           <div style={{ marginTop: 14 }}>
-            <MessageCard text={quote} />
+            <MessageCard text={maskText(quote)} />
           </div>
         )}
       </div>

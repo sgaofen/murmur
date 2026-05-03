@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { Friend } from '../../data/types';
 import { API_BASE } from '../../data/api';
-import { displayName } from '../../utils/privacy';
+import { displayName, maskText } from '../../utils/privacy';
 import { usePrivacy } from '../../utils/usePrivacy';
 
 interface MediaItem {
@@ -148,7 +148,7 @@ function Thumb({ item, onClick }: { item: MediaItem; onClick: () => void }) {
       }}
     >
       {item.kind === 'img' ? (
-        <img src={item.url} alt={item.filename} loading="lazy"
+        <img src={item.url} alt={maskText(item.filename)} loading="lazy"
           style={{ width: '100%', height: '100%', objectFit: 'cover' }}
           onError={(e) => { (e.target as HTMLImageElement).style.opacity = '0.2'; }}
         />
@@ -207,7 +207,7 @@ function Lightbox({ item, onClose }: { item: MediaItem; onClose: () => void }) {
       padding: 30, cursor: 'zoom-out',
     }}>
       {item.kind === 'img'
-        ? <img src={item.url} alt={item.filename} style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} />
+        ? <img src={item.url} alt={maskText(item.filename)} style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} />
         : <video src={item.url} controls autoPlay style={{ maxWidth: '100%', maxHeight: '100%' }} />}
       <button onClick={(e) => { e.stopPropagation(); onClose(); }} style={{
         all: 'unset', cursor: 'pointer',

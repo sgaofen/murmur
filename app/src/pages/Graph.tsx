@@ -6,7 +6,7 @@ import type { BatchStatus, LocalAgent } from '../data/api';
 import type { FriendConnection } from '../data/api';
 import type { Friend, FriendStats } from '../data/types';
 import { mdToHtml, MURMUR_MD_CSS } from '../utils/markdown';
-import { displayName, maskedWxid } from '../utils/privacy';
+import { displayName, maskedWxid, maskText } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
 import { useBatchTracker } from '../components/extras/BatchTracker';
 import type { BatchHandle } from '../components/extras/BatchTracker';
@@ -185,7 +185,7 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
         { cli, mode: 'pairs-graph', top: 0, top_pairs, parallel },
         { label: `关系网 Top ${top_pairs} 对${cli === 'both' ? ' · 双引擎' : ''}` },
       );
-      if (!r.ok) { alert('启动失败：' + (r.error || '')); return; }
+      if (!r.ok) { alert('启动失败：' + maskText(r.error || '')); return; }
       setBatchPanelOpen(true);
     } catch (e: any) {
       alert('错误：' + (e?.message || e));
@@ -241,7 +241,7 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
     return (
       <div style={{ padding: 40, textAlign: 'center' }}>
         <div className="et-h2" style={{ color: 'var(--et-rose)' }}>关系图加载失败</div>
-        <div className="et-meta" style={{ marginTop: 8 }}>{error}</div>
+        <div className="et-meta" style={{ marginTop: 8 }}>{maskText(error)}</div>
         <button onClick={onBack} style={{ all: 'unset', cursor: 'pointer', marginTop: 16,
           padding: '8px 18px', borderRadius: 8, background: 'var(--et-orange)', color: '#fff' }}>
           返回
@@ -403,7 +403,7 @@ function AnalysisStreamBox({ stream }: { stream: { output: string; stage: string
           color: 'var(--et-ink-soft)', whiteSpace: 'pre-wrap',
           maxHeight: 220, overflow: 'auto',
         }}>
-          {tail}
+          {maskText(tail)}
           <span style={{
             display: 'inline-block', width: 6, height: 12,
             background: 'var(--et-orange)', marginLeft: 2, verticalAlign: 'middle',
@@ -571,7 +571,7 @@ function SidePanel({ node, onClose, onOpenFriend, onSelectPeer }: {
           <div className="et-serif" style={{
             marginTop: 14, fontSize: 14, lineHeight: 1.6, color: 'var(--et-ink-soft)',
             paddingLeft: 12, borderLeft: '2px solid var(--et-orange)', fontStyle: 'italic',
-          }}>「{detail.bond}」</div>
+          }}>「{maskText(detail.bond)}」</div>
         )}
 
         {detail?.stats && (
@@ -579,7 +579,7 @@ function SidePanel({ node, onClose, onOpenFriend, onSelectPeer }: {
             <Stat label="总消息" value={(detail.stats.totalSelf + detail.stats.totalOther).toLocaleString()} />
             <Stat label="时间跨度" value={`${detail.stats.spanDays} 天`} />
             <Stat label="最长沉默" value={`${detail.stats.longestSilenceDays} 天`} />
-            <Stat label="高频词" value={`「${detail.stats.topPhrase}」`} />
+            <Stat label="高频词" value={`「${maskText(detail.stats.topPhrase)}」`} />
           </div>
         )}
 
@@ -608,7 +608,7 @@ function SidePanel({ node, onClose, onOpenFriend, onSelectPeer }: {
                 fontSize: 13, lineHeight: 1.7, color: 'var(--et-ink-soft)',
                 maxHeight: 200, overflow: 'hidden', position: 'relative',
               }}>
-                {briefSummary}…
+                {maskText(briefSummary)}…
                 <div style={{
                   position: 'absolute', bottom: 0, left: 0, right: 0, height: 36,
                   background: 'linear-gradient(to bottom, transparent, var(--et-paper-2))',
@@ -635,7 +635,7 @@ function SidePanel({ node, onClose, onOpenFriend, onSelectPeer }: {
               )}
               {analyzing === 'error' && analyzeError && (
                 <div className="et-meta" style={{ marginTop: 10, color: 'var(--et-rose)' }}>
-                  失败：{analyzeError.slice(0, 120)}
+                  失败：{maskText(analyzeError.slice(0, 120))}
                 </div>
               )}
               {analyzing !== 'running' && (
@@ -753,7 +753,7 @@ function ReportOverlay({ content, title, onClose }: { content: string; title: st
         <article className="murmur-md" style={{
           marginTop: 18, fontFamily: 'var(--et-sans)',
           fontSize: 15, lineHeight: 1.78, color: 'var(--et-ink)',
-        }} dangerouslySetInnerHTML={{ __html: mdToHtml(content) }} />
+        }} dangerouslySetInnerHTML={{ __html: mdToHtml(maskText(content)) }} />
       </div>
       <style>{MURMUR_MD_CSS}</style>
     </div>
@@ -1066,10 +1066,10 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
                   fontSize: 13, lineHeight: 1.7, color: 'var(--et-ink-soft)',
                   maxHeight: 180, overflow: 'hidden', position: 'relative',
                 }}>
-                  {aiReport.short
+                  {maskText(aiReport.short
                     ?.replace(/^#[^\n]*\n+/, '').replace(/^>[^\n]*\n+/gm, '')
                     .replace(/^---+\n+/m, '').replace(/^#{1,6}\s+/gm, '')
-                    .replace(/\*\*([^*]+)\*\*/g, '$1').trim().slice(0, 260)}…
+                    .replace(/\*\*([^*]+)\*\*/g, '$1').trim().slice(0, 260) || '')}…
                 </div>
                 <button onClick={viewFullReport} style={{
                   all: 'unset', cursor: 'pointer', marginTop: 8,
@@ -1091,7 +1091,7 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
                 )}
                 {analyzing === 'error' && analyzeErr && (
                   <div className="et-meta" style={{ marginTop: 10, color: 'var(--et-rose)' }}>
-                    失败：{analyzeErr.slice(0, 120)}
+                    失败：{maskText(analyzeErr.slice(0, 120))}
                   </div>
                 )}
                 {analyzing !== 'running' && (
@@ -1127,7 +1127,7 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
                 background: 'var(--et-paper-2)', border: '0.5px dashed var(--et-line-2)',
                 fontSize: 13, lineHeight: 1.65, color: 'var(--et-mute)',
               }}>
-                {packError}
+                {maskText(packError)}
               </div>
             )}
             {pack && (
@@ -1136,8 +1136,8 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
                 background: 'var(--et-paper-2)', border: '0.5px solid var(--et-line-2)',
                 fontSize: 13, lineHeight: 1.7, color: 'var(--et-ink-soft)',
                 maxHeight: 360, overflow: 'auto',
-              }} dangerouslySetInnerHTML={{ __html: mdToHtml(pack.slice(0, 4000) +
-                (pack.length > 4000 ? '\n\n*…（省略，共 ' + Math.round(pack.length / 1000) + 'K 字）*' : ''))
+              }} dangerouslySetInnerHTML={{ __html: mdToHtml(maskText(pack.slice(0, 4000) +
+                (pack.length > 4000 ? '\n\n*…（省略，共 ' + Math.round(pack.length / 1000) + 'K 字）*' : '')))
               }} />
             )}
             <style>{MURMUR_MD_CSS}</style>
@@ -1155,10 +1155,10 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
                   fontSize: 13, lineHeight: 1.7, color: 'var(--et-ink-soft)',
                   maxHeight: 180, overflow: 'hidden', position: 'relative',
                 }}>
-                  {aiReport.short
+                  {maskText(aiReport.short
                     ?.replace(/^#[^\n]*\n+/, '').replace(/^>[^\n]*\n+/gm, '')
                     .replace(/^---+\n+/m, '').replace(/^#{1,6}\s+/gm, '')
-                    .replace(/\*\*([^*]+)\*\*/g, '$1').trim().slice(0, 240)}…
+                    .replace(/\*\*([^*]+)\*\*/g, '$1').trim().slice(0, 240) || '')}…
                 </div>
                 <button onClick={viewFullReport} style={{
                   all: 'unset', cursor: 'pointer', marginTop: 8,
@@ -1173,7 +1173,7 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
                 background: 'var(--et-paper-2)', border: '0.5px dashed var(--et-line-2)',
               }}>
                 <div className="et-serif" style={{ fontSize: 13.5, color: 'var(--et-mute)', lineHeight: 1.6 }}>
-                  {packError || '这对朋友还没让 AI 推断过。'}
+                  {packError ? maskText(packError) : '这对朋友还没让 AI 推断过。'}
                 </div>
                 {analyzing === 'running' && (
                   <div style={{ marginTop: 10 }}>
@@ -1189,7 +1189,7 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
                         color: 'var(--et-ink-soft)', whiteSpace: 'pre-wrap',
                         maxHeight: 280, overflow: 'auto',
                       }}>
-                        {stream.output.slice(-2000)}
+                        {maskText(stream.output.slice(-2000))}
                         <span style={{
                           display: 'inline-block', width: 6, height: 12,
                           background: 'var(--et-orange)', marginLeft: 2, verticalAlign: 'middle',
@@ -1202,7 +1202,7 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
                 )}
                 {analyzing === 'error' && analyzeErr && (
                   <div className="et-meta" style={{ marginTop: 10, color: 'var(--et-rose)' }}>
-                    失败：{analyzeErr.slice(0, 120)}
+                    失败：{maskText(analyzeErr.slice(0, 120))}
                   </div>
                 )}
                 {!packError && analyzing !== 'running' && (
@@ -1342,7 +1342,7 @@ function BatchAnalysisPanel({
             <div>
               <div style={{ fontWeight: 600, fontSize: 13 }}>正在跑 · 朋友 {friendProgress} · 朋友间报告 {pairProgress}{issueText}</div>
               <div style={{ fontSize: 11, color: dark ? 'rgba(244,236,218,0.65)' : 'rgba(26,43,74,0.65)' }}>
-                关掉这个面板没事，跑在后台{status.last_stage ? ` · ${status.last_stage}` : ''}
+                关掉这个面板没事，跑在后台{status.last_stage ? ` · ${maskText(status.last_stage)}` : ''}
               </div>
             </div>
           </div>
@@ -1351,7 +1351,7 @@ function BatchAnalysisPanel({
             background: dark ? 'rgba(0,0,0,0.3)' : 'rgba(26,43,74,0.05)',
             border: `0.5px solid ${dark ? 'rgba(244,236,218,0.12)' : 'rgba(26,43,74,0.1)'}`,
             borderRadius: 6, fontFamily: 'monospace', whiteSpace: 'pre-wrap',
-          }}>{status.log_tail || '(等输出…)'}</pre>
+          }}>{maskText(status.log_tail || '(等输出…)')}</pre>
           <style>{`@keyframes spin { from { transform: rotate(0); } to { transform: rotate(360deg); } }`}</style>
         </div>
       )}
@@ -1369,11 +1369,11 @@ function BatchAnalysisPanel({
           }}>
             {pairDone > 0
               ? <>✓ 跑完了 · 本次 {pairProgress} 份朋友间关系档案已完成{issueText}</>
-              : <>⚠ 跑完了但 0 份报告 — 看 <code style={{ fontSize: 10 }}>~/Desktop/Murmur/agent_reports/_errors.txt</code> 排错</>
+              : <>⚠ 跑完了但 0 份报告 — 看 <code style={{ fontSize: 10 }}>{maskText('~/Desktop/Murmur/agent_reports/_errors.txt')}</code> 排错</>
             }
           </div>
           <div style={{ fontSize: 11, color: dark ? 'rgba(244,236,218,0.6)' : 'rgba(26,43,74,0.6)', marginBottom: 10 }}>
-            报告路径：<code style={{ fontSize: 10 }}>{status.reports_root || '~/Desktop/Murmur/agent_reports'}/pairs/</code>
+            报告路径：<code style={{ fontSize: 10 }}>{maskText(`${status.reports_root || '~/Desktop/Murmur/agent_reports'}/pairs/`)}</code>
           </div>
           <div style={{ display: 'flex', gap: 6 }}>
             <button onClick={onReset} style={{

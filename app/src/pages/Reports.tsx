@@ -3,12 +3,15 @@ import { getReport, listReports, getAgents } from '../data/api';
 import type { ReportEntry, ReportsList, LocalAgent } from '../data/api';
 import { mdToHtml, MURMUR_MD_CSS } from '../utils/markdown';
 import { useBatchTracker } from '../components/extras/BatchTracker';
+import { maskText } from '../utils/privacy';
+import { usePrivacy } from '../utils/usePrivacy';
 
 interface Props {
   onBack: () => void;
 }
 
 export function ReportsPage({ onBack }: Props) {
+  void usePrivacy();
   const [list, setList] = useState<ReportsList | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState('');
@@ -64,9 +67,9 @@ export function ReportsPage({ onBack }: Props) {
         { cli, mode, top, top_pairs, sample, parallel, force },
         { label: mode === 'pairs-graph' ? `朋友间 Top ${top_pairs} 对` : 'AI 关系档案批量分析' },
       );
-      if (!r.ok) alert('启动失败：' + (r.error || ''));
+      if (!r.ok) alert('启动失败：' + maskText(r.error || ''));
     } catch (e: any) {
-      alert('错误：' + (e?.message || e));
+      alert('错误：' + maskText(e?.message || String(e)));
     }
   }
 
@@ -130,7 +133,7 @@ export function ReportsPage({ onBack }: Props) {
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#39;');
     const cleanName = (e: ReportEntry) =>
-      e.name.replace(/^\d+_/, '').replace(/_/g, ' ').replace(/^(.*?)__(.*)$/, '$1 ↔ $2');
+      maskText(e.name.replace(/^\d+_/, '').replace(/_/g, ' ').replace(/^(.*?)__(.*)$/, '$1 ↔ $2'));
 
     const tocFriends = results.filter(r => r.kind === 'friend')
       .map((r, i) => `<li><a href="#r${i}">${htmlEsc(cleanName(r.entry))}</a></li>`).join('\n');
@@ -140,7 +143,7 @@ export function ReportsPage({ onBack }: Props) {
 
     const sections = results.map((r, i) =>
       `<section id="r${i}"><h1>${htmlEsc(cleanName(r.entry))}</h1>` +
-      `<article class="murmur-md">${mdToHtml(r.content)}</article></section>`
+      `<article class="murmur-md">${mdToHtml(maskText(r.content))}</article></section>`
     ).join('\n<hr/>\n');
 
     const html = `<!doctype html>
@@ -192,7 +195,7 @@ ${sections}
     return (
       <div style={{ padding: 40 }}>
         <button onClick={onBack} style={{ all: 'unset', cursor: 'pointer', color: 'var(--et-mute)' }}>← 返回</button>
-        <div style={{ marginTop: 20, color: 'var(--et-rose)' }}>加载失败：{error}</div>
+        <div style={{ marginTop: 20, color: 'var(--et-rose)' }}>加载失败：{maskText(error)}</div>
       </div>
     );
   }
@@ -290,13 +293,13 @@ ${sections}
                   </div>
                   {issueText && <div style={{ marginTop: 4, color: 'var(--et-rose)', fontSize: 10 }}>{issueText}</div>}
                   {batchStatus.last_stage && (
-                    <div style={{ marginTop: 4, color: 'var(--et-mute)', fontSize: 10 }}>{batchStatus.last_stage}</div>
+                    <div style={{ marginTop: 4, color: 'var(--et-mute)', fontSize: 10 }}>{maskText(batchStatus.last_stage)}</div>
                   )}
                   <pre style={{
                     margin: '8px 0 0', padding: 8, maxHeight: 120, overflowY: 'auto',
                     background: 'var(--et-paper-2)', borderRadius: 6,
                     fontSize: 10, lineHeight: 1.45, whiteSpace: 'pre-wrap',
-                  }}>{batchStatus.log_tail || '(等输出...)'}</pre>
+                  }}>{maskText(batchStatus.log_tail || '(等输出...)')}</pre>
                 </div>
               )}
             </div>
@@ -346,7 +349,7 @@ ${sections}
               fontSize: 15, lineHeight: 1.75,
               color: 'var(--et-ink)',
             }}
-            dangerouslySetInnerHTML={{ __html: mdToHtml(active.content) }}
+            dangerouslySetInnerHTML={{ __html: mdToHtml(maskText(active.content)) }}
           />
         )}
       </div>
@@ -397,7 +400,7 @@ function BatchBtn({ label, sub, onClick, disabled, primary }: {
 
 function ReportItem({ entry, active, onClick }: { entry: ReportEntry; active: boolean; onClick: () => void }) {
   // Extract a clean display name: "01_kevin" → "kevin", "02_高进__joyyy" → "高进 ↔ joyyy"
-  const cleaned = entry.name.replace(/^\d+_/, '').replace(/_/g, ' ').replace(/^(.*?)__(.*)$/, '$1 ↔ $2');
+  const cleaned = maskText(entry.name.replace(/^\d+_/, '').replace(/_/g, ' ').replace(/^(.*?)__(.*)$/, '$1 ↔ $2'));
   return (
     <button
       onClick={onClick}

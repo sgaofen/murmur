@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { Friend } from '../data/types';
 import { generateAIPack, openFolder } from '../data/api';
-import { displayName } from '../utils/privacy';
+import { displayName, isPrivacyMode, maskText } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
 import { LocalAgentPanel } from './extras/LocalAgentPanel';
 
@@ -93,7 +93,7 @@ export function AIExportDialog({ open, onClose, friend, onLocalAgent }: Props) {
             margin: '12px 28px 0', padding: '10px 14px',
             background: 'rgba(196,90,63,0.12)', border: '0.5px solid rgba(196,90,63,0.4)',
             borderRadius: 8, fontSize: 12, color: 'var(--et-rose)',
-          }}>生成失败：{error}</div>
+          }}>生成失败：{maskText(error)}</div>
         )}
         {step === 1 ? (
           <>
@@ -253,7 +253,7 @@ function Step2({ onClose, pack, friend }: { onClose: () => void; pack: Generated
 
   async function handleCopy() {
     try {
-      await navigator.clipboard.writeText(pack.content);
+      await navigator.clipboard.writeText(isPrivacyMode() ? maskText(pack.content) : pack.content);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
@@ -267,7 +267,7 @@ function Step2({ onClose, pack, friend }: { onClose: () => void; pack: Generated
       setOpened(true);
       setTimeout(() => setOpened(false), 2000);
     } catch (e) {
-      alert('打开失败：' + (e as any).message);
+      alert('打开失败：' + maskText((e as any).message || String(e)));
     }
   }
 

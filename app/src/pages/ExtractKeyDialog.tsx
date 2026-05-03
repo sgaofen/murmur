@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { extractKey, saveKey } from '../data/api';
+import { maskText } from '../utils/privacy';
+import { usePrivacy } from '../utils/usePrivacy';
 
 interface Props {
   open: boolean;
@@ -10,6 +12,7 @@ interface Props {
 type Phase = 'intro' | 'restarting' | 'waiting-login' | 'success' | 'error';
 
 export function ExtractKeyDialog({ open, onClose, onSuccess }: Props) {
+  void usePrivacy();
   const [phase, setPhase] = useState<Phase>('intro');
   const [key, setKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -225,7 +228,7 @@ function Success({ keyHex, onClose }: { keyHex: string; onClose: () => void }) {
           fontFamily: 'var(--et-mono)', fontSize: 11,
           padding: '8px 10px', background: 'var(--et-paper-2)', borderRadius: 6,
           wordBreak: 'break-all', color: 'var(--et-ink-soft)',
-        }}>{keyHex}</div>
+        }}>{maskText(keyHex)}</div>
         <div className="et-meta" style={{ marginTop: 10, fontSize: 12 }}>
           已保存到 ~/.murmur/config.json — 以后启动 Murmur 直接用，不用再读。
         </div>
@@ -250,7 +253,7 @@ function ErrorView({ error, log, onRetry }: { error: string; log: string; onRetr
         borderRadius: 8, marginBottom: 14,
       }}>
         <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--et-rose)', marginBottom: 8 }}>失败原因</div>
-        <div className="et-meta" style={{ fontSize: 12, color: 'var(--et-ink-soft)', whiteSpace: 'pre-wrap' }}>{error}</div>
+        <div className="et-meta" style={{ fontSize: 12, color: 'var(--et-ink-soft)', whiteSpace: 'pre-wrap' }}>{maskText(error)}</div>
       </div>
       <div className="et-meta" style={{ fontSize: 12, marginBottom: 14, lineHeight: 1.6 }}>
         最常见原因：点开始后没有在微信里「退出登录 → 重新登录」。Win 上 hook 等的是登录事件，微信一直保持已登录不会触发。
@@ -261,7 +264,7 @@ function ErrorView({ error, log, onRetry }: { error: string; log: string; onRetr
           marginTop: 8, padding: 10, fontSize: 10,
           background: 'var(--et-paper-2)', borderRadius: 6,
           maxHeight: 200, overflow: 'auto',
-        }}>{log || '（无）'}</pre>
+        }}>{maskText(log || '（无）')}</pre>
       </details>
       <button onClick={onRetry} style={{
         all: 'unset', cursor: 'pointer', display: 'block', width: '100%',

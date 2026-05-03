@@ -8,7 +8,7 @@ import { APP_VERSION, getAllFriends, getHomeSummary, refreshData } from '../data
 import type { Friend, HomeSummary } from '../data/types';
 import { ExtractKeyDialog } from './ExtractKeyDialog';
 import { TaskCenterBell, TaskCenterDrawer, useTaskCenter } from '../components/extras/TaskCenter';
-import { displayName } from '../utils/privacy';
+import { displayName, maskText } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
 
 interface Props {
@@ -39,7 +39,7 @@ function HomeChromeBar({ onRefresh, refreshing, refreshMsg, onExtractKey, onTogg
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
         {refreshMsg && (
-          <span className="et-meta" style={{ color: 'var(--et-orange)', fontSize: 11 }}>{refreshMsg}</span>
+          <span className="et-meta" style={{ color: 'var(--et-orange)', fontSize: 11 }}>{maskText(refreshMsg)}</span>
         )}
         <a href="#graph" title="3D 关系网络" style={{
           padding: '5px 10px', borderRadius: 999, fontSize: 11, fontWeight: 500,
@@ -220,6 +220,7 @@ function FilterBar({
 }
 
 export function HomePage({ dark = false, onOpenFriend }: Props) {
+  void usePrivacy();
   const [tab, setTab] = useState<Tab>('private');
   const [search, setSearch] = useState('');
   const [searchDebounced, setSearchDebounced] = useState('');
@@ -328,7 +329,7 @@ export function HomePage({ dark = false, onOpenFriend }: Props) {
           3. 开发模式可手动跑 <code style={{ background: 'var(--et-paper-2)', padding: '2px 6px', borderRadius: 4 }}>{navigator.userAgent.toLowerCase().includes('mac') ? 'bash start-mac.sh' : 'start-windows.bat'}</code><br/>
           4. 把日志贴 issue 给作者 sgaofen
         </div>
-        <div className="et-meta" style={{ color: 'var(--et-faint)' }}>{error}</div>
+        <div className="et-meta" style={{ color: 'var(--et-faint)' }}>{maskText(error)}</div>
       </div>
     );
   }
@@ -357,7 +358,7 @@ export function HomePage({ dark = false, onOpenFriend }: Props) {
       }}>
         {allFriends.length === 0 && !loadingFriends && (
           <div className="et-meta" style={{ gridColumn: 'span 4', textAlign: 'center', padding: 40, color: 'var(--et-mute)' }}>
-            {searchDebounced ? `没找到 "${searchDebounced}"` : '没有数据'}
+            {searchDebounced ? `没找到 "${maskText(searchDebounced)}"` : '没有数据'}
           </div>
         )}
         {allFriends.map((f, i) => (
