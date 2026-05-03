@@ -139,6 +139,7 @@ npm install -g @openai/codex
 
 - 微信程序还开着，并停在登录页；不要把窗口关掉。
 - 任务管理器里能看到 `Weixin.exe` 或 `WeChat.exe`。
+- 如果微信装在 D 盘或自定义目录，v0.2.10 起只要进程正在运行，Murmur 也会继续抓 key；安装路径只影响“自动打开/重启微信”这类辅助动作。
 - 如果失败页有日志，把最后几行一起发 issue；Murmur 会显示 DLL/进程注入的真实错误。
 
 ### Q：「后端没起来 / Failed to fetch」
@@ -151,6 +152,8 @@ Get-Content "$env:USERPROFILE\Documents\Murmur\logs\tauri-shell.log"
 ```
 
 最简单：完全退出 Murmur（任务管理器看），重新打开。
+
+如果是给朋友装，优先让对方确认下载的是 `.exe` 安装器，不是 `.msi`；然后把上面两份日志的最后 30 行发回来。v0.2.10 的诊断会把“微信正在运行但安装路径不标准”和“真的没看到微信进程”区分开。
 
 ### Q：Murmur 装上了但启动后白屏
 
@@ -181,6 +184,18 @@ Murmur 默认找：
 也可以直接指向某个账号目录，例如 `E:/path/to/xwechat_files/wxid_xxx_abcd`。多个候选目录用英文分号 `;` 分隔。
 
 然后重启 Murmur。
+
+如果是开发/排错，需要只扫你指定的目录、不要再扫全盘，可以额外设置：
+
+```powershell
+[Environment]::SetEnvironmentVariable("MURMUR_WECHAT_ROOT_ONLY", "1", "User")
+```
+
+排错完记得清掉：
+
+```powershell
+[Environment]::SetEnvironmentVariable("MURMUR_WECHAT_ROOT_ONLY", $null, "User")
+```
 
 ### Q：抓 key 后解密了一些 DB，但有些朋友打不开
 
