@@ -1,17 +1,18 @@
-# Windows Release 0.2.7
+# Windows Release 0.2.8
 
-Baseline: `origin/main` at `31542ab` (`Merge mac and Windows release readiness`).
+Baseline: `origin/main` at `1c9172f` (`Improve agent progress handling`).
 
 ## What changed
 
-- Bumped the Windows release version from `0.2.6` to `0.2.7` across npm, Tauri, Cargo, frontend display, and `etcli`.
+- Bumped the Windows release version to `0.2.8` across npm, Tauri, Cargo, frontend display, and `etcli`.
+- Absorbed the latest Mac/main updates through `1c9172f`, including batch progress handling, graph edge targeting, release install docs, and Mac notarization workflow docs.
 - Fixed Windows CLI output crashes when GBK consoles print UTF-8 JSON/emoji by forcing stdout/stderr to UTF-8 with replacement fallback.
 - Allowed local Vite dev origins on loopback ports `5173-5199`, so isolated QA servers such as `5175` can talk to the backend without false CORS failures.
 - Kept the graph toolbar visible when a friend/edge side panel is open. The toolbar now gives the 460px side panel room and wraps controls instead of hiding `自动旋转` behind the panel.
 
 ## Mac Sync Notes
 
-- This branch starts from the latest merged `main`, so the Mac-side graph, pointer targeting, batch analysis, direct-evidence gate, and release-readiness changes already present in `main` are included.
+- This branch is merged with the latest `main`, so the Mac-side graph, pointer targeting, batch analysis, direct-evidence gate, progress tracking, and release-readiness changes already present in `main` are included.
 - No extra Mac-only code was copied beyond `main`; Windows-specific changes here are limited to release versioning, Windows console/CORS robustness, and the graph toolbar layout fix.
 
 ## Verification
@@ -26,10 +27,10 @@ Baseline: `origin/main` at `31542ab` (`Merge mac and Windows release readiness`)
 
 ## Artifacts
 
-- MSI: `app\src-tauri\target\release\bundle\msi\Murmur_0.2.7_x64_en-US.msi`
-  - SHA256: `83827B31EAD4019E0AEB7B7309E024F61715CBFE3BDFE1BA270F874A04B019C5`
-- NSIS: `app\src-tauri\target\release\bundle\nsis\Murmur_0.2.7_x64-setup.exe`
-  - SHA256: `11605A2EB79FCC888EFE56EC026D1051721B85DBD5B30882440EDC5925C2FCAF`
+- MSI: `app\src-tauri\target\release\bundle\msi\Murmur_0.2.8_x64_en-US.msi`
+  - SHA256: `2D6AD71453A2C3A4AAF69603A0F25210CBD0A2B4A71559B2544A7A0D73AC1677`
+- NSIS: `app\src-tauri\target\release\bundle\nsis\Murmur_0.2.8_x64-setup.exe`
+  - SHA256: `813F3A6252633964D29D850AA42FB26A7FAEE12AF5C2761F04A47DED925FE33A`
 
 ## Not Run Automatically
 
