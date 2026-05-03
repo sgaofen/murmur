@@ -80,6 +80,9 @@ export function AgentReport({ friend, cli, onClose }: Props) {
               if (s.error) {
                 setError(s.error);
                 setPhase('error');
+              } else if (!s.output?.trim() && s.stage === 'no job') {
+                setError('没有找到正在运行的单人分析任务。可能是页面刷新后任务状态丢失，或分析已经结束。请返回人物页查看已生成报告，或重新点击分析。');
+                setPhase('error');
               } else {
                 setOutput(s.output);
                 setPhase('done');
@@ -105,7 +108,8 @@ export function AgentReport({ friend, cli, onClose }: Props) {
 
   if (phase === 'running') {
     return <Streaming friend={friend} agentName={agentDisplayName}
-                       text={streamed || `(${stage}…)`} secs={secs} />;
+                       text={streamed || waitingText(agentDisplayName, stage, secs)}
+                       secs={secs} onClose={onClose} />;
   }
   if (phase === 'error') {
     return (
@@ -168,12 +172,27 @@ export function AgentReport({ friend, cli, onClose }: Props) {
   );
 }
 
-function Streaming({ friend, agentName, text, secs }: { friend: Friend; agentName: string; text: string; secs: number }) {
+function waitingText(agentName: string, stage: string, secs: number) {
+  if (stage === 'queueing') return '正在排队并准备分析资料...';
+  if (secs >= 120) {
+    return `资料已经交给 ${agentName}。它可能正在排队或完整思考，部分 CLI 会到结束时才一次性输出内容；你可以先返回继续浏览，后台分析不会被取消。`;
+  }
+  if (secs >= 30) {
+    return `${agentName} 已启动，正在等待第一段输出。批量任务或模型响应慢时，这里可能会安静一会儿。`;
+  }
+  return `(${stage}...)`;
+}
+
+function Streaming({ friend, agentName, text, secs, onClose }: { friend: Friend; agentName: string; text: string; secs: number; onClose: () => void }) {
   void usePrivacy();
   const friendName = displayName(friend.id, friend.name);
   return (
     <div className="et-root" style={{ background: 'var(--et-bg)', minHeight: '100%', padding: '28px 28px 32px' }}>
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 14 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
+        <button onClick={onClose} style={{ all: 'unset', cursor: 'pointer', fontSize: 13, color: 'var(--et-mute)', display: 'flex', alignItems: 'center', gap: 6 }}>
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M8 2L3 7l5 5" strokeLinecap="round" /></svg>
+          返回
+        </button>
         <span style={{
           width: 10, height: 10, borderRadius: '50%', background: 'var(--et-orange)',
           animation: 'et-pulse 1.4s ease-in-out infinite',
@@ -196,7 +215,7 @@ function Streaming({ friend, agentName, text, secs }: { friend: Friend; agentNam
         </div>
         <div style={{ marginTop: 22, paddingTop: 16, borderTop: '0.5px solid var(--et-line)', display: 'flex', alignItems: 'center', gap: 14 }}>
           <div className="et-meta">已用时 <span className="et-num" style={{ color: 'var(--et-ink)', fontWeight: 600 }}>{secs}s</span></div>
-          <div className="et-meta">· 一般 30-90 秒</div>
+          <div className="et-meta">· 可以返回浏览，后台继续跑</div>
           <div style={{ flex: 1, height: 4, background: 'rgba(26,43,74,0.08)', borderRadius: 999, overflow: 'hidden' }}>
             <div style={{ width: `${Math.min(95, secs * 2)}%`, height: '100%', background: 'var(--et-orange)', borderRadius: 999, transition: 'width .3s' }} />
           </div>

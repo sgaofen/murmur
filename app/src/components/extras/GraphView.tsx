@@ -249,10 +249,30 @@ export function GraphView({
   }
 
   function nodeHitRadius(n: Projected) {
-    return Math.max(n.is_self ? 34 : 40, n.size * n.proj.depth + (n.is_self ? 22 : 30));
+    const visual = n.size * n.proj.depth;
+    if (selected) {
+      if (n.id === selected) return Math.max(22, visual + 8);
+      if (n.is_self) return Math.max(24, visual + 10);
+      if (neighbors.has(n.id)) return Math.max(17, visual + 6);
+      return Math.max(12, visual + 4);
+    }
+    return Math.max(n.is_self ? 34 : 40, visual + (n.is_self ? 22 : 30));
+  }
+
+  function nodeCoreRadius(n: Projected) {
+    const visual = n.size * n.proj.depth;
+    if (selected) {
+      if (n.id === selected) return Math.max(16, visual + 3);
+      if (n.is_self) return Math.max(18, visual + 4);
+      return Math.max(11, visual + 2);
+    }
+    return Math.max(n.is_self ? 24 : 18, visual + (n.is_self ? 10 : 8));
   }
 
   function nodeLabelHitScore(n: Projected, sx: number, sy: number): number | null {
+    // Once a person is selected, labels should not steal edge clicks. The
+    // user is usually inspecting the selected person's relation lines here.
+    if (selected && n.id !== selected) return null;
     const r = n.size * n.proj.depth;
     const isNeighbor = neighbors.has(n.id);
     const dim = !!selected && !n.is_self && selected !== n.id && !isNeighbor;
@@ -288,9 +308,26 @@ export function GraphView({
     return best;
   }
 
-  function isNearAnyNode(sx: number, sy: number, extra = 8) {
+  function findNodeCoreHit(sx: number, sy: number): Projected | null {
+    let best: Projected | null = null;
+    let bestD = Infinity;
+    let bestDepth = -Infinity;
     for (const n of projNodes) {
-      if (Math.hypot(n.proj.x - sx, n.proj.y - sy) <= nodeHitRadius(n) + extra) return true;
+      const d = Math.hypot(n.proj.x - sx, n.proj.y - sy);
+      if (d > nodeCoreRadius(n)) continue;
+      if (d < bestD || (Math.abs(d - bestD) < 2 && n.proj.depth > bestDepth)) {
+        best = n;
+        bestD = d;
+        bestDepth = n.proj.depth;
+      }
+    }
+    return best;
+  }
+
+  function isNearAnyNode(sx: number, sy: number, extra = 8, coreOnly = false) {
+    for (const n of projNodes) {
+      const r = coreOnly ? nodeCoreRadius(n) : nodeHitRadius(n);
+      if (Math.hypot(n.proj.x - sx, n.proj.y - sy) <= r + extra) return true;
     }
     return false;
   }
@@ -334,7 +371,7 @@ export function GraphView({
     return minD;
   }
 
-  function findEdgeHit(sx: number, sy: number, tolerance: number): GraphEdge | null {
+  function findEdgeHitResult(sx: number, sy: number, tolerance: number): { edge: GraphEdge; distance: number } | null {
     let bestEdge: GraphEdge | null = null;
     let bestEdgeScore = Infinity;
     for (const eg of data.edges) {
@@ -345,7 +382,25 @@ export function GraphView({
         bestEdge = eg;
       }
     }
-    return bestEdge;
+    return bestEdge ? { edge: bestEdge, distance: bestEdgeScore } : null;
+  }
+
+  function findEdgeHit(sx: number, sy: number, tolerance: number): GraphEdge | null {
+    return findEdgeHitResult(sx, sy, tolerance)?.edge || null;
+  }
+
+  function selectedModeHit(sx: number, sy: number): { node: Projected | null; edge: GraphEdge | null } {
+    const coreNode = findNodeCoreHit(sx, sy);
+    const edgeHit = selected ? findEdgeHitResult(sx, sy, 13) : null;
+    if (edgeHit) {
+      // In selected mode, favor relation lines unless the pointer is clearly on
+      // the side of a node rather than the line. This makes line endpoints much
+      // easier to click while keeping small circle targets usable.
+      if (!coreNode || edgeHit.distance <= 6) {
+        return { node: null, edge: edgeHit.edge };
+      }
+    }
+    return { node: coreNode || findNodeHit(sx, sy, true), edge: edgeHit?.edge || null };
   }
 
   function handlePointerDown(e: ReactPointerEvent<SVGSVGElement>) {
@@ -378,8 +433,18 @@ export function GraphView({
 
     const { x: sx, y: sy } = svgPoint(e);
 
-    // 1. Try nearest node first (priority over edges)
-    const bestNode = findNodeHit(sx, sy, true);
+    const selectedHit = selected ? selectedModeHit(sx, sy) : null;
+    if (selectedHit?.edge && !selectedHit.node) {
+      if (hover) setHover(null);
+      const sameEdge = hoverEdge
+        && selectedHit.edge.source === hoverEdge.source && selectedHit.edge.target === hoverEdge.target;
+      if (!sameEdge) setHoverEdge({ source: selectedHit.edge.source, target: selectedHit.edge.target });
+      return;
+    }
+
+    // 1. Try nearest node first in full-graph mode. In selected mode this uses
+    // tighter node cores so relation lines do not get swallowed by halos/labels.
+    const bestNode = selectedHit?.node || findNodeHit(sx, sy, true);
     const bestNodeId = bestNode?.id || null;
     if (bestNodeId !== hover) setHover(bestNodeId);
 
@@ -388,7 +453,7 @@ export function GraphView({
       if (hoverEdge) setHoverEdge(null);
       return;
     }
-    const bestEdge = selected && !isNearAnyNode(sx, sy, 10) ? findEdgeHit(sx, sy, 9) : null;
+    const bestEdge = selected && !isNearAnyNode(sx, sy, 2, true) ? findEdgeHit(sx, sy, 11) : null;
     const sameEdge = bestEdge && hoverEdge
       && bestEdge.source === hoverEdge.source && bestEdge.target === hoverEdge.target;
     if (!sameEdge) {
@@ -412,15 +477,15 @@ export function GraphView({
         // Find nearest visible node within hit radius (manually — pointer capture
         // breaks the natural click bubbling, so we resolve the hit ourselves)
         const { x: sx, y: sy } = svgPoint(e);
-        const best = findNodeHit(sx, sy, true);
-        if (best) {
-          onSelect(best.id);
+        const hit = selected ? selectedModeHit(sx, sy) : { node: findNodeHit(sx, sy, true), edge: null };
+        if (hit.edge && onSelectEdge && !hit.node) {
+          onSelectEdge(hit.edge);
+        } else if (hit.node) {
+          onSelect(hit.node.id);
         } else if (onSelectEdge) {
           // No node hit — try to resolve nearest visible edge.
-          const bestEdge = selected && !isNearAnyNode(sx, sy, 12) ? findEdgeHit(sx, sy, 8) : null;
-          if (bestEdge) {
-            onSelectEdge(bestEdge);
-          }
+          const bestEdge = selected && !isNearAnyNode(sx, sy, 2, true) ? findEdgeHit(sx, sy, 11) : null;
+          if (bestEdge) onSelectEdge(bestEdge);
           // Else: keep current selection (user clicked empty space — don't auto-close).
           // To dismiss, user must press Esc or click the panel's × button.
         }

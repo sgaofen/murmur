@@ -26,9 +26,37 @@
 - **`Murmur_x.x.x_aarch64.dmg`** （M 系列芯片，推荐）—— 双击打开，拖 Murmur 进 `/Applications`
 - 或 `Murmur_x.x.x_aarch64.app.zip` —— 解压后拖进 `/Applications`
 
+只想照着“下载 → 拖到应用程序 → 终端运行命令 → 打开”的短教程走，看 [macOS Release 下载后怎么打开](MAC_RELEASE_INSTALL.md)。
+
+DMG 安装步骤：
+
+1. 双击 `Murmur_x.x.x_aarch64.dmg`。
+2. Finder 会打开一个 `Murmur` 磁盘窗口。
+3. 把里面的 `Murmur.app` 拖到 Finder 左侧的「应用程序」，或拖到 `/Applications`。
+4. 等复制完成后，打开「应用程序」里的 `Murmur`。
+
+不要直接在 DMG 窗口里双击 `Murmur.app`。DMG 是安装盘，正确做法是先拖进「应用程序」，再从「应用程序」打开。
+
+如果系统弹出 `"Murmur" Not Opened`，按钮只有 `Done` / `Move to Trash`：
+
+1. 点 `Done`，不要点 `Move to Trash`。
+2. 打开「系统设置」→「隐私与安全性」。
+3. 往下滑到「安全性」区域。
+4. 如果看到 `Murmur was blocked...`，点 `仍要打开 / Open Anyway`。
+5. 回到「应用程序」重新打开 Murmur。
+
+如果「隐私与安全性」里没有 `仍要打开`，开发验证时可以用终端执行：
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Murmur.app
+open /Applications/Murmur.app
+```
+
+这个弹窗会在正式公证前出现；发布流程见 [Mac 签名与公证发布流程](MAC_NOTARIZATION_GUIDE.md)。
+
 > Mac Intel x64 dmg 还没出。Intel 用户用方式 2 或方式 3。
 
-### 方式 2 · 一行 curl 安装（小白推荐）
+### 方式 2 · 一行 curl 安装
 
 打开「终端」（Spotlight 搜 Terminal），粘下面这行回车：
 
@@ -163,13 +191,31 @@ rm -rf ~/Documents/Murmur ~/.murmur ~/Desktop/Murmur
 
 ### Q：macOS 报「Murmur 已损坏，无法打开」
 
-我们用 ad-hoc 签名（没有 Apple Developer ID 证书），Gatekeeper 会拦。终端跑：
+这通常说明包没有正确签名或公证，或者下载文件仍带旧的损坏签名结构。开发验证时可临时跑：
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/Murmur.app
 ```
 
-然后重新打开 Murmur.app。
+然后重新打开 Murmur.app。这个命令只是临时绕过，不是正式发行方案。
+
+### Q：macOS 报「Murmur Not Opened」，只有 `Done` / `Move to Trash`
+
+这是未公证 App 的 Gatekeeper 拦截。处理方式：
+
+1. 点 `Done`，不要点 `Move to Trash`。
+2. 确认 Murmur 已经拖进 `/Applications`，不要直接从 DMG 里打开。
+3. 打开「系统设置」→「隐私与安全性」→「安全性」。
+4. 点 `仍要打开 / Open Anyway`，再回到「应用程序」打开 Murmur。
+
+如果没有 `仍要打开` 按钮，开发验证时运行：
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Murmur.app
+open /Applications/Murmur.app
+```
+
+正式发行包完成公证后，这个步骤就不应该再出现。
 
 ### Q：「开始自动抓取」点了之后没反应
 

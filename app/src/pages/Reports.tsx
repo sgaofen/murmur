@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
-import { getReport, listReports, startBatch, getBatchStatus, getAgents } from '../data/api';
-import type { BatchStatus, ReportEntry, ReportsList, LocalAgent } from '../data/api';
+import { getReport, listReports, getAgents } from '../data/api';
+import type { ReportEntry, ReportsList, LocalAgent } from '../data/api';
 import { mdToHtml, MURMUR_MD_CSS } from '../utils/markdown';
+import { useBatchTracker } from '../components/extras/BatchTracker';
 
 interface Props {
   onBack: () => void;
@@ -16,9 +17,9 @@ export function ReportsPage({ onBack }: Props) {
   const [agents, setAgents] = useState<LocalAgent[]>([]);
   const [selectedCli, setSelectedCli] = useState<'claude' | 'codex' | 'both' | ''>('');
   const [parallel, setParallel] = useState(2);
-  const [batch, setBatch] = useState<{ pid: number; log_path: string; pids?: number[]; log_paths?: string[] } | null>(null);
-  const [batchStatus, setBatchStatus] = useState<BatchStatus | null>(null);
   const [batchOpen, setBatchOpen] = useState(false);
+  const [refreshedBatchPid, setRefreshedBatchPid] = useState<number | null>(null);
+  const { batch, status: batchStatus, startBatchJob } = useBatchTracker();
 
   useEffect(() => {
     listReports().then(setList).catch(e => setError(e?.message || String(e)));
@@ -33,29 +34,13 @@ export function ReportsPage({ onBack }: Props) {
     }
   }, [agents, selectedCli]);
 
-  // Poll batch status while running
+  // Refresh the list when a background batch finishes, even if it was started
+  // from the graph page before the user came here.
   useEffect(() => {
-    if (!batch) return;
-    let stop = false;
-    const tick = async () => {
-      if (stop) return;
-      try {
-        const s = await getBatchStatus(batch.pid, batch.log_path, batch.pids, batch.log_paths);
-        setBatchStatus(s);
-        if (!s.running) {
-          // Refresh report list
-          const fresh = await listReports();
-          setList(fresh);
-          return;
-        }
-      } catch {
-        // Keep the current list visible if a transient poll fails.
-      }
-      setTimeout(tick, 5000);
-    };
-    tick();
-    return () => { stop = true; };
-  }, [batch]);
+    if (!batch || !batchStatus || batchStatus.running || refreshedBatchPid === batch.pid) return;
+    setRefreshedBatchPid(batch.pid);
+    listReports().then(setList).catch(() => { /* keep current list visible */ });
+  }, [batch, batchStatus, refreshedBatchPid]);
 
   async function launchBatch(
     mode: 'top' | 'all' | 'pairs-graph',
@@ -75,22 +60,11 @@ export function ReportsPage({ onBack }: Props) {
     }
     const cli = selectedCli;
     try {
-      const r = await startBatch({ cli, mode, top, top_pairs, sample, parallel, force });
-      if (!r.ok || !r.pid || !r.log_path) {
-        alert('启动失败：' + (r.error || ''));
-        return;
-      }
-      setBatch({ pid: r.pid, log_path: r.log_path, pids: r.pids, log_paths: r.log_paths });
-      setBatchStatus({
-        running: true,
-        n_friends: 0,
-        n_pairs: 0,
-        friends_done: 0,
-        friends_total: mode === 'pairs-graph' ? 0 : top,
-        pairs_done: 0,
-        pairs_total: top_pairs,
-        log_tail: '启动中…',
-      });
+      const r = await startBatchJob(
+        { cli, mode, top, top_pairs, sample, parallel, force },
+        { label: mode === 'pairs-graph' ? `朋友间 Top ${top_pairs} 对` : 'AI 关系档案批量分析' },
+      );
+      if (!r.ok) alert('启动失败：' + (r.error || ''));
     } catch (e: any) {
       alert('错误：' + (e?.message || e));
     }
