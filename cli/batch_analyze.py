@@ -31,6 +31,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+import builtins as _builtins
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -44,6 +45,12 @@ try:
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 except Exception:
     pass
+
+
+def print(*args, **kwargs):  # noqa: A001 - keep script prints unbuffered for UI progress logs
+    kwargs.setdefault("flush", True)
+    return _builtins.print(*args, **kwargs)
+
 
 CST = timezone(timedelta(hours=8))
 

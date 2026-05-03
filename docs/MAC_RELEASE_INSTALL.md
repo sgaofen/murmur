@@ -9,7 +9,7 @@
 ## 1. 下载 DMG
 
 1. 打开 [GitHub Releases](https://github.com/sgaofen/murmur/releases/latest)。
-2. 下载 `Murmur_0.2.6_aarch64.dmg`，或最新版本里同名的 `aarch64.dmg`。
+2. 下载最新版本里的 `Murmur_..._aarch64.dmg`。
 3. 下载完成后，通常会在「下载 / Downloads」文件夹里。
 
 `aarch64` 是 M 系列 Mac 用的版本，包括 M1 / M2 / M3 / M4。

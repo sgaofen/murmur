@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Avatar } from '../components/Avatar';
 import { MessageCard } from '../components/MessageCard';
 import { RingChart } from '../components/RingChart';
@@ -610,6 +610,13 @@ export function FriendPage({ friendId, onBack, onOpenFriend }: Props) {
   const [analysisStream, setAnalysisStream] = useState<{ output: string; stage: string; elapsed: number } | null>(null);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
 
+  const openMessagesDrawer = useCallback(() => setDrawerOpen(true), []);
+
+  function closeMessagesDrawer() {
+    setDrawerOpen(false);
+    setTab(t => t === 'chat' ? 'story' : t);
+  }
+
   useEffect(() => {
     setError(null);
     setStats(null);
@@ -721,7 +728,7 @@ export function FriendPage({ friendId, onBack, onOpenFriend }: Props) {
       <FriendChromeBar onBack={onBack} friend={friend} />
       <FriendTabs tab={tab} setTab={setTab} />
       {tab === 'media' && <MediaGallery friend={friend} />}
-      {tab === 'chat' && <ChatTabRedirect onOpen={() => setDrawerOpen(true)} friend={friend} />}
+      {tab === 'chat' && <ChatTabRedirect onOpen={openMessagesDrawer} friend={friend} />}
       {tab === 'story' && (
       <div style={{ padding: '24px 28px 32px', display: 'flex', flexDirection: 'column', gap: 18, maxWidth: 1180, margin: '0 auto' }}>
         <PersonCard friend={friend} stats={stats} />
@@ -749,7 +756,7 @@ export function FriendPage({ friendId, onBack, onOpenFriend }: Props) {
         <MomentsCard moments={moments} loading={momentsLoading} />
         <ActionDock
           onExportAI={() => setExportOpen(true)}
-          onShowMessages={() => setDrawerOpen(true)}
+          onShowMessages={openMessagesDrawer}
           onExportChat={handleExportChat}
           onOpenYearbook={() => { window.location.hash = `#yearbook/${friendId}`; }}
         />
@@ -760,7 +767,7 @@ export function FriendPage({ friendId, onBack, onOpenFriend }: Props) {
       )}
       <AIExportDialog open={exportOpen} onClose={() => setExportOpen(false)} friend={friend}
                        onLocalAgent={(cli) => { setExportOpen(false); setAgentInvoke(cli); }} />
-      <MessagesDrawer open={drawerOpen} friend={friend} onClose={() => setDrawerOpen(false)} />
+      <MessagesDrawer open={drawerOpen} friend={friend} onClose={closeMessagesDrawer} />
       {reportOpen && friend.aiReport && (
         <ReportViewerOverlay
           relPath={friend.aiReport.path}
@@ -796,11 +803,11 @@ function FriendTabs({ tab, setTab }: { tab: FriendTab; setTab: (t: FriendTab) =>
 }
 
 function ChatTabRedirect({ onOpen, friend }: { onOpen: () => void; friend: Friend }) {
-  useEffect(() => { onOpen(); }, [onOpen]);
+  useEffect(() => { onOpen(); }, [friend.id, onOpen]);
   return (
     <div style={{ padding: 60, textAlign: 'center' }}>
       <div className="et-meta">
-        和 {displayName(friend.id, friend.name)} 的完整对话已在右侧抽屉打开。
+        和 {displayName(friend.id, friend.name)} 的完整对话已在右侧抽屉打开。关闭后会回到人物故事页。
       </div>
       <button onClick={onOpen} style={{
         all: 'unset', marginTop: 14, cursor: 'pointer',
