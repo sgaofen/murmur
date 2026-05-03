@@ -263,7 +263,7 @@ export interface BatchStartReq {
   force?: boolean;
 }
 export async function startBatch(req: BatchStartReq): Promise<{
-  ok: boolean; pid?: number; pids?: number[]; log_path?: string; log_paths?: string[]; error?: string;
+  ok: boolean; pid?: number; pids?: number[]; log_path?: string; log_paths?: string[]; started_at?: number; error?: string;
 }> {
   return j('/api/agents/batch', {
     method: 'POST',

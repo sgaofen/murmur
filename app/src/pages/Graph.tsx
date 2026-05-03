@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useState } from 'react';
 import { GraphView } from '../components/extras/GraphView';
 import type { GraphData, GraphNode, GraphEdge, GraphCluster } from '../components/extras/GraphView';
-import { API_BASE, getFriend, getPairPack, findPairReport, getReport, getFriendConnections, invokeAgent, getInvokeStream, getAgents, invokePairAgent, getPairStream, startBatch, getBatchStatus } from '../data/api';
+import { API_BASE, getFriend, getPairPack, findPairReport, getReport, getFriendConnections, invokeAgent, getInvokeStream, getAgents, invokePairAgent, getPairStream } from '../data/api';
 import type { BatchStatus, LocalAgent } from '../data/api';
 import type { FriendConnection } from '../data/api';
 import type { Friend, FriendStats } from '../data/types';
 import { mdToHtml, MURMUR_MD_CSS } from '../utils/markdown';
 import { displayName, maskedWxid } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
+import { useBatchTracker } from '../components/extras/BatchTracker';
+import type { BatchHandle } from '../components/extras/BatchTracker';
 
 const TIER_COLORS: Record<string, string> = {
   self: '#FFE6CF', A: '#FF6B47', B: '#E8B57A',
@@ -171,48 +173,19 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
   const [loading, setLoading] = useState(true);
   // Batch analysis state
   const [agents, setAgents] = useState<LocalAgent[]>([]);
-  const [batch, setBatch] = useState<{ pid: number; log_path: string; pids?: number[]; log_paths?: string[] } | null>(null);
-  const [batchStatus, setBatchStatusState] = useState<BatchStatus | null>(null);
   const [batchPanelOpen, setBatchPanelOpen] = useState(false);
+  const { batch, status: batchStatus, startBatchJob, clearBatch } = useBatchTracker();
 
   // Load agents once
   useEffect(() => { getAgents().then(setAgents).catch(() => { /* no local agents available */ }); }, []);
 
-  // Poll batch progress
-  useEffect(() => {
-    if (!batch) return;
-    let stop = false;
-    const tick = async () => {
-      if (stop) return;
-      try {
-        const s = await getBatchStatus(batch.pid, batch.log_path, batch.pids, batch.log_paths);
-        setBatchStatusState(s);
-        if (!s.running) return;
-      } catch {
-        // Keep polling; transient backend misses are expected while an agent starts.
-      }
-      setTimeout(tick, 5000);
-    };
-    tick();
-    return () => { stop = true; };
-  }, [batch]);
-
   async function startGraphBatch(top_pairs: number, cli: 'claude' | 'codex' | 'both', parallel: number) {
     try {
-      const r = await startBatch({ cli, mode: 'pairs-graph', top: 0, top_pairs, parallel });
-      if (!r.ok || !r.pid || !r.log_path) {
-        alert('启动失败：' + (r.error || ''));
-        return;
-      }
-      setBatch({ pid: r.pid, log_path: r.log_path, pids: r.pids, log_paths: r.log_paths });
-      setBatchStatusState({
-        running: true,
-        n_friends: 0,
-        n_pairs: 0,
-        pairs_done: 0,
-        pairs_total: cli === 'both' ? top_pairs * 2 : top_pairs,
-        log_tail: '启动中…',
-      });
+      const r = await startBatchJob(
+        { cli, mode: 'pairs-graph', top: 0, top_pairs, parallel },
+        { label: `关系网 Top ${top_pairs} 对${cli === 'both' ? ' · 双引擎' : ''}` },
+      );
+      if (!r.ok) { alert('启动失败：' + (r.error || '')); return; }
       setBatchPanelOpen(true);
     } catch (e: any) {
       alert('错误：' + (e?.message || e));
@@ -366,7 +339,7 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
           batch={batch}
           status={batchStatus}
           onLaunch={startGraphBatch}
-          onReset={() => { setBatch(null); setBatchStatusState(null); }}
+          onReset={clearBatch}
           onClose={() => setBatchPanelOpen(false)}
         />
       )}
@@ -1271,7 +1244,7 @@ function BatchAnalysisPanel({
 }: {
   dark: boolean;
   agents: LocalAgent[];
-  batch: { pid: number; log_path: string; pids?: number[]; log_paths?: string[] } | null;
+  batch: BatchHandle | null;
   status: BatchStatus | null;
   onLaunch: (top_pairs: number, cli: 'claude' | 'codex' | 'both', parallel: number) => void;
   onReset: () => void;
