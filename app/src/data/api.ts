@@ -156,6 +156,12 @@ export async function getMessages(id: string, opts: { limit?: number } = {}): Pr
   return j(`/api/friend/${encodeURIComponent(id)}/messages${params.toString() ? '?' + params : ''}`);
 }
 
+export async function indexMedia(): Promise<{
+  ok: boolean; total?: number; indexed?: number; existing?: number; ms?: number; details?: string; error?: string;
+}> {
+  return j('/api/media/index', { method: 'POST' });
+}
+
 export async function refreshData(): Promise<{ ok: boolean; ms: number; details: string }> {
   return j('/api/refresh', { method: 'POST' });
 }

@@ -135,7 +135,7 @@ export function OnboardingDialog({ open, onClose, onDone }: Props) {
         const latest = await getDiagnose();
         setDiag(latest);
         if (latest.capabilities.weixin_running === false) {
-          setError('没有检测到正在运行的 Weixin.exe / WeChat.exe。请先打开微信，让它停在登录页但不要关闭程序；然后回到 Murmur 点「再试一次」。');
+          setError('没有检测到正在运行的 Weixin.exe / WeChat.exe。请先打开微信，让它停在登录页但不要关闭程序；然后回到 Murmur 点「再次检测微信」。');
           setPhase('error');
           return;
         }
@@ -237,7 +237,7 @@ export function OnboardingDialog({ open, onClose, onDone }: Props) {
           <div className="et-h1" style={{ color: 'var(--et-ink)', marginTop: 8, fontSize: 32 }}>
             {phase === 'welcome' && '回顾你的微信故事'}
             {phase === 'diagnose' && '正在检测你的电脑…'}
-            {phase === 'mac-no-data' && 'Mac 上需要先从 Windows 同步数据'}
+            {phase === 'mac-no-data' && 'Mac 上还没找到微信数据'}
             {phase === 'mac-auto-extract' && '一切就绪 — 一键抓密钥'}
             {phase === 'mac-resign-prompt' && '一次性给 WeChat 重签名（不需要关 SIP）'}
             {phase === 'mac-resigning' && '正在重签名…'}

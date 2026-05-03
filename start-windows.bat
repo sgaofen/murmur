@@ -49,9 +49,9 @@ if not "%NODE_OK%"=="1" (
 echo [OK] Node.js 18+ found
 
 REM --- install python deps if needed ---
-python -c "import zstandard, cryptography" 2>nul
+python -c "import zstandard, cryptography, Crypto" 2>nul
 if errorlevel 1 (
-    echo [...] 装 Python 依赖（zstandard + cryptography；语音转写依赖可之后单独安装）...
+    echo [...] 装 Python 依赖（zstandard + cryptography + pycryptodome；语音转写依赖可之后单独安装）...
     python -m pip install -r requirements.txt
     if errorlevel 1 (
         echo [X] pip install 失败

@@ -180,12 +180,14 @@ export NOTARY_PROFILE="murmur-notary"
 3. 给 `.app` 里的 Mach-O 文件逐个 Developer ID 签名
 4. 给整个 `Murmur.app` 使用 hardened runtime 签名
 5. 生成 `.app.zip`
-6. 生成 `.dmg`
-7. 给 `.dmg` 签名
-8. 提交 Apple 公证
-9. 等 Apple 处理完成
-10. `stapler` 装订公证票据
-11. 打印 SHA256
+6. 提交 `.app.zip` 给 Apple 公证
+7. 把公证票据装订回 `Murmur.app`
+8. 重新生成带票据的 `.app.zip`
+9. 生成 `.dmg`
+10. 给 `.dmg` 签名
+11. 提交 `.dmg` 给 Apple 公证
+12. `stapler` 装订 DMG 公证票据
+13. 打印 SHA256
 
 产物在：
 
