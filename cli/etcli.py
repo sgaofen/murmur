@@ -3329,6 +3329,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 "notes": caps.notes,
                 "wechat_exe": str(_paths.find_weixin_exe()) if _paths.find_weixin_exe() else None,
                 "murmur_home": str(_paths.murmur_home()),
+                "wechat_search_roots": [str(p) for p in _paths.wechat_search_paths()],
             })
         if path == "/api/home-summary":
             if _HOME_SUMMARY_CACHE["data"] is not None and (_time.time() - _HOME_SUMMARY_CACHE["ts"]) < _CACHE_TTL:
