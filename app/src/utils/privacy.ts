@@ -6,6 +6,15 @@
 
 const STORAGE_KEY = 'murmur.privacy';
 
+function urlRequestsPrivacy(): boolean {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    return params.get('privacy') === '1';
+  } catch {
+    return false;
+  }
+}
+
 // Reactive subscribers — anyone calling subscribe() gets re-rendered when toggle flips.
 type Listener = (enabled: boolean) => void;
 const listeners = new Set<Listener>();
@@ -14,6 +23,10 @@ const tokenAliases = new Map<string, string>();
 
 let _enabled: boolean = (() => {
   try {
+    if (urlRequestsPrivacy()) {
+      localStorage.setItem(STORAGE_KEY, '1');
+      return true;
+    }
     return localStorage.getItem(STORAGE_KEY) === '1';
   } catch {
     return false;
