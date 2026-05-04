@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { extractKey, getDiagnose, openFullDiskAccess, refreshData, resignWechat, saveKey } from '../data/api';
+import { extractKey, getDiagnose, openFullDiskAccess, refreshData, resignWechat, saveKey, saveWeChatRoot } from '../data/api';
 import type { Diagnose } from '../data/api';
 import { maskText } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
@@ -10,7 +10,7 @@ interface Props {
   onDone?: () => void;
 }
 
-type Phase = 'welcome' | 'diagnose' | 'mac-no-data' | 'mac-paste-key' | 'mac-auto-extract' | 'mac-resign-prompt' | 'mac-resigning' | 'mac-wait-login' | 'mac-fda-needed' | 'win-need-key' | 'win-decrypt' | 'extract-key' | 'done' | 'error';
+type Phase = 'welcome' | 'diagnose' | 'mac-no-data' | 'mac-paste-key' | 'mac-auto-extract' | 'mac-resign-prompt' | 'mac-resigning' | 'mac-wait-login' | 'mac-fda-needed' | 'win-no-data' | 'win-need-key' | 'win-decrypt' | 'extract-key' | 'done' | 'error';
 
 export function OnboardingDialog({ open, onClose, onDone }: Props) {
   void usePrivacy();
@@ -85,6 +85,8 @@ export function OnboardingDialog({ open, onClose, onDone }: Props) {
         }
       } else if (d.platform === 'macos' && !hasWeChatData) {
         setPhase('mac-no-data');
+      } else if (d.platform === 'windows' && !hasWeChatData) {
+        setPhase('win-no-data');
       } else {
         setError('看起来你还没在这台电脑上登录过微信，请先用微信登录一次。');
         setPhase('error');
@@ -186,7 +188,7 @@ export function OnboardingDialog({ open, onClose, onDone }: Props) {
     try {
       const r = await resignWechat({ relaunch: true });
       if (!r.ok) {
-        setError(r.error || r.stderr || '重签名失败 — 你可能取消了授权');
+        setError([r.error, r.stderr].filter(Boolean).join('\n') || '重签名失败：请确认系统密码窗口没有被取消。');
         setPhase('error');
         return;
       }
@@ -243,6 +245,7 @@ export function OnboardingDialog({ open, onClose, onDone }: Props) {
             {phase === 'mac-resigning' && '正在重签名…'}
             {phase === 'mac-wait-login' && '微信已重启，请登录 → 然后回来抓密钥'}
             {phase === 'mac-fda-needed' && '第一步：给 Murmur 完全磁盘访问权限'}
+            {phase === 'win-no-data' && '没找到微信数据目录'}
             {phase === 'win-need-key' && '只需要 30 秒，读取一次密钥'}
             {phase === 'extract-key' && '正在读取密钥…'}
             {phase === 'win-decrypt' && '正在解密最新数据…'}
@@ -260,6 +263,7 @@ export function OnboardingDialog({ open, onClose, onDone }: Props) {
           {phase === 'mac-resigning' && <Working text={progress || '正在重签名…'} />}
           {phase === 'mac-wait-login' && <MacWaitLogin onContinue={startKeyExtract} />}
           {phase === 'mac-fda-needed' && <MacFDANeeded onOpenSettings={openFDAAndWait} onRetry={startDiagnose} />}
+          {phase === 'win-no-data' && diag && <WinNoData diag={diag} onSaved={startDiagnose} />}
           {phase === 'win-need-key' && diag && <WinNeedKey diag={diag} onStart={startKeyExtract} onRetry={startDiagnose} />}
           {phase === 'extract-key' && <Working text={progress} />}
           {phase === 'win-decrypt' && <Working text={progress || "正在解密所有微信数据库…"} />}
@@ -366,6 +370,82 @@ function MacNoData({ diag, onClose }: { diag: Diagnose; onClose: () => void }) {
       </ol>
       <CapabilityList diag={diag} />
       <button onClick={onClose} style={{ ...primaryBtn, background: 'var(--et-ink)' }}>知道了</button>
+    </>
+  );
+}
+
+function WinNoData({ diag, onSaved }: { diag: Diagnose; onSaved: () => void }) {
+  const [path, setPath] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  async function submit() {
+    const cleaned = path.trim();
+    if (!cleaned) {
+      setMsg('请先粘贴微信文件管理里打开的文件夹路径。');
+      return;
+    }
+    setSaving(true);
+    setMsg(null);
+    try {
+      const r = await saveWeChatRoot(cleaned);
+      if (!r.ok) {
+        setMsg(r.error || '这个路径里没有找到微信数据。');
+        return;
+      }
+      setMsg(`已找到 ${r.profiles?.length || 1} 个微信账号，正在重新检测…`);
+      window.setTimeout(onSaved, 450);
+    } catch (e: any) {
+      setMsg(e?.message || String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+  return (
+    <>
+      <div className="et-serif" style={{ fontSize: 15, lineHeight: 1.7, color: 'var(--et-ink-soft)', marginBottom: 14 }}>
+        微信的数据目录每台电脑都可能不一样。Murmur 已经扫了常见位置，但你的电脑可能把数据放在 <code>Tencent/Weixin</code>、OneDrive、外接盘或自定义文件夹里。
+      </div>
+      <div style={{
+        padding: '12px 14px', background: 'var(--et-paper-2)',
+        border: '0.5px solid var(--et-line-2)', borderRadius: 8,
+        fontSize: 13, lineHeight: 1.8, marginBottom: 12, color: 'var(--et-ink)',
+      }}>
+        <div style={{ fontWeight: 600, marginBottom: 6 }}>最快修法：</div>
+        <ol style={{ margin: 0, paddingLeft: 20 }}>
+          <li>打开电脑微信</li>
+          <li>进入「设置 → 文件管理」</li>
+          <li>点「打开文件夹」或复制文件保存位置</li>
+          <li>把包含 <code>xwechat_files</code> 的路径粘到下面</li>
+        </ol>
+      </div>
+      <input
+        value={path}
+        onChange={(e) => setPath(e.target.value)}
+        placeholder="例如 E:\\Tencent\\Weixin\\xwechat_files 或直接粘 wxid_... 文件夹"
+        spellCheck={false}
+        style={{
+          all: 'unset', width: '100%', boxSizing: 'border-box',
+          padding: '10px 14px', borderRadius: 8,
+          border: '1px solid var(--et-line-2)', background: 'var(--et-paper-2)',
+          fontFamily: 'var(--et-mono)', fontSize: 12, color: 'var(--et-ink)',
+          marginBottom: 10,
+        }}
+      />
+      {msg && (
+        <div className="et-meta" style={{
+          color: msg.startsWith('已找到') ? '#3a7a4f' : 'var(--et-rose)',
+          marginBottom: 12, whiteSpace: 'pre-wrap',
+        }}>{maskText(msg)}</div>
+      )}
+      <details style={{ marginBottom: 14 }}>
+        <summary style={{ cursor: 'pointer', fontSize: 12, color: 'var(--et-mute)' }}>查看 Murmur 已经扫描过的位置</summary>
+        <CapabilityList diag={diag} />
+      </details>
+      <button onClick={submit} disabled={saving} style={{
+        ...primaryBtn,
+        opacity: saving ? 0.65 : 1,
+        cursor: saving ? 'wait' : 'pointer',
+      }}>{saving ? '正在检查路径…' : '保存这个微信数据路径'}</button>
     </>
   );
 }
@@ -664,6 +744,8 @@ function Done({ onDone }: { onDone: () => void }) {
 }
 
 function ErrorView({ error, diag, onRetry }: { error: string; diag: Diagnose | null; onRetry: () => void }) {
+  const isWinHookInstallFailure = diag?.platform === 'windows' &&
+    /hook (setup|install) failed|wx_key\.dll|注入到微信进程/i.test(error);
   return (
     <>
       <div style={{
@@ -680,6 +762,16 @@ function ErrorView({ error, diag, onRetry }: { error: string; diag: Diagnose | n
           <summary style={{ cursor: 'pointer', fontSize: 12, color: 'var(--et-mute)' }}>查看诊断信息（请提交 issue 时附上）</summary>
           <CapabilityList diag={diag} />
         </details>
+      )}
+      {isWinHookInstallFailure && (
+        <div style={{
+          padding: '10px 14px', background: 'rgba(232,181,122,0.18)',
+          border: '0.5px solid rgba(138,90,28,0.3)', borderRadius: 8,
+          fontSize: 12, color: '#8a5a1c', lineHeight: 1.7, marginBottom: 14,
+        }}>
+          这是 Windows hook 安装失败：先把 Murmur 安装目录加入杀毒/Defender 白名单，确认 <code>wx_key.dll</code> 没被隔离；
+          然后重启电脑，微信和 Murmur 都普通打开，不要一个管理员一个普通权限。
+        </div>
       )}
       <button onClick={onRetry} style={primaryBtn}>再试一次</button>
     </>

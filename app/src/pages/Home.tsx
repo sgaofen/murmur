@@ -15,6 +15,7 @@ import { usePrivacy } from '../utils/usePrivacy';
 interface Props {
   dark?: boolean;
   onOpenFriend: (id: string) => void;
+  onOpenOnboarding?: () => void;
 }
 
 type Tab = 'private' | 'group' | 'time';
@@ -220,7 +221,15 @@ function FilterBar({
   );
 }
 
-export function HomePage({ dark = false, onOpenFriend }: Props) {
+function isOnboardingNeededError(e: any): boolean {
+  const text = String(e?.message || e || '').toLowerCase();
+  return text.includes('no_decrypted_data') ||
+    text.includes('onboarding_required') ||
+    text.includes('needs_onboarding') ||
+    text.includes('bootstrap mode');
+}
+
+export function HomePage({ dark = false, onOpenFriend, onOpenOnboarding }: Props) {
   void usePrivacy();
   const [tab, setTab] = useState<Tab>('private');
   const [search, setSearch] = useState('');
@@ -256,6 +265,12 @@ export function HomePage({ dark = false, onOpenFriend }: Props) {
           return;
         } catch (e: any) {
           if (cancelled) return;
+          if (isOnboardingNeededError(e)) {
+            setError(String(e?.message || e));
+            setBootWaitSec(0);
+            onOpenOnboarding?.();
+            return;
+          }
           // Last attempt — surface the error
           if (attempts >= 80) {
             setError(String(e?.message || e));
@@ -353,14 +368,31 @@ export function HomePage({ dark = false, onOpenFriend }: Props) {
         minHeight: '100vh', display: 'flex', flexDirection: 'column',
         alignItems: 'center', justifyContent: 'center', padding: 24, gap: 16,
       }}>
-        <div className="et-h2" style={{ color: 'var(--et-ink)' }}>后端没起来</div>
-        <div className="et-meta" style={{ color: 'var(--et-mute)', maxWidth: 520, textAlign: 'center' }}>
-          Murmur 应该自动启动 etcli.exe 作为后端。如果没起，请：<br/>
-          1. 完全退出 Murmur 重启<br/>
-          2. 还不行就看日志 <code style={{ background: 'var(--et-paper-2)', padding: '2px 6px', borderRadius: 4 }}>~/Documents/Murmur/logs/serve.log</code><br/>
-          3. 开发模式可手动跑 <code style={{ background: 'var(--et-paper-2)', padding: '2px 6px', borderRadius: 4 }}>{navigator.userAgent.toLowerCase().includes('mac') ? 'bash start-mac.sh' : 'start-windows.bat'}</code><br/>
-          4. 把日志贴 issue 给作者 sgaofen
+        <div className="et-h2" style={{ color: 'var(--et-ink)' }}>
+          {isOnboardingNeededError(error) ? '还没完成初始化' : '后端没起来'}
         </div>
+        <div className="et-meta" style={{ color: 'var(--et-mute)', maxWidth: 520, textAlign: 'center' }}>
+          {isOnboardingNeededError(error) ? (
+            <>
+              本地后端已经启动了，但还没有找到可用的解密数据。请按初始化引导选择微信数据目录、抓密钥并解密。
+            </>
+          ) : (
+            <>
+              Murmur 应该自动启动 etcli.exe 作为后端。如果没起，请：<br/>
+              1. 完全退出 Murmur 重启<br/>
+              2. 还不行就看日志 <code style={{ background: 'var(--et-paper-2)', padding: '2px 6px', borderRadius: 4 }}>~/Documents/Murmur/logs/serve.log</code><br/>
+              3. 开发模式可手动跑 <code style={{ background: 'var(--et-paper-2)', padding: '2px 6px', borderRadius: 4 }}>{navigator.userAgent.toLowerCase().includes('mac') ? 'bash start-mac.sh' : 'start-windows.bat'}</code><br/>
+              4. 把日志贴 issue 给作者 sgaofen
+            </>
+          )}
+        </div>
+        {isOnboardingNeededError(error) && onOpenOnboarding && (
+          <button onClick={onOpenOnboarding} style={{
+            all: 'unset', cursor: 'pointer', padding: '12px 28px',
+            borderRadius: 999, background: 'var(--et-orange)', color: '#fff',
+            fontSize: 14, fontWeight: 600, boxShadow: '0 6px 16px rgba(255,107,71,0.28)',
+          }}>打开初始化引导</button>
+        )}
         <div className="et-meta" style={{ color: 'var(--et-faint)' }}>{maskText(error)}</div>
         {bootLogs && (
           <details style={{ width: 'min(760px, 92vw)' }}>
