@@ -1,12 +1,28 @@
 # Murmur 微语
 
-微信聊天记录本地解密、关系图和关系分析工具。
+把你的微信聊天记录变成一张本地关系地图：谁和你最熟、谁和谁经常一起出现、哪些关系已经淡了、哪些群聊和朋友圈暗暗串起了你的社交网络。
 
-## 最新版本
+Murmur 默认只在本机读取和分析数据。只有你主动点击 AI 分析时，才会把整理后的样本交给你本机已登录的 Claude Code 或 Codex CLI。
 
-下载最新版：<https://github.com/sgaofen/murmur/releases/latest>
+[下载最新版](https://github.com/sgaofen/murmur/releases/latest)
 
 当前推荐版本：`v0.2.13`
+
+![Murmur 年代记](docs/screenshots/readme-home.png)
+
+## 能做什么
+
+- 自动读取本机微信数据，生成朋友、群聊、时间线和活跃度概览。
+- 画出可旋转的关系网络，区分私聊、朋友间互动、共同群聊、朋友圈交叉痕迹。
+- 点击人物看完整关系档案，点击连线看两个人之间的关系推断。
+- 用 Claude Code 或 Codex CLI 批量生成 AI 关系分析报告。
+- 一键开启隐私模式，公开截图和录屏时自动隐藏姓名、wxid、本机路径和敏感片段。
+
+![关系网络](docs/screenshots/readme-graph.png)
+
+![AI 关系档案](docs/screenshots/readme-reports.png)
+
+![单人档案](docs/screenshots/readme-friend.png)
 
 ## 下载哪个文件
 
@@ -26,11 +42,10 @@ Intel Mac 暂时没有安装包，需要从源码运行。
 
 1. 下载 `Murmur_0.2.13_x64-setup.exe`。
 2. 双击安装。
-3. 从桌面或开始菜单打开 Murmur。
-4. 打开微信，退出到登录页，但不要关闭微信程序。
-5. 回 Murmur，按引导点击「开始抓密钥」。
-6. 看到等待登录事件后，回微信扫码或自动登录一次。
-7. 抓到 key 后会自动解密，然后进入主界面。
+3. 打开微信，退出到登录页，但不要关闭微信程序。
+4. 打开 Murmur，按引导点击「开始抓密钥」。
+5. 看到等待登录事件后，回微信扫码或自动登录一次。
+6. 抓到 key 后会自动解密，然后进入主界面。
 
 如果提示杀毒软件拦截 `wx_key.dll`，把 Murmur 安装目录加入杀毒软件白名单，然后重新安装再试。
 
@@ -66,6 +81,45 @@ open /Applications/Murmur.app
 5. 回 Murmur 点「开始自动抓取」。
 6. 等待解密完成后进入主界面。
 
-## 数据和隐私
+## AI 分析
 
-Murmur 默认在本机处理数据。只有你主动点击 AI 分析时，样本才会交给你本机已登录的 Claude Code 或 Codex CLI。
+Murmur 会先把私聊、群聊、朋友圈线索和朋友间共同出现的证据整理成分析包，再交给 Claude Code 或 Codex CLI。
+
+你可以在「报告」页选择：
+
+- 小样本自检
+- Top 朋友和 Top 关系
+- 全部朋友 + 朋友间关系
+- 只补朋友间关系报告
+
+报告默认储存在：
+
+```text
+~/Desktop/Murmur/agent_reports/
+```
+
+## 隐私模式
+
+右下角点击「隐私模式」即可切换。隐私模式会隐藏：
+
+- 好友昵称和群名
+- wxid、chatroom id
+- 本机路径
+- 邮箱、手机号样式文本
+- key 样式的 64 位十六进制字符串
+
+公开截图时也可以在 URL 里加 `?privacy=1`，例如：
+
+```text
+http://127.0.0.1:5173/?privacy=1#graph
+```
+
+## 遇到问题
+
+Windows 优先下载 `.exe` 安装包。Mac 目前没有付费 Apple 公证，所以第一次打开需要按上面的安全设置步骤放行。
+
+如果后端启动失败、解密失败或抓 key 失败，Murmur 会把日志放在：
+
+```text
+~/Documents/Murmur/logs/
+```
