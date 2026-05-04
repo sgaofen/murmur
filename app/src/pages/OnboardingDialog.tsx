@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { extractKey, getDiagnose, openFullDiskAccess, refreshData, resignWechat, saveKey, saveWeChatRoot } from '../data/api';
-import type { Diagnose } from '../data/api';
+import { extractKey, getDiagnose, openFullDiskAccess, refreshData, resignWechat, saveKey, saveWeChatRoot, startDiskScan, getDiskScanStatus, cancelDiskScan } from '../data/api';
+import type { Diagnose, ScanState, ScanFound } from '../data/api';
 import { maskText } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
 
@@ -374,14 +374,238 @@ function MacNoData({ diag, onClose }: { diag: Diagnose; onClose: () => void }) {
   );
 }
 
+type WinNoDataMode = 'home' | 'scan' | 'manual';
+
 function WinNoData({ diag, onSaved }: { diag: Diagnose; onSaved: () => void }) {
+  const [mode, setMode] = useState<WinNoDataMode>('home');
+
+  if (mode === 'scan') return <WinNoDataScan onSaved={onSaved} onBack={() => setMode('home')} />;
+  if (mode === 'manual') return <WinNoDataManual diag={diag} onSaved={onSaved} onBack={() => setMode('home')} />;
+
+  return (
+    <>
+      <div className="et-serif" style={{ fontSize: 15, lineHeight: 1.7, color: 'var(--et-ink-soft)', marginBottom: 14 }}>
+        Murmur 已经扫了常见位置（盘根、Documents、OneDrive、注册表里 WeChat 设的路径），都没找到 <code>xwechat_files</code>。
+        <br/>你大概率是：
+      </div>
+      <ul style={{ paddingLeft: 20, lineHeight: 1.8, fontSize: 13, color: 'var(--et-ink)', marginBottom: 18 }}>
+        <li>把数据放在了非常规盘符 / 自定义文件夹里</li>
+        <li>从来没在这台电脑登录过微信</li>
+        <li>装的是企业微信（暂不支持）</li>
+      </ul>
+      <div style={{
+        display: 'grid', gridTemplateColumns: '1fr', gap: 10, marginBottom: 18,
+      }}>
+        <button onClick={() => setMode('scan')} style={{
+          all: 'unset', cursor: 'pointer', display: 'block', padding: '14px 16px',
+          background: 'var(--et-orange-soft)', border: '1px solid var(--et-orange)',
+          borderRadius: 'var(--et-r)', color: 'var(--et-orange-2)',
+        }}>
+          <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>🔎 全盘扫描微信数据 <span style={{ fontWeight: 500, opacity: 0.75 }}>（推荐 · 通常 30 秒以内）</span></div>
+          <div style={{ fontSize: 12, lineHeight: 1.6 }}>
+            Murmur 用名字匹配的方式扫所有本地盘，跳过 Windows、Program Files、node_modules 等明显无关目录。**不读文件内容**，**不需要管理员权限**。
+          </div>
+        </button>
+        <button onClick={() => setMode('manual')} style={{
+          all: 'unset', cursor: 'pointer', display: 'block', padding: '14px 16px',
+          background: 'var(--et-paper-2)', border: '1px solid var(--et-line-2)',
+          borderRadius: 'var(--et-r)', color: 'var(--et-ink)',
+        }}>
+          <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>✍ 我知道路径，手动输入</div>
+          <div style={{ fontSize: 12, lineHeight: 1.6, color: 'var(--et-ink-soft)' }}>
+            从微信「设置 → 文件管理 → 打开文件夹」复制路径粘过来。
+          </div>
+        </button>
+      </div>
+      <details>
+        <summary style={{ cursor: 'pointer', fontSize: 12, color: 'var(--et-mute)' }}>看 Murmur 已经扫过哪些位置（点开展开）</summary>
+        <CapabilityList diag={diag} />
+      </details>
+    </>
+  );
+}
+
+function WinNoDataScan({ onSaved, onBack }: { onSaved: () => void; onBack: () => void }) {
+  const [state, setState] = useState<ScanState | null>(null);
+  const [stage, setStage] = useState<'starting' | 'scanning' | 'done' | 'error'>('starting');
+  const [savingPath, setSavingPath] = useState<string | null>(null);
+  const [errMsg, setErrMsg] = useState<string | null>(null);
+
+  // Start the scan once on mount, then poll until done.
+  useEffect(() => {
+    let cancelled = false;
+    let timer: number | null = null;
+
+    const poll = async () => {
+      try {
+        const s = await getDiskScanStatus();
+        if (cancelled) return;
+        setState(s);
+        if (!s.running) {
+          setStage(s.error ? 'error' : 'done');
+          return;
+        }
+        timer = window.setTimeout(poll, 600);
+      } catch (e: any) {
+        if (cancelled) return;
+        setErrMsg(e?.message || String(e));
+        setStage('error');
+      }
+    };
+
+    (async () => {
+      try {
+        const initial = await startDiskScan({});
+        if (cancelled) return;
+        setState(initial);
+        setStage('scanning');
+        timer = window.setTimeout(poll, 600);
+      } catch (e: any) {
+        if (cancelled) return;
+        setErrMsg(e?.message || String(e));
+        setStage('error');
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, []);
+
+  async function pickFound(found: ScanFound) {
+    setSavingPath(found.path);
+    setErrMsg(null);
+    try {
+      const r = await saveWeChatRoot(found.path);
+      if (!r.ok) {
+        setErrMsg(r.error || '保存失败');
+        setSavingPath(null);
+        return;
+      }
+      window.setTimeout(onSaved, 350);
+    } catch (e: any) {
+      setErrMsg(e?.message || String(e));
+      setSavingPath(null);
+    }
+  }
+
+  async function handleCancel() {
+    try { await cancelDiskScan(); } catch {}
+    onBack();
+  }
+
+  const dirsScanned = state?.dirs_scanned ?? 0;
+  const drivesDone = state?.drives_done ?? 0;
+  const drivesTotal = state?.drives_total ?? 0;
+  const found = state?.found ?? [];
+  const elapsed = state?.started_at ? Math.max(0, ((state.finished_at ?? Math.floor(Date.now() / 1000)) - state.started_at)) : 0;
+
+  return (
+    <>
+      <div style={{
+        padding: '14px 16px', background: 'var(--et-paper-2)',
+        border: '0.5px solid var(--et-line-2)', borderRadius: 8,
+        marginBottom: 14, fontSize: 13, color: 'var(--et-ink)',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+          <div style={{ fontWeight: 600 }}>
+            {stage === 'starting' && '正在启动扫描…'}
+            {stage === 'scanning' && `🔎 正在扫描 (${drivesDone}/${drivesTotal} 个盘已完成)`}
+            {stage === 'done' && `✓ 扫描完成 · 耗时 ${elapsed}s`}
+            {stage === 'error' && '✗ 扫描失败'}
+          </div>
+          <span className="et-meta" style={{ color: 'var(--et-mute)' }}>
+            已查 {dirsScanned.toLocaleString()} 个目录
+          </span>
+        </div>
+        {state?.current_path && stage === 'scanning' && (
+          <div className="et-meta" style={{
+            fontFamily: 'var(--et-mono)', fontSize: 11,
+            color: 'var(--et-mute)',
+            whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+          }}>
+            {state.current_path}
+          </div>
+        )}
+      </div>
+
+      {stage === 'error' && (
+        <div style={{
+          padding: '10px 14px', background: 'rgba(196,90,63,0.10)',
+          border: '0.5px solid rgba(196,90,63,0.35)', borderRadius: 8,
+          fontSize: 12, color: 'var(--et-rose)', marginBottom: 14, lineHeight: 1.6,
+        }}>
+          {state?.error || errMsg || '未知错误'}
+        </div>
+      )}
+
+      {found.length > 0 && (
+        <>
+          <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--et-ink)', marginBottom: 8 }}>
+            找到 {found.length} 个候选 — 点哪个用哪个：
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 14 }}>
+            {found.map((f) => (
+              <button key={f.path} onClick={() => pickFound(f)} disabled={savingPath === f.path} style={{
+                all: 'unset', cursor: savingPath === f.path ? 'wait' : 'pointer',
+                padding: '10px 12px', background: 'var(--et-paper-2)',
+                border: '0.5px solid var(--et-line-2)', borderRadius: 6,
+                fontSize: 11.5, fontFamily: 'var(--et-mono)', color: 'var(--et-ink)',
+                opacity: savingPath && savingPath !== f.path ? 0.5 : 1,
+                wordBreak: 'break-all', lineHeight: 1.5,
+              }}>
+                <span style={{ color: f.kind === 'wxid' ? 'var(--et-orange)' : 'var(--et-ink-soft)', fontWeight: 600, marginRight: 6 }}>
+                  [{f.kind === 'wxid' ? '账号' : '数据根'}]
+                </span>
+                {maskText(f.path)}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+
+      {stage === 'done' && found.length === 0 && (
+        <div style={{
+          padding: '12px 14px', background: 'rgba(232,181,122,0.18)',
+          border: '0.5px solid rgba(138,90,28,0.3)', borderRadius: 8,
+          fontSize: 13, color: '#8a5a1c', lineHeight: 1.6, marginBottom: 14,
+        }}>
+          全盘扫完没找到任何 <code>xwechat_files</code> 或 <code>wxid_*</code> 目录。
+          <br/>这台电脑大概率从来没登录过微信，或者数据藏在 Murmur 默认跳过的目录里
+          （<code>Windows\\</code>、<code>Program Files\\</code>、回收站等）。
+          <br/>你可以「手动输入路径」，绕过这些跳过规则。
+        </div>
+      )}
+
+      <div style={{ display: 'flex', gap: 8 }}>
+        {stage === 'scanning' && (
+          <button onClick={handleCancel} style={{
+            ...primaryBtn, marginTop: 0, flex: 1, background: 'transparent',
+            color: 'var(--et-ink)', boxShadow: 'none', border: '1px solid var(--et-line-2)',
+          }}>取消</button>
+        )}
+        {(stage === 'done' || stage === 'error') && (
+          <>
+            <button onClick={onBack} style={{
+              ...primaryBtn, marginTop: 0, flex: 1, background: 'transparent',
+              color: 'var(--et-ink)', boxShadow: 'none', border: '1px solid var(--et-line-2)',
+            }}>返回</button>
+          </>
+        )}
+      </div>
+    </>
+  );
+}
+
+function WinNoDataManual({ diag, onSaved, onBack }: { diag: Diagnose; onSaved: () => void; onBack: () => void }) {
   const [path, setPath] = useState('');
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   async function submit() {
     const cleaned = path.trim();
     if (!cleaned) {
-      setMsg('请先粘贴微信文件管理里打开的文件夹路径。');
+      setMsg('请先粘贴一个路径。');
       return;
     }
     setSaving(true);
@@ -392,7 +616,7 @@ function WinNoData({ diag, onSaved }: { diag: Diagnose; onSaved: () => void }) {
         setMsg(r.error || '这个路径里没有找到微信数据。');
         return;
       }
-      setMsg(`已找到 ${r.profiles?.length || 1} 个微信账号，正在重新检测…`);
+      setMsg(`✓ 已找到 ${r.profiles?.length || 1} 个微信账号，正在重新检测…`);
       window.setTimeout(onSaved, 450);
     } catch (e: any) {
       setMsg(e?.message || String(e));
@@ -402,27 +626,41 @@ function WinNoData({ diag, onSaved }: { diag: Diagnose; onSaved: () => void }) {
   }
   return (
     <>
-      <div className="et-serif" style={{ fontSize: 15, lineHeight: 1.7, color: 'var(--et-ink-soft)', marginBottom: 14 }}>
-        微信的数据目录每台电脑都可能不一样。Murmur 已经扫了常见位置，但你的电脑可能把数据放在 <code>Tencent/Weixin</code>、OneDrive、外接盘或自定义文件夹里。
+      <div className="et-serif" style={{ fontSize: 15, lineHeight: 1.7, color: 'var(--et-ink-soft)', marginBottom: 12 }}>
+        三步教你拿到正确路径：
       </div>
       <div style={{
         padding: '12px 14px', background: 'var(--et-paper-2)',
         border: '0.5px solid var(--et-line-2)', borderRadius: 8,
-        fontSize: 13, lineHeight: 1.8, marginBottom: 12, color: 'var(--et-ink)',
+        fontSize: 13, lineHeight: 1.85, color: 'var(--et-ink)', marginBottom: 12,
       }}>
-        <div style={{ fontWeight: 600, marginBottom: 6 }}>最快修法：</div>
         <ol style={{ margin: 0, paddingLeft: 20 }}>
-          <li>打开电脑微信</li>
-          <li>进入「设置 → 文件管理」</li>
-          <li>点「打开文件夹」或复制文件保存位置</li>
-          <li>把包含 <code>xwechat_files</code> 的路径粘到下面</li>
+          <li>打开桌面版微信</li>
+          <li>左下角 <strong>三横线菜单 → 设置 → 文件管理</strong></li>
+          <li>点「<strong>打开文件夹</strong>」按钮 — Win 资源管理器会跳出来，地址栏显示的就是路径</li>
+          <li>地址栏里点一下 → <kbd>Ctrl+C</kbd> 复制 → 回这里 <kbd>Ctrl+V</kbd> 粘到下面</li>
         </ol>
+      </div>
+      <div style={{
+        padding: '10px 14px', background: 'rgba(72,167,107,0.10)',
+        border: '0.5px solid rgba(72,167,107,0.30)', borderRadius: 8,
+        fontSize: 12, color: '#3a7a4f', marginBottom: 12, lineHeight: 1.65,
+      }}>
+        💡 这些粘贴格式 Murmur 都认 — 多复制了或少复制了几层都会自动处理：
+        <ul style={{ margin: '6px 0 0', paddingLeft: 18, fontFamily: 'var(--et-mono)', fontSize: 11 }}>
+          <li>D:\Tencent\Weixin\xwechat_files</li>
+          <li>...\xwechat_files\wxid_xxx</li>
+          <li>...\xwechat_files\wxid_xxx\db_storage  <span style={{ fontFamily: 'var(--et-sans)' }}>← 多了 db_storage 也行</span></li>
+          <li>...\session\session.db  <span style={{ fontFamily: 'var(--et-sans)' }}>← 直接粘文件路径也行，会自动找 wxid_*</span></li>
+        </ul>
       </div>
       <input
         value={path}
         onChange={(e) => setPath(e.target.value)}
-        placeholder="例如 E:\\Tencent\\Weixin\\xwechat_files 或直接粘 wxid_... 文件夹"
+        placeholder={'粘到这里，不用清理多余的引号 / 反斜杠'}
         spellCheck={false}
+        autoFocus
+        onKeyDown={(e) => { if (e.key === 'Enter' && !saving) submit(); }}
         style={{
           all: 'unset', width: '100%', boxSizing: 'border-box',
           padding: '10px 14px', borderRadius: 8,
@@ -433,19 +671,24 @@ function WinNoData({ diag, onSaved }: { diag: Diagnose; onSaved: () => void }) {
       />
       {msg && (
         <div className="et-meta" style={{
-          color: msg.startsWith('已找到') ? '#3a7a4f' : 'var(--et-rose)',
+          color: msg.startsWith('✓') ? '#3a7a4f' : 'var(--et-rose)',
           marginBottom: 12, whiteSpace: 'pre-wrap',
         }}>{maskText(msg)}</div>
       )}
       <details style={{ marginBottom: 14 }}>
-        <summary style={{ cursor: 'pointer', fontSize: 12, color: 'var(--et-mute)' }}>查看 Murmur 已经扫描过的位置</summary>
+        <summary style={{ cursor: 'pointer', fontSize: 12, color: 'var(--et-mute)' }}>看 Murmur 之前已经扫过哪些位置</summary>
         <CapabilityList diag={diag} />
       </details>
-      <button onClick={submit} disabled={saving} style={{
-        ...primaryBtn,
-        opacity: saving ? 0.65 : 1,
-        cursor: saving ? 'wait' : 'pointer',
-      }}>{saving ? '正在检查路径…' : '保存这个微信数据路径'}</button>
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button onClick={onBack} style={{
+          ...primaryBtn, marginTop: 0, flex: 1, background: 'transparent',
+          color: 'var(--et-ink)', boxShadow: 'none', border: '1px solid var(--et-line-2)',
+        }}>返回</button>
+        <button onClick={submit} disabled={saving} style={{
+          ...primaryBtn, marginTop: 0, flex: 2,
+          opacity: saving ? 0.65 : 1, cursor: saving ? 'wait' : 'pointer',
+        }}>{saving ? '正在检查…' : '保存路径'}</button>
+      </div>
     </>
   );
 }

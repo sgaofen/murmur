@@ -505,7 +505,7 @@ STOPWORDS.update("这个 那个 一下 还是 就是 没有 什么 怎么 为啥
 STOP_CHARS = set("的了是我你他她也都在就不和与这那一个有没啊吧呀嗯哦嘛呢吗哈呜哇噢哎唉哟唔嗷嘿哼啦喔把被让给从向对跟比又再才还但而或因所以之上下里外中后前时日年月来去到过")
 NON_TEXT = re.compile(r"\[[^\]]+\]")
 URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
-APP_VERSION = "0.2.15"
+APP_VERSION = "0.2.16"
 YEARBOOK_CACHE_VERSION = 5
 
 
@@ -3140,7 +3140,8 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 sys.stderr.write(f"[etcli serve] bootstrap auto-promote failed: {e}\n")
 
         # Bootstrap mode: only a small allowlist works without decrypted data.
-        _NO_STORE_GET = {"/api/info", "/api/agents", "/api/diagnose", "/api/reports", "/api/log-tail"}
+        _NO_STORE_GET = {"/api/info", "/api/agents", "/api/diagnose", "/api/reports", "/api/log-tail",
+                          "/api/scan-disks/status"}
         if self.store is None and path not in _NO_STORE_GET and not path.startswith("/api/report/"):
             return self._send_json({
                 "error": "no_decrypted_data",
@@ -3187,6 +3188,10 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 max_lines = 80
             return self._send_json(read_diagnostic_logs(max_lines=max_lines))
 
+        if path == "/api/scan-disks/status":
+            # Polling endpoint for the background disk scan started by POST /api/scan-disks.
+            return self._send_json(_paths.get_scan_state())
+
         # Onboarding gate: data-needing endpoints return 503 until store is ready.
         # Endpoints that work without a store stay above this gate.
         # NOTE: keep this allowlist in sync with `_NO_STORE_GET` above. They
@@ -3194,7 +3199,8 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         # and historically diverged: /api/reports + /api/report/* were in
         # _NO_STORE_GET but missing here, so users hit 503 the moment they
         # opened the Reports page on a fresh install.
-        _gate_pass = (path in {"/api/diagnose", "/api/agents", "/api/reports", "/api/log-tail"}
+        _gate_pass = (path in {"/api/diagnose", "/api/agents", "/api/reports", "/api/log-tail",
+                                "/api/scan-disks/status"}
                       or path.startswith("/api/report/"))
         if _gate_pass:
             pass  # these don't need store, fall through to their handlers
@@ -3572,7 +3578,8 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         # Bootstrap endpoints that work even when store is None (no decrypted data yet)
         # Mac onboarding adds a few extra (resign-wechat, open-fda, open-folder); keep them whitelisted.
         BOOTSTRAP_POSTS = {"/api/refresh", "/api/save-key", "/api/extract-key", "/api/wechat-root",
-                           "/api/open-folder", "/api/resign-wechat", "/api/open-fda"}
+                           "/api/open-folder", "/api/resign-wechat", "/api/open-fda",
+                           "/api/scan-disks", "/api/scan-disks/cancel"}
         if self.store is None and path not in BOOTSTRAP_POSTS:
             return self._send_json({
                 "error": "no_decrypted_data",
@@ -3615,6 +3622,36 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 })
             except Exception as e:
                 return self._send_json({"ok": False, "error": f"{type(e).__name__}: {e}"}, 500)
+
+        if path == "/api/scan-disks":
+            # Start a background full-disk fast-walk for xwechat_files / wxid_*
+            # candidates. Idempotent: if a scan is already running, returns the
+            # current state instead of starting a second one. Frontend polls
+            # /api/scan-disks/status every 0.5–1s for progress + final results.
+            state = _paths.get_scan_state()
+            if state.get("running"):
+                return self._send_json({"ok": True, "already_running": True, **state})
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length) if length else b"{}"
+            opts = json.loads(body.decode("utf-8") or "{}")
+            max_depth = int(opts.get("max_depth", 8))
+            max_depth = max(2, min(20, max_depth))
+            import threading as _th
+            t = _th.Thread(
+                target=_paths.scan_for_wechat_data_async,
+                kwargs={"max_depth": max_depth},
+                daemon=True,
+            )
+            t.start()
+            # Tiny sleep so the worker can flip running=True before we return —
+            # otherwise the frontend's first poll may see "not running" and
+            # think the scan finished instantly.
+            _time.sleep(0.15)
+            return self._send_json({"ok": True, "started": True, **_paths.get_scan_state()})
+
+        if path == "/api/scan-disks/cancel":
+            _paths.cancel_scan()
+            return self._send_json({"ok": True, **_paths.get_scan_state()})
 
         if path == "/api/refresh":
             # Run the decrypt pipeline; dispatches via etcli sub-task helper (frozen vs dev aware)

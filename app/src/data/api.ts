@@ -207,6 +207,43 @@ export async function saveWeChatRoot(path: string): Promise<{
   });
 }
 
+// Disk-scan API — see paths.scan_for_wechat_data_async. The scan is a
+// non-admin file-name walk. Typical: 1–60s depending on drive size + dir count.
+export interface ScanFound {
+  path: string;
+  kind: 'xwechat_files' | 'wxid';
+}
+export interface ScanState {
+  running: boolean;
+  started_at: number | null;
+  finished_at: number | null;
+  drives_total: number;
+  drives_done: number;
+  current_path: string;
+  dirs_scanned: number;
+  found: ScanFound[];
+  error: string | null;
+  cancelled: boolean;
+}
+
+export async function startDiskScan(opts: { max_depth?: number } = {}): Promise<ScanState & { ok: boolean; started?: boolean; already_running?: boolean }> {
+  return j('/api/scan-disks', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(opts),
+  });
+}
+export async function getDiskScanStatus(): Promise<ScanState> {
+  return j('/api/scan-disks/status');
+}
+export async function cancelDiskScan(): Promise<ScanState & { ok: boolean }> {
+  return j('/api/scan-disks/cancel', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  });
+}
+
 export async function resignWechat(opts: { relaunch?: boolean } = {}): Promise<{
   ok: boolean; ms?: number; log?: string[]; error?: string; stderr?: string; next_steps?: string;
 }> {
@@ -392,4 +429,4 @@ export async function openFolder(path?: string): Promise<{ ok: boolean; opened?:
   });
 }
 
-export const APP_VERSION = 'v0.2.15 · Murmur 微语';
+export const APP_VERSION = 'v0.2.16 · Murmur 微语';
