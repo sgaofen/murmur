@@ -12,8 +12,8 @@ Murmur 默认只在本机读取和分析数据。只有你主动点击 AI 分析
 
 ## 视频教程
 
-- [Mac 安装视频](https://github.com/sgaofen/murmur/releases/download/v0.2.13/Murmur_macOS_install_tutorial.mp4)
-- [Windows 安装视频](https://github.com/sgaofen/murmur/releases/download/v0.2.13/Murmur_Windows_install_tutorial.mp4)
+- [Mac 安装视频](https://github.com/sgaofen/murmur/releases/download/v0.2.14/Murmur_macOS_install_tutorial.mp4)
+- [Windows 安装视频](https://github.com/sgaofen/murmur/releases/download/v0.2.14/Murmur_Windows_install_tutorial.mp4)
 
 ## 能做什么
 
