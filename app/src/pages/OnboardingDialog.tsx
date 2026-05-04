@@ -379,7 +379,7 @@ type WinNoDataMode = 'home' | 'scan' | 'manual';
 function WinNoData({ diag, onSaved }: { diag: Diagnose; onSaved: () => void }) {
   const [mode, setMode] = useState<WinNoDataMode>('home');
 
-  if (mode === 'scan') return <WinNoDataScan onSaved={onSaved} onBack={() => setMode('home')} />;
+  if (mode === 'scan') return <WinNoDataScan onSaved={onSaved} onBack={() => setMode('home')} onManual={() => setMode('manual')} />;
   if (mode === 'manual') return <WinNoDataManual diag={diag} onSaved={onSaved} onBack={() => setMode('home')} />;
 
   return (
@@ -425,16 +425,22 @@ function WinNoData({ diag, onSaved }: { diag: Diagnose; onSaved: () => void }) {
   );
 }
 
-function WinNoDataScan({ onSaved, onBack }: { onSaved: () => void; onBack: () => void }) {
+function WinNoDataScan({ onSaved, onBack, onManual }: { onSaved: () => void; onBack: () => void; onManual: () => void }) {
   const [state, setState] = useState<ScanState | null>(null);
   const [stage, setStage] = useState<'starting' | 'scanning' | 'done' | 'error'>('starting');
   const [savingPath, setSavingPath] = useState<string | null>(null);
   const [errMsg, setErrMsg] = useState<string | null>(null);
+  // Bumped on user click to trigger a fresh scan via the useEffect below.
+  const [scanEpoch, setScanEpoch] = useState(0);
 
-  // Start the scan once on mount, then poll until done.
+  // Start a scan whenever scanEpoch changes (initial mount + 「重新扫描」 clicks),
+  // poll until done or unmounted.
   useEffect(() => {
     let cancelled = false;
     let timer: number | null = null;
+    setStage('starting');
+    setState(null);
+    setErrMsg(null);
 
     const poll = async () => {
       try {
@@ -471,7 +477,7 @@ function WinNoDataScan({ onSaved, onBack }: { onSaved: () => void; onBack: () =>
       cancelled = true;
       if (timer) window.clearTimeout(timer);
     };
-  }, []);
+  }, [scanEpoch]);
 
   async function pickFound(found: ScanFound) {
     setSavingPath(found.path);
@@ -510,23 +516,30 @@ function WinNoDataScan({ onSaved, onBack }: { onSaved: () => void; onBack: () =>
       }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
           <div style={{ fontWeight: 600 }}>
-            {stage === 'starting' && '正在启动扫描…'}
-            {stage === 'scanning' && `🔎 正在扫描 (${drivesDone}/${drivesTotal} 个盘已完成)`}
-            {stage === 'done' && `✓ 扫描完成 · 耗时 ${elapsed}s`}
+            {stage === 'starting' && '⏳ 正在启动扫描…'}
+            {stage === 'scanning' && `🔎 扫描中 — ${drivesDone}/${drivesTotal} 个盘完成`}
+            {stage === 'done' && `✓ 扫描完成 · 耗时 ${elapsed}s · 找到 ${found.length} 个候选`}
             {stage === 'error' && '✗ 扫描失败'}
           </div>
           <span className="et-meta" style={{ color: 'var(--et-mute)' }}>
             已查 {dirsScanned.toLocaleString()} 个目录
           </span>
         </div>
-        {state?.current_path && stage === 'scanning' && (
-          <div className="et-meta" style={{
-            fontFamily: 'var(--et-mono)', fontSize: 11,
-            color: 'var(--et-mute)',
-            whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-          }}>
-            {state.current_path}
-          </div>
+        {stage === 'scanning' && (
+          <>
+            <div className="et-meta" style={{ color: 'var(--et-mute)', fontSize: 11.5, marginBottom: 4 }}>
+              ⏱ 还在扫，请等所有盘都标记完成再下结论 — 找到的候选会陆续出现在下面
+            </div>
+            {state?.current_path && (
+              <div className="et-meta" style={{
+                fontFamily: 'var(--et-mono)', fontSize: 11,
+                color: 'var(--et-mute)',
+                whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+              }}>
+                {state.current_path}
+              </div>
+            )}
+          </>
         )}
       </div>
 
@@ -543,7 +556,7 @@ function WinNoDataScan({ onSaved, onBack }: { onSaved: () => void; onBack: () =>
       {found.length > 0 && (
         <>
           <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--et-ink)', marginBottom: 8 }}>
-            找到 {found.length} 个候选 — 点哪个用哪个：
+            点候选项就用它（找到 {found.length} 个）：
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 14 }}>
             {found.map((f) => (
@@ -567,14 +580,18 @@ function WinNoDataScan({ onSaved, onBack }: { onSaved: () => void; onBack: () =>
 
       {stage === 'done' && found.length === 0 && (
         <div style={{
-          padding: '12px 14px', background: 'rgba(232,181,122,0.18)',
+          padding: '14px 16px', background: 'rgba(232,181,122,0.18)',
           border: '0.5px solid rgba(138,90,28,0.3)', borderRadius: 8,
-          fontSize: 13, color: '#8a5a1c', lineHeight: 1.6, marginBottom: 14,
+          fontSize: 13, color: '#8a5a1c', lineHeight: 1.7, marginBottom: 14,
         }}>
-          全盘扫完没找到任何 <code>xwechat_files</code> 或 <code>wxid_*</code> 目录。
-          <br/>这台电脑大概率从来没登录过微信，或者数据藏在 Murmur 默认跳过的目录里
-          （<code>Windows\\</code>、<code>Program Files\\</code>、回收站等）。
-          <br/>你可以「手动输入路径」，绕过这些跳过规则。
+          <div style={{ fontWeight: 600, marginBottom: 6 }}>扫完了，0 个候选。</div>
+          可能的原因：
+          <ul style={{ margin: '4px 0 8px', paddingLeft: 20 }}>
+            <li>这台电脑从来没登录过微信</li>
+            <li>数据藏在 Murmur 默认跳过的目录里（<code>Windows\</code>、<code>Program Files\</code>、<code>node_modules\</code>、<code>$Recycle.Bin\</code> 等）</li>
+            <li>装的是企业微信（暂不支持）</li>
+          </ul>
+          <strong>「手动输入路径」可以绕过所有跳过规则</strong> — 不管你的数据在哪个角落都能进。
         </div>
       )}
 
@@ -591,6 +608,16 @@ function WinNoDataScan({ onSaved, onBack }: { onSaved: () => void; onBack: () =>
               ...primaryBtn, marginTop: 0, flex: 1, background: 'transparent',
               color: 'var(--et-ink)', boxShadow: 'none', border: '1px solid var(--et-line-2)',
             }}>返回</button>
+            <button onClick={() => setScanEpoch((n) => n + 1)} disabled={savingPath !== null} style={{
+              ...primaryBtn, marginTop: 0, flex: 1, background: 'transparent',
+              color: 'var(--et-ink)', boxShadow: 'none', border: '1px solid var(--et-line-2)',
+              opacity: savingPath !== null ? 0.5 : 1,
+            }}>重新扫描</button>
+            {found.length === 0 && (
+              <button onClick={onManual} style={{
+                ...primaryBtn, marginTop: 0, flex: 2,
+              }}>手动输入路径</button>
+            )}
           </>
         )}
       </div>
