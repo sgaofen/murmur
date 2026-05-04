@@ -177,8 +177,11 @@ Murmur 默认找：
 - `~/OneDrive/Documents/xwechat_files/`
 - `Tencent/Weixin/xwechat_files`、`Tencent/WeChat/xwechat_files` 这类常见嵌套目录
 - 微信注册表里记录的自定义保存路径
+- 如果电脑上已经装了 Everything 的命令行工具 `es.exe`，Murmur 会自动借用它的索引秒查 `xwechat_files` / `db_storage`
 
 新版引导页可以直接粘贴路径：打开电脑微信 → 设置 → 文件管理 → 打开文件夹，把包含 `xwechat_files` 的路径粘进 Murmur。
+
+不建议让 Murmur 默认整盘递归搜索。Everything 快是因为它读 NTFS 文件索引，不是普通地遍历每个文件夹；Murmur 只把 Everything 当成可选加速器，没有安装 Everything 也能正常走保守扫描和粘贴路径兜底。
 
 如果你的微信数据在别处，也可以设环境变量：
 
