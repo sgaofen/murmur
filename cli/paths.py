@@ -520,6 +520,48 @@ def cancel_scan() -> None:
 # otherwise burn lots of time. Exact match (case-insensitive). Note that we
 # DON'T blindly skip "AppData" — WeChat 4.x has shipped builds that store data
 # in `%LOCALAPPDATA%\Tencent\xwechat`, so we keep that branch alive.
+def _xwechat_has_wxid(xwf: Path) -> bool:
+    """Quick test: does this `xwechat_files` candidate actually contain a
+    wxid_*/db_storage somewhere in the next 1-2 levels?
+
+    Without this, the scan reports any directory that happens to be NAMED
+    `xwechat_files` — including empty leftover dirs from earlier moves /
+    uninstalls (e.g. `D:\\Documents\\xwechat_files\\` after the user moved
+    their data to a new disk). Those would clutter the candidate list and
+    make the user hesitate. Cheap because we only listdir 1-2 dirs.
+    """
+    try:
+        with os.scandir(xwf) as it:
+            for entry in it:
+                try:
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                    if entry.name.startswith("wxid_"):
+                        if (Path(entry.path) / "db_storage").exists():
+                            return True
+                        continue
+                    # Handle the WeChat 4.x double-nested layout
+                    # (xwechat_files/xwechat_files/wxid_*/...).
+                    if entry.name.lower() in {"xwechat_files", "wechat files"}:
+                        try:
+                            with os.scandir(entry.path) as inner:
+                                for sub in inner:
+                                    try:
+                                        if (sub.is_dir(follow_symlinks=False)
+                                                and sub.name.startswith("wxid_")
+                                                and (Path(sub.path) / "db_storage").exists()):
+                                            return True
+                                    except OSError:
+                                        continue
+                        except (PermissionError, OSError):
+                            continue
+                except OSError:
+                    continue
+    except (PermissionError, OSError, FileNotFoundError):
+        return False
+    return False
+
+
 _SCAN_SKIP_NAMES = {
     "$recycle.bin",
     "system volume information",
@@ -627,11 +669,15 @@ def scan_for_wechat_data_async(
             name_l = name.lower()
             # Match before pruning so xwechat_files isn't accidentally skipped.
             if name_l in {"xwechat_files", "wechat files"}:
-                _SCAN_STATE["found"].append({
-                    "path": entry.path,
-                    "kind": "xwechat_files",
-                    "via_drive": str(start.anchor) if hasattr(start, "anchor") else "",
-                })
+                # Only report this candidate if it actually has a usable
+                # wxid_*/db_storage somewhere inside (1–2 levels deep).
+                # Filters out empty shells from old moves / uninstalls.
+                if _xwechat_has_wxid(Path(entry.path)):
+                    _SCAN_STATE["found"].append({
+                        "path": entry.path,
+                        "kind": "xwechat_files",
+                        "via_drive": str(start.anchor) if hasattr(start, "anchor") else "",
+                    })
                 # Continue WITHOUT descending — wxid_* live one level below
                 # but discover_wechat_profiles will pick them up from this candidate.
                 continue
