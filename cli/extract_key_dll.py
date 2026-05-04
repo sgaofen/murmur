@@ -247,11 +247,35 @@ class WxKey:
         return ptr.decode("utf-8", errors="replace")
 
 
+def hook_failure_hint(err: str = "") -> str:
+    err_l = (err or "").lower()
+    lines = [
+        "    这一步失败表示 wx_key.dll 没能注入到微信进程，不是数据路径问题。",
+        "    先按下面顺序排查：",
+        "    1) 退出 Murmur 和微信，重新打开微信；让微信停在登录页，不要关闭程序。",
+        "    2) 不要用管理员权限运行微信；如果微信是管理员权限，Murmur 也必须同权限。最简单是重启电脑后都普通打开。",
+        "    3) 把 Murmur 安装目录加入杀毒/Defender/火绒/360 白名单，并确认 wx_key.dll 没被隔离。",
+        "    4) 只下载 GitHub Release 里的 .exe 安装包，重新安装后再试。",
+    ]
+    if "access" in err_l or "denied" in err_l or "5" == err_l.strip():
+        lines.insert(1, "    检测到类似权限拒绝：通常是微信和 Murmur 权限等级不一致，或安全软件拦截。")
+    if "bit" in err_l or "arch" in err_l or "193" in err_l:
+        lines.insert(1, "    检测到类似架构不匹配：请使用 64 位 Windows 微信和 64 位 Murmur 安装包。")
+    return "\n".join(lines)
+
+
 def hook_and_poll(pid: int, timeout: int = 60) -> str | None:
-    wxk = WxKey()
+    try:
+        wxk = WxKey()
+    except Exception as e:
+        print(f"[X] Hook setup failed: {e}")
+        print(hook_failure_hint(str(e)))
+        return None
     print(f"[*] Installing hook into Weixin.exe (PID {pid})...")
     if not wxk.install(pid):
-        print(f"[X] Hook install failed: {wxk.last_error()}")
+        err = wxk.last_error()
+        print(f"[X] Hook install failed: {err or '(wx_key.dll did not return detail)'}")
+        print(hook_failure_hint(err))
         return None
     print("[*] Hook installed. Polling for key (waiting for login event)...")
 

@@ -105,8 +105,66 @@ def _windows_xwechat_variants(base: Path, *, include_base: bool = True) -> list[
             base / "Documents" / "xwechat_files",
             base / "WeChat Files",
             base / "Documents" / "WeChat Files",
+            # Some Windows installs save under a Tencent wrapper directory, e.g.
+            # E:\Tencent\Weixin\xwechat_files or ~/Documents/Tencent/WeChat/...
+            base / "Tencent" / "xwechat_files",
+            base / "Tencent" / "Weixin" / "xwechat_files",
+            base / "Tencent" / "WeChat" / "xwechat_files",
+            base / "Tencent" / "WeChat Files",
+            base / "Tencent Files" / "xwechat_files",
+            base / "Documents" / "Tencent" / "xwechat_files",
+            base / "Documents" / "Tencent" / "Weixin" / "xwechat_files",
+            base / "Documents" / "Tencent" / "WeChat" / "xwechat_files",
+            base / "Documents" / "Tencent Files" / "xwechat_files",
         ])
     return variants
+
+
+def _windows_tencent_nested_xwechat_paths() -> list[Path]:
+    """Shallow scan Tencent wrapper folders for xwechat_files.
+
+    Users often move WeChat storage to a custom directory whose visible parent
+    is just "Tencent" or "Tencent Files"; the actual xwechat_files folder can
+    sit one level below a product/account folder. Keep this bounded so startup
+    never walks a whole drive.
+    """
+    if not IS_WINDOWS:
+        return []
+    home = Path.home()
+    seeds: list[Path] = []
+    for base in [
+        home,
+        home / "Documents",
+        home / "OneDrive" / "Documents",
+        home / "OneDrive - Personal" / "Documents",
+        *_windows_drive_roots(),
+    ]:
+        seeds.extend([
+            base / "Tencent",
+            base / "Tencent Files",
+            base / "Weixin",
+            base / "WeChat",
+        ])
+
+    out: list[Path] = []
+    for seed in _dedupe_paths(seeds):
+        try:
+            if not seed.exists():
+                continue
+        except (PermissionError, OSError):
+            continue
+        out.extend(_windows_xwechat_variants(seed, include_base=False))
+        entries = _safe_listdir(seed, timeout_s=0.4)
+        if not entries:
+            continue
+        for child in entries[:80]:
+            try:
+                if not child.is_dir():
+                    continue
+            except (PermissionError, OSError):
+                continue
+            out.extend(_windows_xwechat_variants(child, include_base=False))
+    return out
 
 
 def _windows_registry_xwechat_search_paths() -> list[Path]:
@@ -161,6 +219,9 @@ def _windows_xwechat_search_paths() -> list[Path]:
     paths.extend(_windows_registry_xwechat_search_paths())
     for root in _windows_drive_roots():
         paths.extend(_windows_xwechat_variants(root, include_base=False))
+    paths.extend(_windows_xwechat_variants(home, include_base=False))
+    paths.extend(_windows_xwechat_variants(home / "Documents", include_base=False))
+    paths.extend(_windows_tencent_nested_xwechat_paths())
     paths += [
         home / "Documents" / "xwechat_files",
         home / "OneDrive" / "Documents" / "xwechat_files",
@@ -208,17 +269,59 @@ def _wechat_root_env_paths() -> list[Path]:
     return out
 
 
+def _wechat_root_config_paths() -> list[Path]:
+    """User-saved WeChat data roots from Murmur's UI.
+
+    Unlike MURMUR_WECHAT_ROOT, this works for non-technical users because the
+    onboarding screen can save the path into ~/.murmur/config.json.
+    """
+    cfg = load_config()
+    raw = cfg.get("wechat_roots", [])
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    out: list[Path] = []
+    for item in raw:
+        if not isinstance(item, str) or not item.strip():
+            continue
+        p = Path(os.path.expandvars(os.path.expanduser(item.strip().strip('"'))))
+        if IS_WINDOWS:
+            out.extend(_windows_xwechat_variants(p))
+        else:
+            out.append(p)
+    return _dedupe_paths(out)
+
+
 def wechat_search_paths() -> list[Path]:
     """All candidate WeChat data roots Murmur will inspect."""
     env_candidates = _wechat_root_env_paths()
     if env_candidates and os.environ.get("MURMUR_WECHAT_ROOT_ONLY", "").strip().lower() in {"1", "true", "yes"}:
         return _dedupe_paths(env_candidates)
-    raw_candidates = env_candidates + (
+    raw_candidates = env_candidates + _wechat_root_config_paths() + (
         _windows_xwechat_search_paths() if IS_WINDOWS
         else _mac_xwechat_search_paths() if IS_MAC
         else []
     )
     return _dedupe_paths(raw_candidates)
+
+
+def save_wechat_root(path: str) -> Path:
+    """Persist a manually selected xwechat_files or wxid_* directory."""
+    p = Path(os.path.expandvars(os.path.expanduser(path.strip().strip('"'))))
+    cfg = load_config()
+    roots = cfg.get("wechat_roots", [])
+    if isinstance(roots, str):
+        roots = [roots]
+    if not isinstance(roots, list):
+        roots = []
+    roots_s = [str(Path(os.path.expandvars(os.path.expanduser(str(x).strip().strip('"'))))) for x in roots if str(x).strip()]
+    p_s = str(p)
+    if p_s not in roots_s:
+        roots_s.insert(0, p_s)
+    cfg["wechat_roots"] = roots_s[:8]
+    save_config(cfg)
+    return p
 
 
 def _safe_listdir(p: Path, timeout_s: float = 1.5) -> Optional[list[Path]]:
@@ -669,7 +772,7 @@ def detect_capabilities() -> Capabilities:
     if not has_install and IS_WINDOWS:
         notes.append("没找到 Weixin.exe / WeChat.exe，也没检测到正在运行的微信进程 — 请确保微信已安装并打开")
     if IS_WINDOWS and has_install and not weixin_running:
-        notes.append("微信未在运行 — Windows 抓密钥前请先打开微信并保持已登录状态。")
+        notes.append("微信未在运行 — Windows 抓密钥前请先打开微信，退出到登录页但不要关闭程序。")
 
     return Capabilities(
         can_decrypt_db=can_decrypt and has_data,

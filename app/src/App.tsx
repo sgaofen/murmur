@@ -155,7 +155,11 @@ export default function App() {
       body = <YearbookPage friendId={route.id} onBack={() => go(`friend/${route.id}`)} />;
       break;
     default:
-      body = <HomePage dark={dark} onOpenFriend={(id) => go(`friend/${id}`)} />;
+      body = <HomePage
+        dark={dark}
+        onOpenFriend={(id) => go(`friend/${id}`)}
+        onOpenOnboarding={() => setOnboarding(true)}
+      />;
   }
 
   return (

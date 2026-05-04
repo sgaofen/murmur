@@ -2142,6 +2142,13 @@ def get_store(args) -> EchoStore:
 
 
 def main(argv=None):
+    if argv is None and getattr(sys, "frozen", False) and len(sys.argv) == 1:
+        # Packaged users sometimes find etcli.exe and double-click it when the
+        # app says "backend did not start". With argparse's required subcommand
+        # that used to flash a console and exit with code 2, which looked like
+        # a crash. In a frozen bundle, no-arg launch should do the useful thing:
+        # start the local API server on the default port.
+        argv = ["serve"]
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--data-dir", help="echotrace 解密后的数据目录（默认自动检测）")
     common.add_argument("--pretty", action="store_true", help="美化 JSON 输出")
@@ -3147,13 +3154,25 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
 
         if path == "/api/info":
             if self.store is None:
+                diagnose_hint = "no decrypted data — run extract-key + refresh to bootstrap"
+                try:
+                    profiles = _paths.discover_wechat_profiles()
+                    caps = _paths.detect_capabilities()
+                    if not profiles:
+                        diagnose_hint = "未找到微信数据目录；请确认微信已在本机登录，或在微信设置里查看文件管理路径。"
+                    elif not (_paths.load_config().get("decrypt_key") or (Path.home() / ".murmur" / "decrypted_keys.json").exists()):
+                        diagnose_hint = "已找到微信数据，但还没有解密密钥；请按引导抓取密钥。"
+                    elif caps.can_decrypt_db:
+                        diagnose_hint = "已找到微信数据和密钥，但尚未成功解密；请点击更新/解密。"
+                except Exception:
+                    pass
                 return self._send_json({
                     "data_dir": None,
                     "self_wxid": None,
                     "version": APP_VERSION,
                     "bootstrap": True,
                     "needs_onboarding": True,
-                    "reason": "no decrypted data — run extract-key + refresh to bootstrap",
+                    "reason": diagnose_hint,
                 })
             return self._send_json({
                 "data_dir": str(self.store.dir),
@@ -3552,7 +3571,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
 
         # Bootstrap endpoints that work even when store is None (no decrypted data yet)
         # Mac onboarding adds a few extra (resign-wechat, open-fda, open-folder); keep them whitelisted.
-        BOOTSTRAP_POSTS = {"/api/refresh", "/api/save-key", "/api/extract-key",
+        BOOTSTRAP_POSTS = {"/api/refresh", "/api/save-key", "/api/extract-key", "/api/wechat-root",
                            "/api/open-folder", "/api/resign-wechat", "/api/open-fda"}
         if self.store is None and path not in BOOTSTRAP_POSTS:
             return self._send_json({
@@ -3560,6 +3579,42 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 "message": "解密数据未准备好。请先抓 key 再解密。",
                 "needs_onboarding": True,
             }, status=503)
+
+        if path == "/api/wechat-root":
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length) if length else b"{}"
+            opts = json.loads(body.decode("utf-8") or "{}")
+            root = (opts.get("path") or "").strip()
+            if not root:
+                return self._send_json({"ok": False, "error": "请粘贴微信「文件管理」里打开的文件夹路径"}, 400)
+            try:
+                saved = _paths.save_wechat_root(root)
+                profiles = _paths.discover_wechat_profiles()
+                matched = [
+                    {
+                        "wxid": p.wxid,
+                        "wxid_short": p.wxid_short,
+                        "encrypted_root": str(p.encrypted_root),
+                        "decrypted_root": str(_paths.decrypted_root_for(p)),
+                        "has_decrypted_data": (_paths.decrypted_root_for(p, must_exist=True) is not None),
+                    }
+                    for p in profiles
+                ]
+                if not matched:
+                    return self._send_json({
+                        "ok": False,
+                        "saved": str(saved),
+                        "error": "已保存路径，但里面还没找到 wxid_*/db_storage。请确认粘贴的是包含 xwechat_files 的路径，或直接粘贴 wxid_... 账号文件夹。",
+                        "wechat_search_roots": [str(p) for p in _paths.wechat_search_paths()],
+                    })
+                return self._send_json({
+                    "ok": True,
+                    "saved": str(saved),
+                    "profiles": matched,
+                    "wechat_search_roots": [str(p) for p in _paths.wechat_search_paths()],
+                })
+            except Exception as e:
+                return self._send_json({"ok": False, "error": f"{type(e).__name__}: {e}"}, 500)
 
         if path == "/api/refresh":
             # Run the decrypt pipeline; dispatches via etcli sub-task helper (frozen vs dev aware)
@@ -4369,10 +4424,18 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                                    capture_output=True, text=True, timeout=120)
                 dt = round((_time.time() - t0) * 1000)
                 if r.returncode != 0:
+                    err_blob = ((r.stdout or "") + "\n" + (r.stderr or "")).strip()
+                    err_l = err_blob.lower()
+                    if r.returncode == -128 or "user canceled" in err_l or "用户已取消" in err_l:
+                        msg = "重签名被 macOS 系统授权窗口取消了。请重新点击重签名，在弹出的系统窗口里输入这台 Mac 的开机密码（不是 Apple ID）。"
+                    elif "operation not permitted" in err_l or "permission" in err_l:
+                        msg = "重签名被系统权限拦截。请先把 Murmur 拖到 Applications，给 Murmur 完全磁盘访问权限，完全退出后重开再试。"
+                    else:
+                        msg = "codesign 重签名失败。请确认 WeChat 已退出、Murmur 在 Applications 里运行，并在系统授权窗口输入开机密码。"
                     return self._send_json({
                         "ok": False,
-                        "error": "codesign 失败 — 用户取消授权？",
-                        "stderr": r.stderr[-500:],
+                        "error": msg,
+                        "stderr": err_blob[-800:],
                         "log": steps_log,
                         "ms": dt,
                     })

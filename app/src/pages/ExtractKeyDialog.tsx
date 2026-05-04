@@ -313,6 +313,7 @@ function Success({ keyHex, macKeysCount, isMac, onClose }: { keyHex: string | nu
 }
 
 function ErrorView({ isMac, error, log, onRetry }: { isMac: boolean; error: string; log: string; onRetry: () => void }) {
+  const hookInstallFailed = !isMac && /hook (setup|install) failed|wx_key\.dll|注入到微信进程/i.test(`${error}\n${log}`);
   return (
     <>
       <div style={{
@@ -327,7 +328,9 @@ function ErrorView({ isMac, error, log, onRetry }: { isMac: boolean; error: stri
       <div className="et-meta" style={{ fontSize: 12, marginBottom: 14, lineHeight: 1.6 }}>
         {isMac
           ? '最常见原因：还没在 WeChat 里点开足够多的聊天/朋友圈，对应数据库 key 还没有进入内存。'
-          : '最常见原因：点开始后微信没有发生新的登录事件。Win 上 hook 等的是登录瞬间，微信一直保持已登录不会触发。'}
+          : hookInstallFailed
+            ? '这是 hook 安装失败，不是等登录超时。请先把 Murmur 安装目录加入杀毒/Defender 白名单，确认 wx_key.dll 没被隔离；然后重启电脑，微信和 Murmur 都用普通权限打开，再按登录页流程重试。'
+            : '最常见原因：点开始后微信没有发生新的登录事件。Win 上 hook 等的是登录瞬间，微信一直保持已登录不会触发。'}
       </div>
       <details style={{ marginBottom: 14 }}>
         <summary style={{ cursor: 'pointer', fontSize: 12, color: 'var(--et-mute)' }}>查看完整日志</summary>

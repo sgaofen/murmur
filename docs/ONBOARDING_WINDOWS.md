@@ -139,6 +139,8 @@ npm install -g @openai/codex
 
 - 微信程序还开着，并停在登录页；不要把窗口关掉。
 - 任务管理器里能看到 `Weixin.exe` 或 `WeChat.exe`。
+- 微信和 Murmur 权限等级一致。最稳是重启电脑后都普通打开；不要一个管理员权限、一个普通权限。
+- 把 Murmur 安装目录加入 Defender / 火绒 / 360 / QQ 管家白名单，并确认 `wx_key.dll` 没被隔离。
 - 如果微信装在 D 盘或自定义目录，v0.2.11 起只要进程正在运行，Murmur 也会继续抓 key；安装路径只影响“自动打开/重启微信”这类辅助动作。
 - 如果失败页有日志，把最后几行一起发 issue；Murmur 会显示 DLL/进程注入的真实错误。
 
@@ -173,9 +175,12 @@ Murmur 默认找：
 - `D:/Documents/xwechat_files/`
 - `~/Documents/xwechat_files/`
 - `~/OneDrive/Documents/xwechat_files/`
+- `Tencent/Weixin/xwechat_files`、`Tencent/WeChat/xwechat_files` 这类常见嵌套目录
 - 微信注册表里记录的自定义保存路径
 
-如果你的微信数据在别处，设环境变量：
+新版引导页可以直接粘贴路径：打开电脑微信 → 设置 → 文件管理 → 打开文件夹，把包含 `xwechat_files` 的路径粘进 Murmur。
+
+如果你的微信数据在别处，也可以设环境变量：
 
 ```powershell
 [Environment]::SetEnvironmentVariable("MURMUR_WECHAT_ROOT", "E:/path/to/xwechat_files", "User")

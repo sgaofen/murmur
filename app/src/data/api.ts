@@ -197,6 +197,16 @@ export async function saveKey(key: string): Promise<{ ok: boolean; path?: string
   });
 }
 
+export async function saveWeChatRoot(path: string): Promise<{
+  ok: boolean; saved?: string; error?: string; profiles?: Diagnose['profiles']; wechat_search_roots?: string[];
+}> {
+  return j('/api/wechat-root', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  });
+}
+
 export async function resignWechat(opts: { relaunch?: boolean } = {}): Promise<{
   ok: boolean; ms?: number; log?: string[]; error?: string; stderr?: string; next_steps?: string;
 }> {
