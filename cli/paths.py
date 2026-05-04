@@ -348,6 +348,77 @@ def _is_wxid_dir(p: Path) -> bool:
     return p.is_dir() and p.name.startswith("wxid_") and (p / "db_storage").exists()
 
 
+def _normalize_user_root(p: Path) -> Path:
+    """
+    Best-effort canonicalisation of a user-pasted path.
+
+    Users copy WeChat data paths from many places (Win Explorer, "open folder"
+    button, error messages, etc.) and rarely give the exact level Murmur wants.
+    Accept any of these forms and return a candidate root that
+    `discover_wechat_profiles` will recognise:
+
+        ─ ends with a file (e.g. `…/db_storage/session/session.db`)
+            → walk up until a wxid_* ancestor or stop at filesystem root
+        ─ ends with `db_storage`
+            → return parent (= the wxid_* dir)
+        ─ ends with `wxid_xxx`
+            → return as-is
+        ─ ends with `xwechat_files`
+            → return as-is (caller will list children for wxid_*)
+        ─ ends inside any wxid_* subtree
+            → return the wxid_* ancestor
+        ─ is a parent dir that contains an `xwechat_files` child
+            → return that `xwechat_files`
+
+    The returned Path is NOT required to exist (we don't validate here). The
+    caller's discover_wechat_profiles will skip dead paths gracefully. This is
+    purely about *intent* normalisation — guess what the user meant.
+    """
+    try:
+        # If the path points at a file, peel files off until we hit a directory.
+        # Don't follow symlinks aggressively — just resolve once for cleanup.
+        if p.exists() and not p.is_dir():
+            p = p.parent
+    except (OSError, PermissionError):
+        # If we can't stat (e.g. permission), trust the string as-is.
+        pass
+
+    # 1) Walk UP: find the nearest wxid_* ancestor whose direct child is `db_storage`.
+    #    This catches `…/wxid_xxx/db_storage`, `…/wxid_xxx/db_storage/session`,
+    #    `…/wxid_xxx/db_storage/session/session.db`, etc.
+    cur = p
+    for _ in range(8):  # depth budget — don't ascend past 8 levels
+        if cur.name.startswith("wxid_"):
+            # Verify it actually has db_storage; if not, keep going.
+            try:
+                if (cur / "db_storage").exists():
+                    return cur
+            except (OSError, PermissionError):
+                pass
+        if cur.parent == cur:  # filesystem root
+            break
+        cur = cur.parent
+
+    # 2) Walk DOWN: if the path itself contains an `xwechat_files` subdir, prefer that.
+    #    Catches users pasting `D:\Tencent\Weixin` (the parent of xwechat_files).
+    try:
+        if p.is_dir():
+            xwf = p / "xwechat_files"
+            if xwf.is_dir():
+                return xwf
+    except (OSError, PermissionError):
+        pass
+
+    # 3) If the leaf is `db_storage` regardless of ancestor matching, walk up one level
+    #    (covers the case where a non-wxid_* ancestor — e.g. the wxid was already
+    #    truncated — and we still want to recover the wxid level).
+    if p.name.lower() == "db_storage":
+        return p.parent
+
+    # 4) Default: trust the user. Returns the path as given.
+    return p
+
+
 def _wechat_root_env_paths() -> list[Path]:
     """Optional override for users with non-standard WeChat data locations.
 
@@ -362,7 +433,10 @@ def _wechat_root_env_paths() -> list[Path]:
         part = part.strip().strip('"')
         if not part:
             continue
-        out.append(Path(os.path.expandvars(os.path.expanduser(part))))
+        # Normalize so users can set MURMUR_WECHAT_ROOT to any level — including
+        # the common mistake of pointing at `…/db_storage` directly.
+        p = Path(os.path.expandvars(os.path.expanduser(part)))
+        out.append(_normalize_user_root(p))
     return out
 
 
@@ -383,6 +457,10 @@ def _wechat_root_config_paths() -> list[Path]:
         if not isinstance(item, str) or not item.strip():
             continue
         p = Path(os.path.expandvars(os.path.expanduser(item.strip().strip('"'))))
+        # Normalize legacy / user-pasted entries on read too — covers the case
+        # where save_wechat_root from a previous version stored an unnormalized
+        # `…/db_storage` style path. Then expand to xwechat_files variants.
+        p = _normalize_user_root(p)
         if IS_WINDOWS:
             out.extend(_windows_xwechat_variants(p))
         else:
@@ -403,9 +481,212 @@ def wechat_search_paths() -> list[Path]:
     return _dedupe_paths(raw_candidates)
 
 
+_SCAN_STATE: dict = {
+    "running": False,
+    "started_at": None,
+    "finished_at": None,
+    "drives_total": 0,
+    "drives_done": 0,
+    "current_path": "",
+    "dirs_scanned": 0,
+    "found": [],            # list of {path, kind: 'xwechat_files' | 'wxid'}
+    "error": None,
+    "cancelled": False,
+}
+_SCAN_LOCK = None  # lazy
+
+
+def get_scan_state() -> dict:
+    """Snapshot the current background scan progress (safe to read concurrently)."""
+    return {
+        "running": _SCAN_STATE["running"],
+        "started_at": _SCAN_STATE["started_at"],
+        "finished_at": _SCAN_STATE["finished_at"],
+        "drives_total": _SCAN_STATE["drives_total"],
+        "drives_done": _SCAN_STATE["drives_done"],
+        "current_path": _SCAN_STATE["current_path"],
+        "dirs_scanned": _SCAN_STATE["dirs_scanned"],
+        "found": list(_SCAN_STATE["found"]),
+        "error": _SCAN_STATE["error"],
+        "cancelled": _SCAN_STATE["cancelled"],
+    }
+
+
+def cancel_scan() -> None:
+    _SCAN_STATE["cancelled"] = True
+
+
+# Top-level dirs that are guaranteed not to host WeChat data and would
+# otherwise burn lots of time. Exact match (case-insensitive). Note that we
+# DON'T blindly skip "AppData" — WeChat 4.x has shipped builds that store data
+# in `%LOCALAPPDATA%\Tencent\xwechat`, so we keep that branch alive.
+_SCAN_SKIP_NAMES = {
+    "$recycle.bin",
+    "system volume information",
+    "windows",
+    "winsxs",
+    "windowsapps",
+    "program files",
+    "program files (x86)",
+    "programdata",
+    "msocache",
+    "perflogs",
+    "boot",
+    "recovery",
+    "node_modules",
+    ".git",
+    ".svn",
+    ".hg",
+    "__pycache__",
+    ".venv",
+    "venv",
+    ".tox",
+    ".idea",
+    ".vscode",
+    "target",        # Rust build output
+    "build",
+    "dist",
+    "out",
+    "cache",
+    "caches",
+    "tmp",
+    "temp",
+    "logs",
+}
+
+
+def scan_for_wechat_data_async(
+    *,
+    drives: list[Path] | None = None,
+    max_depth: int = 8,
+    on_progress: callable | None = None,
+) -> None:
+    """Run a non-admin file-name walk to find xwechat_files / wxid_* roots.
+
+    Updates `_SCAN_STATE` in-place. Designed to be called from a background
+    thread by the HTTP endpoint. NOT instant like Everything (which reads NTFS
+    MFT raw with admin), but with aggressive pruning typically 10–60s.
+
+    Found targets:
+      - any directory named `xwechat_files` (case-insensitive)
+      - any directory named `wxid_*` whose direct child `db_storage` exists
+
+    Skips: known-junk top-level dirs (Windows, Program Files, $Recycle.Bin),
+    common dev junk (node_modules, .git), cache dirs. Hidden + system attrs
+    on Win prune any dir below the candidate roots.
+    """
+    if not IS_WINDOWS:
+        # Linux / Mac branch is left for a separate implementation; the bug
+        # the user is hitting is Windows-only.
+        _SCAN_STATE["error"] = "scan_for_wechat_data is Windows-only"
+        return
+
+    drives = drives or _windows_drive_roots()
+    _SCAN_STATE.update({
+        "running": True,
+        "started_at": int(__import__("time").time()),
+        "finished_at": None,
+        "drives_total": len(drives),
+        "drives_done": 0,
+        "current_path": "",
+        "dirs_scanned": 0,
+        "found": [],
+        "error": None,
+        "cancelled": False,
+    })
+
+    def _maybe_progress():
+        if on_progress is not None:
+            try:
+                on_progress(get_scan_state())
+            except Exception:
+                pass
+
+    def _walk(start: Path, depth_left: int) -> None:
+        if _SCAN_STATE["cancelled"]:
+            return
+        try:
+            with os.scandir(start) as it:
+                children = list(it)
+        except (PermissionError, OSError, FileNotFoundError):
+            return
+        _SCAN_STATE["dirs_scanned"] += 1
+        if _SCAN_STATE["dirs_scanned"] % 50 == 0:
+            _SCAN_STATE["current_path"] = str(start)
+            _maybe_progress()
+
+        for entry in children:
+            if _SCAN_STATE["cancelled"]:
+                return
+            try:
+                if not entry.is_dir(follow_symlinks=False):
+                    continue
+            except OSError:
+                continue
+            name = entry.name
+            name_l = name.lower()
+            # Match before pruning so xwechat_files isn't accidentally skipped.
+            if name_l in {"xwechat_files", "wechat files"}:
+                _SCAN_STATE["found"].append({
+                    "path": entry.path,
+                    "kind": "xwechat_files",
+                    "via_drive": str(start.anchor) if hasattr(start, "anchor") else "",
+                })
+                # Continue WITHOUT descending — wxid_* live one level below
+                # but discover_wechat_profiles will pick them up from this candidate.
+                continue
+            if name.startswith("wxid_"):
+                # Cheap check: does it have db_storage? Avoid descending to
+                # confirm — discover_wechat_profiles validates anyway.
+                try:
+                    if (Path(entry.path) / "db_storage").exists():
+                        _SCAN_STATE["found"].append({
+                            "path": entry.path,
+                            "kind": "wxid",
+                        })
+                except (OSError, PermissionError):
+                    pass
+                continue  # never descend into a wxid_*; nothing useful for us inside
+            # Prune at top level only by exact-name match. We keep this list
+            # short on purpose — false-positive pruning is much worse than
+            # scanning a few extra dirs.
+            if depth_left <= 0:
+                continue
+            if name_l in _SCAN_SKIP_NAMES:
+                continue
+            if name.startswith("."):  # hidden / dotted (.git, .venv, .cache, …)
+                continue
+            _walk(Path(entry.path), depth_left - 1)
+
+    try:
+        for d in drives:
+            if _SCAN_STATE["cancelled"]:
+                break
+            _SCAN_STATE["current_path"] = str(d)
+            _maybe_progress()
+            _walk(d, max_depth)
+            _SCAN_STATE["drives_done"] += 1
+            _maybe_progress()
+    except Exception as e:
+        _SCAN_STATE["error"] = f"{type(e).__name__}: {e}"
+    finally:
+        _SCAN_STATE["running"] = False
+        _SCAN_STATE["finished_at"] = int(__import__("time").time())
+        _maybe_progress()
+
+
 def save_wechat_root(path: str) -> Path:
-    """Persist a manually selected xwechat_files or wxid_* directory."""
-    p = Path(os.path.expandvars(os.path.expanduser(path.strip().strip('"'))))
+    """Persist a manually selected xwechat_files or wxid_* directory.
+
+    Normalises the user input so that pasting any of these forms works:
+    - …/xwechat_files
+    - …/xwechat_files/wxid_xxx
+    - …/xwechat_files/wxid_xxx/db_storage          (← common: user pasted too deep)
+    - …/xwechat_files/wxid_xxx/db_storage/session/session.db (file)
+    - parent of an xwechat_files dir
+    """
+    raw = Path(os.path.expandvars(os.path.expanduser(path.strip().strip('"'))))
+    p = _normalize_user_root(raw)
     cfg = load_config()
     roots = cfg.get("wechat_roots", [])
     if isinstance(roots, str):
@@ -474,12 +755,41 @@ def discover_wechat_profiles() -> list[WeChatProfile]:
         if entries is None:
             _LAST_TCC_BLOCKED = True
             continue  # TCC-blocked or hung
+
+        # Two-pass walk: first look for wxid_* at the candidate level. If we
+        # find nothing AND the candidate has another `xwechat_files` (or any
+        # other xwechat_files-named) subdirectory, descend ONE more level.
+        # This covers WeChat 4.x installs that nest as
+        #     <root>/xwechat_files/xwechat_files/wxid_<id>/
+        # rather than the documented
+        #     <root>/xwechat_files/wxid_<id>/.
+        # Capped at depth 2 — we explicitly do NOT recurse arbitrary deep
+        # because that's the "scan everything" job and belongs in /api/scan-disks.
+        wxid_subs: list[Path] = []
+        nested_candidates: list[Path] = []
         for sub in entries:
             try:
-                if not _is_wxid_dir(sub):
-                    continue
+                if _is_wxid_dir(sub):
+                    wxid_subs.append(sub)
+                elif sub.is_dir() and sub.name.lower() in {"xwechat_files", "wechat files"}:
+                    nested_candidates.append(sub)
             except (PermissionError, OSError):
                 continue
+        if not wxid_subs and nested_candidates:
+            for nested in nested_candidates:
+                inner = _safe_listdir(nested)
+                if inner is None:
+                    continue
+                for sub in inner:
+                    try:
+                        if _is_wxid_dir(sub):
+                            wxid_subs.append(sub)
+                    except (PermissionError, OSError):
+                        continue
+                if wxid_subs:
+                    break  # one nested level is enough
+
+        for sub in wxid_subs:
             wxid_full = sub.name
             profile_key = str(sub)
             if profile_key in seen_profiles:
