@@ -14,6 +14,8 @@ from __future__ import annotations
 import json
 import os
 import platform
+import shutil
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -167,6 +169,100 @@ def _windows_tencent_nested_xwechat_paths() -> list[Path]:
     return out
 
 
+def _windows_everything_cli_candidates() -> list[Path]:
+    """Best-effort Everything ES locations.
+
+    Everything itself is fast because it indexes filesystem metadata instead of
+    walking directories. The optional ES command-line helper lets us reuse that
+    index when a user already has it installed, without making Murmur depend on
+    Everything or reading NTFS internals ourselves.
+    """
+    if not IS_WINDOWS:
+        return []
+    out: list[Path] = []
+    for name in ("es.exe", "es"):
+        found = shutil.which(name)
+        if found:
+            out.append(Path(found))
+    for env in ("ProgramFiles", "ProgramFiles(x86)", "LocalAppData"):
+        base = os.environ.get(env)
+        if not base:
+            continue
+        out.extend([
+            Path(base) / "Everything" / "es.exe",
+            Path(base) / "voidtools" / "Everything" / "es.exe",
+            Path(base) / "Programs" / "Everything" / "es.exe",
+        ])
+    return _dedupe_paths(out)
+
+
+def _run_everything_es(es_path: Path, search: str, *, timeout_s: float = 1.8) -> list[Path]:
+    """Query Everything's optional ES CLI and return path-like output lines."""
+    try:
+        if not es_path.exists():
+            return []
+    except (PermissionError, OSError):
+        return []
+    flags = 0
+    if IS_WINDOWS:
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    proc = None
+    # Newer ES builds support forcing UTF-8 console output. Fall back to the
+    # oldest common syntax if an older build rejects -cp.
+    for args in (["-cp", "65001", "-n", "120", search], ["-n", "120", search]):
+        try:
+            proc = subprocess.run(
+                [str(es_path), *args],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout_s,
+                creationflags=flags,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return []
+        # Return code 8 means the Everything search client is not running.
+        # Treat it as "not available" and fall back to our normal bounded scan.
+        if proc.returncode in (0, 1):
+            break
+        proc = None
+    if proc is None:
+        return []
+    out: list[Path] = []
+    for raw in proc.stdout.splitlines():
+        line = raw.strip().strip('"')
+        if not line or line.lower().startswith("filename,"):
+            continue
+        p = Path(line)
+        # ES can emit relative-looking text if a user has custom columns saved;
+        # only trust absolute Windows paths here.
+        if len(str(p)) >= 3 and str(p)[1:3] in (":\\", ":/"):
+            out.append(p)
+    return _dedupe_paths(out)
+
+
+def _windows_everything_xwechat_search_paths() -> list[Path]:
+    """Use Everything/ES if present to find moved WeChat data instantly."""
+    if not IS_WINDOWS:
+        return []
+    out: list[Path] = []
+    for es_path in _windows_everything_cli_candidates()[:4]:
+        # Search both the data root name and the account marker directory. Some
+        # users paste/share screenshots where only db_storage is visible.
+        for p in _run_everything_es(es_path, "xwechat_files"):
+            if p.name.lower() == "xwechat_files":
+                out.append(p)
+        for p in _run_everything_es(es_path, "db_storage"):
+            parent = p.parent
+            if parent.name.startswith("wxid_"):
+                out.append(parent)
+                out.append(parent.parent)
+        if out:
+            break
+    return _dedupe_paths(out)
+
+
 def _windows_registry_xwechat_search_paths() -> list[Path]:
     """Read WeChat's saved data directory hints from the registry when present."""
     if not IS_WINDOWS:
@@ -217,6 +313,7 @@ def _windows_xwechat_search_paths() -> list[Path]:
     paths: list[Path] = []
     home = Path.home()
     paths.extend(_windows_registry_xwechat_search_paths())
+    paths.extend(_windows_everything_xwechat_search_paths())
     for root in _windows_drive_roots():
         paths.extend(_windows_xwechat_variants(root, include_base=False))
     paths.extend(_windows_xwechat_variants(home, include_base=False))
