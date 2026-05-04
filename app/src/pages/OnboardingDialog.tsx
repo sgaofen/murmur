@@ -256,7 +256,7 @@ export function OnboardingDialog({ open, onClose, onDone }: Props) {
         <div style={{ padding: '14px 32px 28px' }}>
           {phase === 'welcome' && <Welcome onNext={startDiagnose} />}
           {phase === 'diagnose' && <Diagnosing />}
-          {phase === 'mac-no-data' && diag && <MacNoData diag={diag} onClose={onClose} />}
+          {phase === 'mac-no-data' && diag && <MacNoData diag={diag} onSaved={startDiagnose} onRetry={startDiagnose} onOpenSettings={openFDAAndWait} />}
           {phase === 'mac-paste-key' && diag && <MacPasteKey diag={diag} onSubmit={submitMacKey} />}
           {phase === 'mac-auto-extract' && diag && <MacAutoExtract diag={diag} onStart={startKeyExtract} onPaste={() => setPhase('mac-paste-key')} />}
           {phase === 'mac-resign-prompt' && diag && <MacResignPrompt diag={diag} onConsent={startResign} onPaste={() => setPhase('mac-paste-key')} />}
@@ -358,18 +358,94 @@ function CapabilityList({ diag }: { diag: Diagnose }) {
   );
 }
 
-function MacNoData({ diag, onClose }: { diag: Diagnose; onClose: () => void }) {
+function MacNoData({ diag, onSaved, onRetry, onOpenSettings }: {
+  diag: Diagnose;
+  onSaved: () => void;
+  onRetry: () => void;
+  onOpenSettings: () => void;
+}) {
+  const [path, setPath] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  async function submit() {
+    const cleaned = path.trim();
+    if (!cleaned) {
+      setMsg('请先粘贴一个路径。');
+      return;
+    }
+    setSaving(true);
+    setMsg(null);
+    try {
+      const r = await saveWeChatRoot(cleaned);
+      if (!r.ok) {
+        setMsg(r.error || '这个路径里没有找到微信数据。');
+        return;
+      }
+      setMsg(`✓ 已找到 ${r.profiles?.length || 1} 个微信账号，正在重新检测…`);
+      window.setTimeout(onSaved, 450);
+    } catch (e: any) {
+      setMsg(e?.message || String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
     <>
       <div className="et-serif" style={{ fontSize: 15, lineHeight: 1.7, color: 'var(--et-ink-soft)', marginBottom: 16 }}>
-        在 Mac 上没找到微信数据。两个选项：
+        Murmur 没在当前可读取的位置找到微信数据。通常是这几种情况：
       </div>
-      <ol style={{ paddingLeft: 20, lineHeight: 1.8, fontSize: 13, color: 'var(--et-ink)' }}>
-        <li>在这台 Mac 上登录一次微信，让它生成数据</li>
-        <li>从 Windows 拷过来：<code style={{ background: 'var(--et-paper-2)', padding: '2px 6px', borderRadius: 4, fontFamily: 'var(--et-mono)' }}>~/Documents/Murmur/decrypted/</code></li>
-      </ol>
+      <ul style={{ paddingLeft: 20, lineHeight: 1.8, fontSize: 13, color: 'var(--et-ink)', marginBottom: 14 }}>
+        <li>这台 Mac 还没登录过微信，或微信还没完成首次同步</li>
+        <li>macOS 权限挡住了微信容器目录，需要给 Murmur 完全磁盘访问</li>
+        <li>微信数据被迁移到了自定义目录，需要手动告诉 Murmur</li>
+      </ul>
       <CapabilityList diag={diag} />
-      <button onClick={onClose} style={{ ...primaryBtn, background: 'var(--et-ink)' }}>知道了</button>
+      <div style={{
+        padding: '12px 14px', background: 'var(--et-paper-2)',
+        border: '0.5px solid var(--et-line-2)', borderRadius: 8,
+        fontSize: 12.5, color: 'var(--et-ink-soft)', lineHeight: 1.7,
+        marginTop: 14, marginBottom: 12,
+      }}>
+        <div style={{ fontWeight: 600, color: 'var(--et-ink)', marginBottom: 6 }}>手动指定微信数据位置</div>
+        可以粘贴 <code>.../xwechat_files</code>、<code>.../wxid_xxx</code>、<code>.../db_storage</code>，Murmur 会自动向上/向下找正确层级。
+      </div>
+      <input
+        value={path}
+        onChange={(e) => setPath(e.target.value)}
+        placeholder="/Users/你/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files"
+        spellCheck={false}
+        onKeyDown={(e) => { if (e.key === 'Enter' && !saving) submit(); }}
+        style={{
+          all: 'unset', width: '100%', boxSizing: 'border-box',
+          padding: '10px 14px', borderRadius: 8,
+          border: '1px solid var(--et-line-2)', background: 'var(--et-paper-2)',
+          fontFamily: 'var(--et-mono)', fontSize: 12, color: 'var(--et-ink)',
+          marginBottom: 10,
+        }}
+      />
+      {msg && (
+        <div className="et-meta" style={{
+          color: msg.startsWith('✓') ? '#3a7a4f' : 'var(--et-rose)',
+          marginBottom: 12, whiteSpace: 'pre-wrap',
+        }}>{maskText(msg)}</div>
+      )}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 8 }}>
+        <button onClick={onRetry} style={{
+          ...primaryBtn, marginTop: 0, background: 'transparent',
+          color: 'var(--et-ink)', boxShadow: 'none', border: '1px solid var(--et-line-2)',
+        }}>重新检测</button>
+        <button onClick={onOpenSettings} style={{
+          ...primaryBtn, marginTop: 0, background: 'transparent',
+          color: 'var(--et-ink)', boxShadow: 'none', border: '1px solid var(--et-line-2)',
+        }}>打开权限设置</button>
+      </div>
+      <button onClick={submit} disabled={saving} style={{
+        ...primaryBtn,
+        opacity: saving ? 0.65 : 1,
+        cursor: saving ? 'wait' : 'pointer',
+      }}>{saving ? '正在检查…' : '保存路径并重新检测'}</button>
     </>
   );
 }

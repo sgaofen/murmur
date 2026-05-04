@@ -6,14 +6,14 @@ Murmur 默认只在本机读取和分析数据。只有你主动点击 AI 分析
 
 [下载最新版](https://github.com/sgaofen/murmur/releases/latest)
 
-当前推荐版本：`v0.2.15`
+当前推荐版本：`v0.2.18`
 
 ![Murmur 年代记](docs/screenshots/readme-home.png)
 
 ## 视频教程
 
-- [Mac 安装视频](https://github.com/sgaofen/murmur/releases/download/v0.2.15/Murmur_macOS_install_tutorial.mp4)
-- [Windows 安装视频](https://github.com/sgaofen/murmur/releases/download/v0.2.15/Murmur_Windows_install_tutorial.mp4)
+- [Mac 安装视频](https://github.com/sgaofen/murmur/releases/download/v0.2.18/Murmur_macOS_install_tutorial.mp4)
+- [Windows 安装视频](https://github.com/sgaofen/murmur/releases/download/v0.2.18/Murmur_Windows_install_tutorial.mp4)
 
 ## 能做什么
 
@@ -33,8 +33,8 @@ Murmur 默认只在本机读取和分析数据。只有你主动点击 AI 分析
 
 Windows 用户：
 
-- 推荐下载：`Murmur_0.2.15_x64-setup.exe`
-- 不推荐普通用户下载：`Murmur_0.2.15_x64_en-US.msi`
+- 推荐下载：`Murmur_0.2.18_x64-setup.exe`
+- 不推荐普通用户下载：`Murmur_0.2.18_x64_en-US.msi`
 
 Mac 用户：
 
@@ -45,7 +45,7 @@ Intel Mac 暂时没有安装包，需要从源码运行。
 
 ## Windows 安装
 
-1. 下载 `Murmur_0.2.15_x64-setup.exe`。
+1. 下载 `Murmur_0.2.18_x64-setup.exe`。
 2. 双击安装。
 3. 打开微信，退出到登录页，但不要关闭微信程序。
 4. 打开 Murmur，按引导点击「开始抓密钥」。
