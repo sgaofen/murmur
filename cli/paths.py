@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -471,9 +472,14 @@ def _wechat_root_config_paths() -> list[Path]:
 def wechat_search_paths() -> list[Path]:
     """All candidate WeChat data roots Murmur will inspect."""
     env_candidates = _wechat_root_env_paths()
+    config_candidates = _wechat_root_config_paths()
     if env_candidates and os.environ.get("MURMUR_WECHAT_ROOT_ONLY", "").strip().lower() in {"1", "true", "yes"}:
-        return _dedupe_paths(env_candidates)
-    raw_candidates = env_candidates + _wechat_root_config_paths() + (
+        # ROOT_ONLY is mainly for testing/support: do not scan default system
+        # locations, but still honor paths saved from the UI in this session.
+        # Otherwise a user could paste the correct path and still be trapped by
+        # a stale environment override.
+        return _dedupe_paths(env_candidates + config_candidates)
+    raw_candidates = env_candidates + config_candidates + (
         _windows_xwechat_search_paths() if IS_WINDOWS
         else _mac_xwechat_search_paths() if IS_MAC
         else []
@@ -1145,10 +1151,25 @@ def _check_wechat_hardened() -> Optional[bool]:
         import subprocess as _sp
         r = _sp.run(["codesign", "-d", "-v", str(main_exec)],
                     capture_output=True, text=True, timeout=5)
-        blob = (r.stdout + "\n" + r.stderr).lower()
-        return "(runtime)" in blob
+        blob = r.stdout + "\n" + r.stderr
+        return codesign_has_runtime_flag(blob)
     except Exception:
         return None
+
+
+def codesign_has_runtime_flag(blob: str) -> bool:
+    """Return True when `codesign -d -v` reports the hardened runtime flag.
+
+    Apple prints multiple flag shapes across macOS/codesign versions, for
+    example `flags=0x10000(runtime)` and `flags=0x10002(adhoc,runtime)`.
+    Matching only the literal `(runtime)` misses the second form.
+    """
+    text = (blob or "").lower()
+    for match in re.finditer(r"flags=[^\n()]*\(([^)]*)\)", text):
+        flags = {part.strip() for part in match.group(1).split(",")}
+        if "runtime" in flags:
+            return True
+    return False
 
 
 def _check_weixin_running() -> Optional[bool]:
