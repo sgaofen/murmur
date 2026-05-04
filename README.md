@@ -10,6 +10,11 @@ Murmur 默认只在本机读取和分析数据。只有你主动点击 AI 分析
 
 ![Murmur 年代记](docs/screenshots/readme-home.png)
 
+## 视频教程
+
+- [Mac 安装视频](https://github.com/sgaofen/murmur/releases/download/v0.2.13/Murmur_macOS_install_tutorial.mp4)
+- [Windows 安装视频](https://github.com/sgaofen/murmur/releases/download/v0.2.13/Murmur_Windows_install_tutorial.mp4)
+
 ## 能做什么
 
 - 自动读取本机微信数据，生成朋友、群聊、时间线和活跃度概览。
