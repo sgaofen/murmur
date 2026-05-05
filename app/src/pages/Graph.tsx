@@ -31,9 +31,6 @@ interface BackendNode {
   moments_back: number;
   moments_out: number;
   combined_score?: number;
-  // Topology fields populated by backend's _compute_friend_topology
-  cluster?: string | null;  // cluster_id ("core_1" etc) or null if isolated
-  bridge?: boolean;         // top betweenness-centrality node
 }
 
 interface BackendEdge {
@@ -58,10 +55,7 @@ interface BackendGraph {
   nodes: BackendNode[];
   edges: BackendEdge[];
   clusters: BackendCluster[];
-  stats: {
-    total_people: number; total_edges: number; private_count: number; groups: number;
-    core_circles?: number; bridges?: number;
-  };
+  stats: { total_people: number; total_edges: number; private_count: number; groups: number };
 }
 
 /**
@@ -111,8 +105,7 @@ function layoutNodes(graph: BackendGraph): GraphData {
     nodes.push({
       id: bn.id, name: bn.name,
       is_self: false, tier: bn.tier,
-      cluster: bn.cluster ?? null, color: TIER_COLORS[bn.tier] || '#9E9583',
-      bridge: !!bn.bridge,
+      cluster: null, color: TIER_COLORS[bn.tier] || '#9E9583',
       // Bigger nodes (was 4-14, now 8-26)
       size: Math.max(8, Math.min(26, bn.size * 0.35)),
       x, y, z,
@@ -126,15 +119,7 @@ function layoutNodes(graph: BackendGraph): GraphData {
     });
   });
 
-  // Backend's named_clusters (id/label/members) — pass through so the
-  // OverviewPanel can show top cluster names. GraphCluster's cx/cy/cz/color/n
-  // are optional now; cluster halos around individual nodes use cluster id
-  // directly via clusterColor() — no per-cluster centroid math needed.
-  const designClusters: GraphCluster[] = (graph.clusters || []).map(c => ({
-    id: c.id,
-    label: c.label,
-    members: c.members,
-  }));
+  const designClusters: GraphCluster[] = [];  // backend now sends [] by default
 
   const edges: GraphEdge[] = graph.edges.map(e => ({
     source: e.source,
@@ -151,19 +136,15 @@ function layoutNodes(graph: BackendGraph): GraphData {
     shared_group_count: e.shared_group_count,
   }));
 
-  // Stats — prefer backend's topology-derived counts when present
-  // (graph.stats.core_circles + .bridges), fall back to local count when
-  // hitting an older etcli that hasn't shipped the topology fields yet.
+  // Stats
   const ffEdges = edges.filter(e => e.source !== 'self' && e.target !== 'self').length;
   const isolates = nodes.filter(n => n.isolated).length;
-  const bridgesCount = graph.stats.bridges ?? nodes.filter(n => n.bridge).length;
-  const coreCirclesCount = graph.stats.core_circles ?? designClusters.length;
   const stats = {
     people: nodes.length,
     edges: edges.length,
-    bridges: bridgesCount,
+    bridges: 0,  // TODO: real bridge detection
     isolates,
-    clusters: coreCirclesCount,
+    clusters: designClusters.length,
     ffEdges,
   };
 

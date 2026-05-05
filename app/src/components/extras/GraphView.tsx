@@ -38,13 +38,9 @@ export interface GraphEdge {
 export interface GraphCluster {
   id: string;
   label: string;
-  // Visual positioning fields are optional — we currently only render cluster
-  // membership via per-node halos (clusterColor) + names in OverviewPanel,
-  // not as 3D bubbles. Backend's _compute_friend_topology emits id/label only.
-  cx?: number; cy?: number; cz?: number;
-  color?: string;
-  n?: number;
-  members?: string[];
+  cx: number; cy: number; cz: number;
+  color: string;
+  n: number;
 }
 export interface GraphData {
   nodes: GraphNode[];
@@ -125,77 +121,6 @@ interface Props {
   height?: number;
 }
 
-/** Map a cluster id (e.g., "core_3") to a stable pastel HSL color. Different
- *  clusters get visually distinct hues so members can be grouped at a glance,
- *  but lightness is high to keep the rings calm next to tier colors. */
-function clusterColor(clusterId: string | null | undefined): string {
-  if (!clusterId) return 'rgba(0,0,0,0)';
-  // Hash the id to a hue. djb2 is fine — short ids, no collisions in practice.
-  let h = 5381;
-  for (let i = 0; i < clusterId.length; i++) {
-    h = ((h * 33) ^ clusterId.charCodeAt(i)) | 0;
-  }
-  const hue = ((h % 360) + 360) % 360;
-  return `hsl(${hue}, 65%, 70%)`;
-}
-
-function clusterHue(clusterId: string): number {
-  let h = 5381;
-  for (let i = 0; i < clusterId.length; i++) h = ((h * 33) ^ clusterId.charCodeAt(i)) | 0;
-  return ((h % 360) + 360) % 360;
-}
-
-/** Andrew's monotone-chain convex hull, returns vertices in CCW order. */
-function convexHull(pts: { x: number; y: number }[]): { x: number; y: number }[] {
-  if (pts.length < 3) return pts.slice();
-  const sorted = [...pts].sort((a, b) => a.x - b.x || a.y - b.y);
-  const cross = (o: { x: number; y: number }, a: { x: number; y: number }, b: { x: number; y: number }) =>
-    (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
-  const lower: typeof sorted = [];
-  for (const p of sorted) {
-    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
-    lower.push(p);
-  }
-  const upper: typeof sorted = [];
-  for (let i = sorted.length - 1; i >= 0; i--) {
-    const p = sorted[i];
-    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
-    upper.push(p);
-  }
-  upper.pop(); lower.pop();
-  return lower.concat(upper);
-}
-
-/** Tight hull path: hull around node centers, expanded outward by exactly one
- *  small fixed margin (6 px). Smoothed via Catmull-Rom→Bezier so the line
- *  reads as a continuous outline, not a polygon. */
-function tightHullPath(pts: { x: number; y: number }[], margin = 6): string {
-  const hull = convexHull(pts);
-  if (hull.length < 3) return '';
-  const cx = hull.reduce((s, p) => s + p.x, 0) / hull.length;
-  const cy = hull.reduce((s, p) => s + p.y, 0) / hull.length;
-  const out = hull.map(p => {
-    const dx = p.x - cx, dy = p.y - cy;
-    const d = Math.hypot(dx, dy) || 1;
-    return { x: p.x + (dx / d) * margin, y: p.y + (dy / d) * margin };
-  });
-  const n = out.length;
-  const path: string[] = [`M${out[0].x.toFixed(1)},${out[0].y.toFixed(1)}`];
-  for (let i = 0; i < n; i++) {
-    const p0 = out[(i - 1 + n) % n];
-    const p1 = out[i];
-    const p2 = out[(i + 1) % n];
-    const p3 = out[(i + 2) % n];
-    const c1x = p1.x + (p2.x - p0.x) / 6;
-    const c1y = p1.y + (p2.y - p0.y) / 6;
-    const c2x = p2.x - (p3.x - p1.x) / 6;
-    const c2y = p2.y - (p3.y - p1.y) / 6;
-    path.push(`C${c1x.toFixed(1)},${c1y.toFixed(1)} ${c2x.toFixed(1)},${c2y.toFixed(1)} ${p2.x.toFixed(1)},${p2.y.toFixed(1)}`);
-  }
-  path.push('Z');
-  return path.join(' ');
-}
-
 function edgeKey(edge: Pick<GraphEdge, 'source' | 'target'> | null | undefined): string {
   if (!edge) return '';
   return [edge.source, edge.target].sort().join('__');
@@ -228,10 +153,6 @@ export function GraphView({
 
   const [hover, setHover] = useState<string | null>(null);
   const [hoverEdge, setHoverEdge] = useState<{ source: string; target: string } | null>(null);
-  // Spotlight: explicit "show me ONLY this cluster" / "show me how this bridge
-  // connects everyone" mode. Triggered from OverviewPanel chips. Dims everything
-  // outside the spotlight set; doesn't change selection.
-  const [spotlight, setSpotlight] = useState<{ kind: 'cluster' | 'bridge'; id: string } | null>(null);
 
   const pauseAutoRotateForUser = useCallback(() => {
     setUserInteracted(true);
@@ -297,7 +218,6 @@ export function GraphView({
         case 'Escape':
           onSelect(null);
           if (onSelectEdge) onSelectEdge(null);
-          setSpotlight(null);
           shouldPauseAutoRotate = false;
           break;
         default: handled = false;
@@ -614,45 +534,6 @@ export function GraphView({
     return s;
   }, [selected, data.edges]);
 
-  /** When spotlighting a bridge, return the up-to-2 clusters whose members
-   *  the bridge connects to most heavily. These are the "two groups" the
-   *  bridge stitches together. */
-  const bridgeClusters = useMemo(() => {
-    if (!spotlight || spotlight.kind !== 'bridge') return [] as string[];
-    const counts = new Map<string, number>();
-    data.edges.forEach(e => {
-      const otherId = e.source === spotlight.id ? e.target
-                  : e.target === spotlight.id ? e.source : null;
-      if (!otherId || otherId === 'self') return;
-      const other = data.nodes.find(n => n.id === otherId);
-      if (!other?.cluster) return;
-      counts.set(other.cluster, (counts.get(other.cluster) || 0) + 1);
-    });
-    return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 2).map(([cid]) => cid);
-  }, [spotlight, data]);
-
-  // Spotlight set: which nodes should be considered "in focus".
-  const spotlightSet = useMemo(() => {
-    if (!spotlight) return null;
-    const s = new Set<string>(['self']);
-    if (spotlight.kind === 'cluster') {
-      const c = data.clusters.find(c => c.id === spotlight.id);
-      if (c) (c.members || []).forEach(m => s.add(m));
-      data.nodes.forEach(n => { if (n.cluster === spotlight.id) s.add(n.id); });
-    } else {
-      s.add(spotlight.id);
-      const bridgeClusterSet = new Set(bridgeClusters);
-      data.nodes.forEach(n => {
-        if (n.cluster && bridgeClusterSet.has(n.cluster)) s.add(n.id);
-      });
-      data.edges.forEach(e => {
-        if (e.source === spotlight.id) s.add(e.target);
-        if (e.target === spotlight.id) s.add(e.source);
-      });
-    }
-    return s;
-  }, [spotlight, bridgeClusters, data.clusters, data.nodes, data.edges]);
-
   const sortedEdges = useMemo(
     () => [...data.edges].sort((a, b) => {
       const aSelected = selectedEdgeKey && edgeKey(a) === selectedEdgeKey;
@@ -705,84 +586,25 @@ export function GraphView({
           </filter>
         </defs>
 
-        {/* Legacy cluster halos — only renders when backend ships explicit
-            centroid coords (cx/cy/cz). Current backend does not; the active
-            visualization is the spotlight hull below. */}
-        {data.clusters.filter(c => typeof c.cx === 'number').map(c => {
-          const center = project({ x: c.cx!, y: c.cy!, z: c.cz! }, rotY, rotX, zoom, pan.x, pan.y, W, H);
-          const r = 80 + (c.n || 0) * 1.8;
+        {/* Cluster halos */}
+        {data.clusters.map(c => {
+          const center = project({ x: c.cx, y: c.cy, z: c.cz }, rotY, rotX, zoom, pan.x, pan.y, W, H);
+          const r = 80 + c.n * 1.8;
           return (
             <g key={c.id}>
               <circle cx={center.x} cy={center.y} r={r * center.depth}
                 fill={c.color} opacity={dark ? 0.08 : 0.06} />
               <circle cx={center.x} cy={center.y} r={r * center.depth}
                 fill="none" stroke={c.color} strokeOpacity={dark ? 0.32 : 0.25} strokeWidth="0.5" strokeDasharray="3 4" />
+              <text x={center.x} y={center.y - r * center.depth - 6}
+                fontFamily="var(--et-sans)" fontSize="10.5" fontWeight="600"
+                letterSpacing="0.18em" textAnchor="middle"
+                fill={dark ? 'rgba(244,236,218,0.55)' : 'rgba(26,43,74,0.55)'}>
+                {c.label.length > 14 ? c.label.slice(0, 14) + '…' : c.label}
+              </text>
             </g>
           );
         })}
-
-        {/* Spotlight: tight hull around the focal cluster(s). Margin = 6 px,
-            single layer, solid stroke, very subtle fill. For bridge spotlight,
-            two hulls in DIFFERENT colors (one per connected cluster). */}
-        {spotlight && (() => {
-          const targetClusterIds = spotlight.kind === 'cluster'
-            ? [spotlight.id]
-            : bridgeClusters;
-          return targetClusterIds.map(cid => {
-            const memberIds = data.nodes
-              .filter(n => n.cluster === cid && !n.is_self)
-              .map(n => n.id);
-            const pts = memberIds
-              .map(id => projById[id])
-              .filter(Boolean)
-              .map(n => ({ x: n.proj.x, y: n.proj.y }));
-            if (pts.length < 3) return null;
-            const d = tightHullPath(pts, 8);
-            if (!d) return null;
-            const hue = clusterHue(cid);
-            return (
-              <path key={`hull-${cid}`} d={d}
-                fill={`hsl(${hue}, 70%, 55%)`}
-                fillOpacity={0.05}
-                stroke={`hsl(${hue}, 75%, 50%)`}
-                strokeOpacity={0.95}
-                strokeWidth={1.8} />
-            );
-          });
-        })()}
-
-        {/* Bridge: highlight the TWO lines connecting bridge → strongest
-            neighbor in each connected cluster. Bright, thick, no animation. */}
-        {spotlight?.kind === 'bridge' && (() => {
-          const bridgeNode = projById[spotlight.id];
-          if (!bridgeNode) return null;
-          return bridgeClusters.map(cid => {
-            const cands = data.edges
-              .map(e => {
-                const otherId = e.source === spotlight.id ? e.target
-                            : e.target === spotlight.id ? e.source : null;
-                if (!otherId || otherId === 'self') return null;
-                const other = data.nodes.find(n => n.id === otherId);
-                if (other?.cluster !== cid) return null;
-                return { otherId, weight: e.weight };
-              })
-              .filter((x): x is { otherId: string; weight: number } => !!x)
-              .sort((a, b) => b.weight - a.weight);
-            if (!cands.length) return null;
-            const otherProj = projById[cands[0].otherId];
-            if (!otherProj) return null;
-            const hue = clusterHue(cid);
-            return (
-              <line key={`beam-${cid}`}
-                x1={bridgeNode.proj.x} y1={bridgeNode.proj.y}
-                x2={otherProj.proj.x} y2={otherProj.proj.y}
-                stroke={`hsl(${hue}, 80%, 50%)`}
-                strokeWidth={4}
-                strokeOpacity={0.95}
-                strokeLinecap="round" />
-            );
-          });
-        })()}
 
         {/* Edges */}
         {sortedEdges.map((e, i) => {
@@ -809,14 +631,6 @@ export function GraphView({
           // Hovered edges always pop above the dim layer.
           let op = isSelectedEdge ? 1 : (isHoverEdge ? 1 : (isHighlight ? Math.min(1, baseOp * 2.5) : baseOp));
           if (selected && !isHighlight && !isHoverEdge) op = baseOp * 0.18;
-          // Spotlight: when active, only edges whose BOTH endpoints are in
-          // the spotlight set keep full visibility. Bridge spotlight thus
-          // shows the bridge's actual connecting lines popping; cluster
-          // spotlight shows the inter-cluster traffic.
-          if (spotlightSet) {
-            const inSpot = spotlightSet.has(e.source) && spotlightSet.has(e.target);
-            if (!inSpot && !isSelectedEdge && !isHoverEdge) op = Math.min(op, 0.06);
-          }
           const widthMul = isSelectedEdge ? 3.4 : (isHoverEdge ? 2.4 : (isHighlight ? 1.8 : 1));
           const edgeStroke = (isSelectedEdge || isHoverEdge) ? '#FFC857' : s.stroke;
           const edgeFilter = isSelectedEdge ? 'url(#edge-selected-glow)' : undefined;
@@ -891,9 +705,7 @@ export function GraphView({
           const isHov = hover === n.id;
           const isNeighbor = neighbors.has(n.id);
           const isEdgeEndpoint = selectedEdgeEndpoints.has(n.id);
-          const inSpotlight = !spotlightSet || spotlightSet.has(n.id);
-          const dim = (!!selected && !isSel && !isNeighbor && !isEdgeEndpoint && !n.is_self)
-                   || (!!spotlightSet && !inSpotlight && !n.is_self);
+          const dim = !!selected && !isSel && !isNeighbor && !isEdgeEndpoint && !n.is_self;
           const op = dim ? 0.32 : 1;
           const color = n.color || TIER_COLORS[n.tier] || '#9E9583';
           return (
@@ -917,29 +729,9 @@ export function GraphView({
                 <circle cx={n.proj.x} cy={n.proj.y} r={r + 7}
                   fill="none" stroke="#FFC857" strokeWidth="2.4" opacity="0.95" />
               )}
-              {/* Cluster halo — soft pastel ring colored by cluster id, sits BEHIND
-                  the tier-color node fill so it reads as group membership without
-                  competing with tier color. */}
-              {n.cluster && !n.is_self && (
-                <circle cx={n.proj.x} cy={n.proj.y} r={r + 8}
-                  fill="none" stroke={clusterColor(n.cluster)}
-                  strokeWidth="3.5" opacity="0.5" />
-              )}
-              {/* Bridge marker — bold dashed orange ring + animated pulse glow.
-                  Three nodes max (top-betweenness), so making them unmistakable
-                  is fine; it's the structural backbone of the user's network. */}
-              {n.bridge && !n.is_self && (
-                <>
-                  <circle cx={n.proj.x} cy={n.proj.y} r={r + 14}
-                    fill="none" stroke="#FF6B47" strokeWidth="2.5"
-                    strokeDasharray="4 3" opacity="0.95">
-                    <animate attributeName="r"
-                      values={`${r + 12};${r + 18};${r + 12}`}
-                      dur="2.4s" repeatCount="indefinite" />
-                    <animate attributeName="opacity"
-                      values="0.95;0.4;0.95" dur="2.4s" repeatCount="indefinite" />
-                  </circle>
-                </>
+              {n.bridge && (
+                <circle cx={n.proj.x} cy={n.proj.y} r={r + 2}
+                  fill="none" stroke="#E8B57A" strokeWidth="1.4" opacity="0.85" />
               )}
               <circle cx={n.proj.x} cy={n.proj.y} r={r}
                 fill={color}
@@ -962,20 +754,6 @@ export function GraphView({
                   {n.is_self ? '你' : displayName(n.id, n.name)}
                 </text>
               )}
-              {/* "桥" pill below the name for bridge nodes — extra-explicit so the
-                  user can spot the structural backbone at a glance. */}
-              {n.bridge && !n.is_self && !dim && (
-                <text x={n.proj.x} y={n.proj.y + r + 28}
-                  textAnchor="middle"
-                  fontFamily="var(--et-sans)"
-                  fontSize={10} fontWeight={700}
-                  fill="#FF6B47"
-                  stroke={dark ? 'rgba(11,15,34,0.85)' : 'rgba(247,241,230,0.95)'}
-                  strokeWidth={3} paintOrder="stroke fill"
-                  style={{ pointerEvents: 'none' }}>
-                  ✦ 桥梁
-                </text>
-              )}
             </g>
           );
         })}
@@ -986,57 +764,7 @@ export function GraphView({
       )}
 
       <Legend dark={dark} />
-      <OverviewPanel data={data} dark={dark}
-                     spotlight={spotlight}
-                     onSpotlight={setSpotlight} />
-
-      {/* Spotlight banner — shown only when a cluster or bridge is pinned.
-          Provides explicit "exit spotlight" affordance + names what's in focus. */}
-      {spotlight && (
-        <div style={{
-          position: 'absolute', left: '50%', top: 24,
-          transform: 'translateX(-50%)',
-          display: 'flex', alignItems: 'center', gap: 12,
-          padding: '8px 14px 8px 16px', borderRadius: 999,
-          background: dark ? 'rgba(20,24,42,0.85)' : 'rgba(251,246,238,0.95)',
-          border: `0.5px solid ${dark ? 'rgba(244,236,218,0.2)' : 'rgba(26,43,74,0.18)'}`,
-          boxShadow: '0 4px 16px rgba(20,24,42,0.18)',
-          backdropFilter: 'blur(10px)',
-          fontFamily: 'var(--et-sans)',
-          color: dark ? '#F4ECDA' : '#1A2B4A',
-          zIndex: 50,
-        }}>
-          {spotlight.kind === 'cluster' ? (
-            <>
-              <span style={{ width: 10, height: 10, borderRadius: '50%',
-                background: clusterColor(spotlight.id) }} />
-              <span style={{ fontSize: 13, fontWeight: 600 }}>
-                聚焦：{(data.clusters.find(c => c.id === spotlight.id)?.label) || spotlight.id}
-              </span>
-            </>
-          ) : (
-            <>
-              <span style={{ color: '#FF6B47', fontSize: 14 }}>✦</span>
-              <span style={{ fontSize: 13, fontWeight: 600 }}>
-                聚焦桥梁：{displayName(spotlight.id,
-                  data.nodes.find(n => n.id === spotlight.id)?.name || spotlight.id)}
-                <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 400, opacity: 0.7 }}>
-                  （{(spotlightSet?.size || 1) - 1} 人通过 ta 相连）
-                </span>
-              </span>
-            </>
-          )}
-          <button onClick={() => setSpotlight(null)}
-            title="退出聚焦 (Esc)"
-            style={{
-              all: 'unset', cursor: 'pointer',
-              width: 22, height: 22, borderRadius: '50%',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              fontSize: 14, color: dark ? '#F4ECDA' : '#1A2B4A',
-              opacity: 0.5,
-            }}>×</button>
-        </div>
-      )}
+      <OverviewPanel stats={data.stats} dark={dark} />
 
       <div style={{
         position: 'absolute', left: 24, top: 74, display: 'flex', alignItems: 'center', gap: 12,
@@ -1201,21 +929,11 @@ function Legend({ dark }: { dark: boolean }) {
   );
 }
 
-function OverviewPanel({
-  data, dark, spotlight, onSpotlight,
-}: {
-  data: GraphData; dark: boolean;
-  spotlight: { kind: 'cluster' | 'bridge'; id: string } | null;
-  onSpotlight: (s: { kind: 'cluster' | 'bridge'; id: string } | null) => void;
-}) {
-  const stats = data.stats;
+function OverviewPanel({ stats, dark }: { stats: GraphData['stats']; dark: boolean }) {
   const bg = dark ? 'rgba(20,24,42,0.7)' : 'rgba(251,246,238,0.85)';
   const border = dark ? 'rgba(244,236,218,0.14)' : 'rgba(26,43,74,0.12)';
   const tColor = dark ? '#F4ECDA' : '#1A2B4A';
   const mute = dark ? 'rgba(244,236,218,0.6)' : 'rgba(26,43,74,0.6)';
-  const bridgeNodes = data.nodes.filter(n => n.bridge && !n.is_self);
-  // Show top 3 clusters (largest first) by member count
-  const topClusters = (data.clusters || []).slice(0, 3);
   return (
     <div style={{
       position: 'absolute', right: 24, bottom: 24,
@@ -1237,67 +955,6 @@ function OverviewPanel({
         <Stat dark={dark} num={stats.clusters} label="个核心圈" />
         <Stat dark={dark} num={stats.bridges} label="个桥梁人物" />
       </div>
-      {topClusters.length > 0 && (
-        <div style={{ marginTop: 12 }}>
-          <div style={{ fontFamily: 'var(--et-sans)', fontSize: 10, letterSpacing: '0.1em',
-            color: mute, marginBottom: 6 }}>
-            核心圈（点击聚焦，最大 {Math.min(3, topClusters.length)} 个）
-          </div>
-          {topClusters.map(c => {
-            const isActive = spotlight?.kind === 'cluster' && spotlight.id === c.id;
-            return (
-              <button key={c.id}
-                onClick={() => onSpotlight(isActive ? null : { kind: 'cluster', id: c.id })}
-                style={{
-                  all: 'unset', cursor: 'pointer',
-                  display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3,
-                  width: '100%',
-                  padding: '4px 6px', borderRadius: 6,
-                  background: isActive
-                    ? (dark ? 'rgba(255,107,71,0.18)' : 'rgba(255,107,71,0.10)')
-                    : 'transparent',
-                  border: isActive
-                    ? '0.5px solid rgba(255,107,71,0.45)'
-                    : '0.5px solid transparent',
-                  fontFamily: 'var(--et-sans)', fontSize: 11, color: tColor,
-                }}>
-                <span style={{ width: 8, height: 8, borderRadius: '50%',
-                  background: clusterColor(c.id), flexShrink: 0 }} />
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {displayName(c.id, c.label || c.id)}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      )}
-      {bridgeNodes.length > 0 && (
-        <div style={{ marginTop: 10 }}>
-          <div style={{ fontFamily: 'var(--et-sans)', fontSize: 10, letterSpacing: '0.1em',
-            color: mute, marginBottom: 6 }}>桥梁人物（点击看 ta 怎么连）</div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-            {bridgeNodes.map(n => {
-              const isActive = spotlight?.kind === 'bridge' && spotlight.id === n.id;
-              return (
-                <button key={n.id}
-                  onClick={() => onSpotlight(isActive ? null : { kind: 'bridge', id: n.id })}
-                  style={{
-                    all: 'unset', cursor: 'pointer',
-                    fontFamily: 'var(--et-sans)', fontSize: 10, fontWeight: 600,
-                    color: '#FF6B47', padding: '2px 8px', borderRadius: 999,
-                    border: '0.5px solid rgba(255,107,71,0.4)',
-                    background: isActive
-                      ? (dark ? 'rgba(255,107,71,0.30)' : 'rgba(255,107,71,0.20)')
-                      : (dark ? 'rgba(255,107,71,0.15)' : 'rgba(255,107,71,0.08)'),
-                    boxShadow: isActive ? '0 0 0 1.5px rgba(255,107,71,0.6)' : 'none',
-                  }}>
-                  ✦ {displayName(n.id, n.name)}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      )}
       <div style={{ marginTop: 14, paddingTop: 12, borderTop: `0.5px dashed ${border}`,
         fontFamily: 'var(--et-serif)', fontSize: 13, lineHeight: 1.6, color: tColor, fontStyle: 'italic' }}>
         “你不在场时，他们也在彼此身上留下痕迹——{stats.ffEdges} 条不经过你的连线。”
