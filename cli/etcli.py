@@ -521,7 +521,7 @@ STOPWORDS.update("这个 那个 一下 还是 就是 没有 什么 怎么 为啥
 STOP_CHARS = set("的了是我你他她也都在就不和与这那一个有没啊吧呀嗯哦嘛呢吗哈呜哇噢哎唉哟唔嗷嘿哼啦喔把被让给从向对跟比又再才还但而或因所以之上下里外中后前时日年月来去到过")
 NON_TEXT = re.compile(r"\[[^\]]+\]")
 URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
-APP_VERSION = "0.3.8"
+APP_VERSION = "0.3.9"
 YEARBOOK_CACHE_VERSION = 5
 
 
@@ -2534,6 +2534,19 @@ def friend_card(store: EchoStore, session_username: str, msg_count: int, last_ts
 _MSG_INDEX_CACHE: dict = {"counts": None, "locations": None, "last_ts": None}
 
 
+def _list_msg_tables(c: sqlite3.Connection) -> list[str]:
+    """Return Msg_<md5> table names in this DB; [] if the file isn't a real
+    SQLite (still-encrypted residue / junk / corrupt). Used by every WeChat
+    message scan so a single bad message_*.db doesn't 500 the whole endpoint.
+    """
+    try:
+        return [r[0] for r in c.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'Msg_%'"
+        ).fetchall()]
+    except sqlite3.DatabaseError:
+        return []
+
+
 def build_msg_index(store: EchoStore) -> tuple[dict[str, int], dict[str, list[str]], dict[str, int]]:
     """Scan every Msg_<md5> table across ALL message_*.db files, return:
        counts:    md5_table_name → SUM of row counts across all containing dbs
@@ -2550,10 +2563,7 @@ def build_msg_index(store: EchoStore) -> tuple[dict[str, int], dict[str, list[st
             continue
         c = store._conn(p.name)
         try:
-            tables = [r[0] for r in c.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'Msg_%'"
-            ).fetchall()]
-            for t in tables:
+            for t in _list_msg_tables(c):
                 try:
                     n = c.execute(f"SELECT COUNT(*), MAX(create_time) FROM {t}").fetchone()
                     if n and n[0]:
@@ -2561,7 +2571,7 @@ def build_msg_index(store: EchoStore) -> tuple[dict[str, int], dict[str, list[st
                         locations.setdefault(t, []).append(p.name)
                         if (n[1] or 0) > last_ts.get(t, 0):
                             last_ts[t] = n[1] or 0
-                except sqlite3.OperationalError:
+                except sqlite3.DatabaseError:
                     continue
         finally:
             c.close()
@@ -2599,10 +2609,7 @@ def heat_monthly_via_sql(store: EchoStore) -> Counter:
             continue
         c = store._conn(p.name)
         try:
-            tables = [r[0] for r in c.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'Msg_%'"
-            ).fetchall()]
-            for t in tables:
+            for t in _list_msg_tables(c):
                 try:
                     rows = c.execute(
                         f"SELECT strftime('%Y-%m', datetime(create_time, 'unixepoch', '+8 hours')) AS m, "
@@ -2611,7 +2618,7 @@ def heat_monthly_via_sql(store: EchoStore) -> Counter:
                     for ym, cnt in rows:
                         if ym:
                             monthly[ym] += cnt
-                except sqlite3.OperationalError:
+                except sqlite3.DatabaseError:
                     continue
         finally:
             c.close()
@@ -2625,15 +2632,12 @@ def _earliest_message_ts_OLD(store: EchoStore) -> int:
             continue
         c = store._conn(p.name)
         try:
-            tables = [r[0] for r in c.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'Msg_%'"
-            ).fetchall()]
-            for t in tables:
+            for t in _list_msg_tables(c):
                 try:
                     r = c.execute(f"SELECT MIN(create_time) FROM {t}").fetchone()
                     if r and r[0] and (earliest == 0 or r[0] < earliest):
                         earliest = r[0]
-                except sqlite3.OperationalError:
+                except sqlite3.DatabaseError:
                     continue
         finally:
             c.close()
@@ -2687,15 +2691,12 @@ def home_summary(store: EchoStore) -> dict:
                 continue
             c = store._conn(p.name)
             try:
-                tables = [r[0] for r in c.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'Msg_%'"
-                ).fetchall()]
-                for t in tables:
+                for t in _list_msg_tables(c):
                     try:
                         r = c.execute(f"SELECT MIN(create_time) FROM {t}").fetchone()
                         if r and r[0] and (earliest_ts == 0 or r[0] < earliest_ts):
                             earliest_ts = r[0]
-                    except sqlite3.OperationalError:
+                    except sqlite3.DatabaseError:
                         continue
             finally:
                 c.close()
