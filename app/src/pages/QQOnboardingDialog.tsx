@@ -38,6 +38,11 @@ export function QQOnboardingDialog({ open, onClose, onDone }: Props) {
       try {
         const d = await getQQProfiles();
         setData(d);
+        if (d.supported === false) {
+          setErrMsg(d.error || 'QQ 导入目前只支持 Windows。Mac 版暂时可以继续使用微信数据，QQ for Mac 适配还在开发中。');
+          setPhase('error');
+          return;
+        }
         const decrypted = d.profiles.find((p: QQProfile) => p.has_decrypted_data);
         if (decrypted) {
           setActiveQQ(decrypted.qq_number);

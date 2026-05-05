@@ -6,14 +6,14 @@ Murmur 默认只在本机读取和分析数据。只有你主动点击 AI 分析
 
 [下载最新版](https://github.com/sgaofen/murmur/releases/latest)
 
-当前推荐版本：`v0.2.18`
+当前推荐版本：`v0.3.8`
 
 ![Murmur 年代记](docs/screenshots/readme-home.png)
 
 ## 视频教程
 
-- [Mac 安装视频](https://github.com/sgaofen/murmur/releases/download/v0.2.18/Murmur_macOS_install_tutorial.mp4)
-- [Windows 安装视频](https://github.com/sgaofen/murmur/releases/download/v0.2.18/Murmur_Windows_install_tutorial.mp4)
+- [Mac 安装视频](https://github.com/sgaofen/murmur/releases/download/v0.3.8/Murmur_macOS_install_tutorial.mp4)
+- [Windows 安装视频](https://github.com/sgaofen/murmur/releases/download/v0.3.8/Murmur_Windows_install_tutorial.mp4)
 
 ## 能做什么
 
@@ -21,6 +21,7 @@ Murmur 默认只在本机读取和分析数据。只有你主动点击 AI 分析
 - 画出可旋转的关系网络，区分私聊、朋友间互动、共同群聊、朋友圈交叉痕迹。
 - 点击人物看完整关系档案，点击连线看两个人之间的关系推断。
 - 用 Claude Code 或 Codex CLI 批量生成 AI 关系分析报告。
+- Windows 版支持导入 QQ NT 聊天；Mac 版目前继续专注微信数据。
 - 一键开启隐私模式，公开截图和录屏时自动隐藏姓名、wxid、本机路径和敏感片段。
 
 ![关系网络](docs/screenshots/readme-graph.png)
@@ -33,8 +34,8 @@ Murmur 默认只在本机读取和分析数据。只有你主动点击 AI 分析
 
 Windows 用户：
 
-- 推荐下载：`Murmur_0.2.18_x64-setup.exe`
-- 不推荐普通用户下载：`Murmur_0.2.18_x64_en-US.msi`
+- 推荐下载：`Murmur_0.3.8_x64-setup.exe`
+- 不推荐普通用户下载：`Murmur_0.3.8_x64_en-US.msi`
 
 Mac 用户：
 
@@ -45,7 +46,7 @@ Intel Mac 暂时没有安装包，需要从源码运行。
 
 ## Windows 安装
 
-1. 下载 `Murmur_0.2.18_x64-setup.exe`。
+1. 下载 `Murmur_0.3.8_x64-setup.exe`。
 2. 双击安装。
 3. 打开微信，退出到登录页，但不要关闭微信程序。
 4. 打开 Murmur，按引导点击「开始抓密钥」。

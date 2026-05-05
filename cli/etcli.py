@@ -521,7 +521,7 @@ STOPWORDS.update("这个 那个 一下 还是 就是 没有 什么 怎么 为啥
 STOP_CHARS = set("的了是我你他她也都在就不和与这那一个有没啊吧呀嗯哦嘛呢吗哈呜哇噢哎唉哟唔嗷嘿哼啦喔把被让给从向对跟比又再才还但而或因所以之上下里外中后前时日年月来去到过")
 NON_TEXT = re.compile(r"\[[^\]]+\]")
 URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
-APP_VERSION = "0.3.7"
+APP_VERSION = "0.3.8"
 YEARBOOK_CACHE_VERSION = 5
 
 
@@ -4673,7 +4673,31 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         if set_active:
             cls.store = store
             cls._active_platform = "wechat"
-            cls._active_id = store.me
+            cls._active_id = cls._wechat_id_for_store(store) or store.me
+
+    @classmethod
+    def _wechat_profile_for_id(cls, ident: str):
+        """Return the WeChat profile matching a full wxid or short decrypted dir id."""
+        try:
+            for prof in _paths.discover_wechat_profiles():
+                if ident in {prof.wxid, prof.wxid_short}:
+                    return prof
+        except Exception:
+            return None
+        return None
+
+    @classmethod
+    def _wechat_id_for_store(cls, store: EchoStore) -> Optional[str]:
+        """Map an EchoStore back to its full wxid for ProfileSwitcher state."""
+        try:
+            store_dir = Path(store.dir).resolve()
+            for prof in _paths.discover_wechat_profiles():
+                dec = _paths.decrypted_root_for(prof, must_exist=True)
+                if dec and Path(dec).resolve() == store_dir:
+                    return prof.wxid
+        except Exception:
+            pass
+        return store.me
 
     @classmethod
     def _flush_analysis_caches(cls) -> None:
@@ -4796,18 +4820,21 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         if not ident:
             return self._send_json({"ok": False, "error": "id required"}, 400)
         if platform == "wechat":
-            # Reuse cached store if it matches; otherwise (re)load from disk
-            if cls._wechat_store is not None and cls._wechat_store.me == ident:
+            prof = cls._wechat_profile_for_id(ident)
+            if prof is None:
+                return self._send_json({"ok": False, "error": f"wechat profile {ident} not found"}, 404)
+            dec_dir = _paths.decrypted_root_for(prof, must_exist=True)
+            if not dec_dir:
+                return self._send_json({"ok": False, "error": f"wechat profile {ident} not decrypted"}, 404)
+            # Reuse cached store if it matches; otherwise (re)load the specific
+            # profile the user clicked. discover_data_dir() returns the first
+            # ready account and is wrong for multi-WeChat switching.
+            if cls._wechat_store is not None and Path(cls._wechat_store.dir).resolve() == Path(dec_dir).resolve():
                 store = cls._wechat_store
             else:
-                d = discover_data_dir()
-                if not d or not d.exists():
-                    return self._send_json({"ok": False, "error": "no decrypted WeChat data"}, 404)
-                store = EchoStore(d)
-                cls._wechat_store = store
-            cls.store = store
-            cls._active_platform = "wechat"
-            cls._active_id = store.me or ident
+                store = EchoStore(dec_dir)
+            cls._set_wechat_store(store, set_active=True)
+            cls._active_id = prof.wxid
         else:  # qq
             qs = cls._qq_get_store(ident)
             if qs is None:
@@ -4829,6 +4856,15 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         if path == "/api/qq/profiles":
             # Onboarding-only listing (keys + has_decrypted flags). For the
             # cross-platform switcher use /api/profiles instead.
+            if not _qpaths.IS_WINDOWS:
+                return self._send_json({
+                    "platform": "qq",
+                    "supported": False,
+                    "profiles": [],
+                    "qq_running": False,
+                    "qq_install": None,
+                    "error": "QQ 导入目前只支持 Windows。Mac 版暂时可以继续使用微信数据，QQ for Mac 适配还在开发中。",
+                })
             profiles = _qpaths.discover_qq_profiles()
             keys = self._qq_load_keys_config()
             out = []
@@ -5823,7 +5859,10 @@ def _run_server(args) -> int:
             "[etcli serve] no decrypted data found — running in bootstrap mode "
             "(onboarding endpoints only). Frontend will guide you to provide a key.\n"
         )
-    _MurmurAPIHandler.store = store
+    if store is not None:
+        _MurmurAPIHandler._set_wechat_store(store)
+    else:
+        _MurmurAPIHandler.store = None
     if args.export_dir:
         _MurmurAPIHandler.export_dir = Path(args.export_dir)
 
