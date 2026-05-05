@@ -496,9 +496,14 @@ export function GraphView({
     (e.currentTarget as Element).releasePointerCapture?.(e.pointerId);
   }
   function handleWheel(e: ReactWheelEvent<SVGSVGElement>) {
+    // Windows trackpad pinch sends ctrl+wheel; two-finger scroll sends plain
+    // wheel with small deltaY; mouse wheel sends large deltaY in line units.
+    // Normalize all three to a smooth exponential zoom.
     e.stopPropagation();
     pauseAutoRotateForUser();
-    const factor = e.deltaY > 0 ? 0.92 : 1.08;
+    const lineToPx = e.deltaMode === 1 ? 16 : 1;
+    const px = e.deltaY * lineToPx;
+    const factor = Math.exp(-px * 0.002);
     setZoom(z => Math.max(0.25, Math.min(4, z * factor)));
   }
   function resetView() {
@@ -783,9 +788,13 @@ export function GraphView({
         )}
       </div>
 
-      {/* Zoom controls — visible buttons for trackpad / no-wheel users */}
+      {/* Zoom controls — visible buttons for trackpad / no-wheel users.
+          Top-LEFT below the hint bar so they don't collide with:
+            - PrivacyToggle (fixed bottom-right, z=9999)
+            - OverviewPanel (absolute bottom-right within graph)
+            - the 460px side panel that slides in from the right on selection. */}
       <div style={{
-        position: 'absolute', right: 24, bottom: 24,
+        position: 'absolute', left: 24, top: 110,
         display: 'flex', flexDirection: 'column', gap: 6,
         fontFamily: 'var(--et-sans)',
       }}>
