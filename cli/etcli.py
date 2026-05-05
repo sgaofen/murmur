@@ -3828,7 +3828,22 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         if path == "/api/refresh":
             # Run the decrypt pipeline; dispatches via etcli sub-task helper (frozen vs dev aware)
             t0 = _time.time()
-            r = subprocess.run(_spawn_etcli_args("refresh"),
+            # POST body may carry {"wxid": "..."} to pin which WeChat account to
+            # decrypt. Without it, refresh.py auto-detects via verify_passphrase
+            # (saved key is tried against each profile's session.db) and picks
+            # the matching one — kills the multi-account loop bug class
+            # (issues #4 #6 #7) where refresh.py blindly picked profiles[0].
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length) if length else b"{}"
+            try:
+                opts = json.loads(body.decode("utf-8") or "{}")
+            except json.JSONDecodeError:
+                opts = {}
+            extra_args: list[str] = []
+            req_wxid = (opts.get("wxid") or "").strip()
+            if req_wxid:
+                extra_args += ["--wxid", req_wxid]
+            r = subprocess.run(_spawn_etcli_args("refresh", *extra_args),
                                capture_output=True, text=True, encoding="utf-8", errors="replace")
             dt = round((_time.time() - t0) * 1000)
             ok = r.returncode == 0
@@ -4002,6 +4017,14 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 env["ETCLI_URL"] = f"http://127.0.0.1:{port}"
             except Exception:
                 env["ETCLI_URL"] = os.environ.get("ETCLI_URL", "http://127.0.0.1:9100")
+            # Pass etcli's per-account reports root explicitly. batch_analyze.py
+            # has its own _agent_reports_root() that defaults to the legacy flat
+            # path (~/Desktop/Murmur/agent_reports/) — without this, batch never
+            # finds the per-account reports etcli writes to (post-0.3.7 layout)
+            # and blindly re-runs every friend instead of skipping ones already
+            # done. Force the same path both processes use.
+            env["MURMUR_AGENT_REPORTS_DIR"] = str(_agent_reports_root())
+            env["MURMUR_AGENT_WORKDIR"] = str(_agent_workspace_root())
             # Run from a writable user dir, NOT the bundle's read-only Resources
             # dir (cli_dir resolves into _internal/ when frozen). codex/claude
             # spawn child sessions in cwd → fail if cwd isn't writable.
