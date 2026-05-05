@@ -57,7 +57,14 @@ export async function syncActiveToBackend(retries = 40, delayMs = 500): Promise<
 
 /** Switch active profile, persist, sync backend, then reload. */
 export async function switchActiveProfile(p: ActiveProfile): Promise<void> {
-  await setActiveProfile(p.platform, p.id);
+  const r = await setActiveProfile(p.platform, p.id);
+  // Defensive: backend currently returns HTTP 4xx on failure (so j() throws
+  // before we get here), but if that contract ever changes to 200+ok=false
+  // we still want to bail BEFORE writing localStorage + reloading into a
+  // broken state.
+  if (!r.ok) {
+    throw new Error(r.error || `setActiveProfile returned ok=false for ${p.platform}/${p.id}`);
+  }
   writeStoredActive(p);
   // Reload so every page re-fetches under the new store. Cheaper than a
   // global cache invalidator and matches what users expect when changing
