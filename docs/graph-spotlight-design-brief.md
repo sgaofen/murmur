@@ -1,5 +1,13 @@
 # 关系网核心圈 / 桥梁可视化 — Design Brief
 
+> **状态 (2026-05-05)**：核心圈 spotlight 已实装到 `GraphView.tsx`（design AI 输出 + 接入）。
+> 桥梁 spotlight 评估后下线（rank-by-radius 布局下两群在视觉上无法分离）。
+> 后端 `_compute_friend_topology` 仍计算 bridge betweenness，仅 UI 不渲染。
+> 此 brief 保留作 fix-history。后续要重做关系网建模再起新 brief。
+
+---
+
+
 ## 给设计 AI 的一句话目标
 
 Murmur 关系网图（3D 力导图）后端已经算好了「核心圈」和「桥梁人物」，前端有完整的数据通道但**没有任何视觉呈现**。请设计并实现两个交互式聚焦视觉：
