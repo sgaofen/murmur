@@ -151,15 +151,31 @@ jobs:
         if: matrix.platform == 'macos'
         shell: bash
         run: |
+          set -euo pipefail
           mkdir -p release-assets
           APP_PATH="app/src-tauri/target/release/bundle/macos/Murmur.app"
-          if [ -d "$APP_PATH" ]; then
-            ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" release-assets/Murmur_macOS_AppleSilicon.app.zip
+          if [ ! -d "$APP_PATH" ]; then
+            echo "Missing macOS app bundle: $APP_PATH"
+            exit 1
           fi
-          DMG="$(find app/src-tauri/target/release/bundle/dmg -maxdepth 1 -name '*.dmg' -print -quit)"
-          if [ -n "$DMG" ]; then
-            cp "$DMG" release-assets/Murmur_macOS_AppleSilicon.dmg
-          fi
+
+          codesign --force --deep --sign - "$APP_PATH"
+          codesign --verify --deep --strict --verbose=4 "$APP_PATH"
+
+          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" release-assets/Murmur_macOS_AppleSilicon.app.zip
+
+          STAGING="$(mktemp -d)"
+          trap 'rm -rf "$STAGING"' EXIT
+          ditto "$APP_PATH" "$STAGING/Murmur.app"
+          ln -s /Applications "$STAGING/Applications"
+          hdiutil create -volname Murmur -srcfolder "$STAGING" -ov -format UDZO release-assets/Murmur_macOS_AppleSilicon.dmg
+
+          MOUNT_POINT="$STAGING/mount"
+          mkdir -p "$MOUNT_POINT"
+          hdiutil attach -nobrowse -readonly -mountpoint "$MOUNT_POINT" release-assets/Murmur_macOS_AppleSilicon.dmg
+          codesign --verify --deep --strict --verbose=4 "$MOUNT_POINT/Murmur.app"
+          hdiutil detach "$MOUNT_POINT"
+
           ls -lh release-assets
 
       - name: Upload assets to GitHub Release
