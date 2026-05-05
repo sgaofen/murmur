@@ -31,6 +31,9 @@ interface BackendNode {
   moments_back: number;
   moments_out: number;
   combined_score?: number;
+  // Topology fields populated by backend's _compute_friend_topology
+  cluster?: string | null;  // cluster_id ("core_1" etc) or null if isolated
+  bridge?: boolean;         // top betweenness-centrality node
 }
 
 interface BackendEdge {
@@ -55,7 +58,10 @@ interface BackendGraph {
   nodes: BackendNode[];
   edges: BackendEdge[];
   clusters: BackendCluster[];
-  stats: { total_people: number; total_edges: number; private_count: number; groups: number };
+  stats: {
+    total_people: number; total_edges: number; private_count: number; groups: number;
+    core_circles?: number; bridges?: number;
+  };
 }
 
 /**
@@ -105,7 +111,8 @@ function layoutNodes(graph: BackendGraph): GraphData {
     nodes.push({
       id: bn.id, name: bn.name,
       is_self: false, tier: bn.tier,
-      cluster: null, color: TIER_COLORS[bn.tier] || '#9E9583',
+      cluster: bn.cluster ?? null, color: TIER_COLORS[bn.tier] || '#9E9583',
+      bridge: !!bn.bridge,
       // Bigger nodes (was 4-14, now 8-26)
       size: Math.max(8, Math.min(26, bn.size * 0.35)),
       x, y, z,
@@ -119,7 +126,12 @@ function layoutNodes(graph: BackendGraph): GraphData {
     });
   });
 
-  const designClusters: GraphCluster[] = [];  // backend now sends [] by default
+  // GraphCluster (from GraphView) wants cx/cy/cz/color/n for visual rendering;
+  // we only need the COUNT for the stat card right now. Backend's
+  // graph.clusters carries id/label/members for reports/AI but the renderer
+  // doesn't draw cluster bubbles yet, so leave designClusters empty here and
+  // pull the count from graph.stats.core_circles below.
+  const designClusters: GraphCluster[] = [];
 
   const edges: GraphEdge[] = graph.edges.map(e => ({
     source: e.source,
@@ -136,15 +148,19 @@ function layoutNodes(graph: BackendGraph): GraphData {
     shared_group_count: e.shared_group_count,
   }));
 
-  // Stats
+  // Stats — prefer backend's topology-derived counts when present
+  // (graph.stats.core_circles + .bridges), fall back to local count when
+  // hitting an older etcli that hasn't shipped the topology fields yet.
   const ffEdges = edges.filter(e => e.source !== 'self' && e.target !== 'self').length;
   const isolates = nodes.filter(n => n.isolated).length;
+  const bridgesCount = graph.stats.bridges ?? nodes.filter(n => n.bridge).length;
+  const coreCirclesCount = graph.stats.core_circles ?? designClusters.length;
   const stats = {
     people: nodes.length,
     edges: edges.length,
-    bridges: 0,  // TODO: real bridge detection
+    bridges: bridgesCount,
     isolates,
-    clusters: designClusters.length,
+    clusters: coreCirclesCount,
     ffEdges,
   };
 
