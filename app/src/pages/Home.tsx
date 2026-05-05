@@ -11,11 +11,13 @@ import { ExtractKeyDialog } from './ExtractKeyDialog';
 import { TaskCenterBell, TaskCenterDrawer, useTaskCenter } from '../components/extras/TaskCenter';
 import { displayName, maskText } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
+import { ProfileSwitcher } from '../components/ProfileSwitcher';
 
 interface Props {
   dark?: boolean;
   onOpenFriend: (id: string) => void;
   onOpenOnboarding?: () => void;
+  onOpenQQ?: () => void;
 }
 
 type Tab = 'private' | 'group' | 'time';
@@ -37,7 +39,7 @@ function HomeChromeBar({ onRefresh, refreshing, refreshMsg, onExtractKey, onTogg
         </svg>
         <div className="et-serif" style={{ fontSize: 17, fontWeight: 600, color: 'var(--et-ink)', letterSpacing: '0.04em' }}>Murmur 微语</div>
         <div style={{ width: 1, height: 14, background: 'var(--et-line-2)', margin: '0 4px' }} />
-        <div className="et-meta" style={{ color: 'var(--et-mute)' }}>2026 · 年代记</div>
+        <ProfileSwitcher />
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
         {refreshMsg && (

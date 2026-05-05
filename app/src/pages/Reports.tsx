@@ -5,6 +5,7 @@ import { mdToHtml, MURMUR_MD_CSS } from '../utils/markdown';
 import { useBatchTracker } from '../components/extras/BatchTracker';
 import { maskText } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
+import { ProfileSwitcher } from '../components/ProfileSwitcher';
 
 interface Props {
   onBack: () => void;
@@ -226,6 +227,7 @@ ${sections}
           display: 'flex', alignItems: 'center', gap: 10 }}>
           <button onClick={onBack} style={{ all: 'unset', cursor: 'pointer',
             fontSize: 13, color: 'var(--et-mute)' }}>← 返回</button>
+          <ProfileSwitcher />
           <span style={{ fontFamily: 'var(--et-serif)', fontSize: 16, fontWeight: 600, color: 'var(--et-ink)' }}>
             AI 关系档案
           </span>

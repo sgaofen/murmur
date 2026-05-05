@@ -12,6 +12,8 @@ import { TaskCenterProvider } from './components/extras/TaskCenter';
 import { BatchStatusPill, BatchTrackerProvider } from './components/extras/BatchTracker';
 import { PrivacyToggle } from './components/PrivacyToggle';
 import { PrivacyIdentityIndex } from './components/extras/PrivacyIdentityIndex';
+import { QQOnboardingDialog } from './pages/QQOnboardingDialog';
+import { syncActiveToBackend } from './utils/activeProfile';
 
 type Route =
   | { name: 'loading' }
@@ -42,12 +44,26 @@ export default function App() {
     () => window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false
   );
   const [onboarding, setOnboarding] = useState(false);
+  const [qqOnboarding, setQQOnboarding] = useState(false);
   const showDevControls = import.meta.env.VITE_SHOW_DEV_CONTROLS === '1';
 
   useEffect(() => {
     const onHash = () => setRoute(parseHash(window.location.hash));
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
+  }, []);
+
+  // Any ProfileSwitcher (mounted on any chrome bar) can ask to open onboarding
+  // via this event — avoids prop-drilling onAddNew through every page that has
+  // a chrome bar (Friend / Graph / Reports / Yearbook / Table).
+  useEffect(() => {
+    const onReq = (e: Event) => {
+      const platform = (e as CustomEvent<{ platform: 'wechat' | 'qq' }>).detail?.platform;
+      if (platform === 'qq') setQQOnboarding(true);
+      else setOnboarding(true);
+    };
+    window.addEventListener('murmur:requestOnboarding', onReq);
+    return () => window.removeEventListener('murmur:requestOnboarding', onReq);
   }, []);
 
   function go(path: string) {
@@ -82,6 +98,18 @@ export default function App() {
       return null;
     };
     (async () => {
+      // Re-pin the active profile from localStorage BEFORE probing /api/info.
+      // After a window reload (e.g. just-finished QQ onboarding) the etcli
+      // process may not yet know which account is active; if /api/info fires
+      // first, it returns bootstrap=true and re-pops WeChat onboarding even
+      // though QQ is happily decrypted. Awaiting sync closes that race.
+      await syncActiveToBackend();
+
+      // #loading is a deliberate dev route — don't auto-pop the onboarding.
+      const initialRoute = parseHash(window.location.hash);
+      if (initialRoute.name === 'loading') {
+        return;
+      }
       const info = await probe(() => getInfo());
       if (cancelled) return;
       if (!info) {
@@ -159,6 +187,7 @@ export default function App() {
         dark={dark}
         onOpenFriend={(id) => go(`friend/${id}`)}
         onOpenOnboarding={() => setOnboarding(true)}
+        onOpenQQ={() => setQQOnboarding(true)}
       />;
   }
 
@@ -174,6 +203,12 @@ export default function App() {
           open={onboarding}
           onClose={() => { localStorage.setItem(ONBOARDING_SEEN_KEY, '1'); setOnboarding(false); }}
           onDone={() => window.location.reload()}
+          onPickQQ={() => { setOnboarding(false); setQQOnboarding(true); }}
+        />
+        <QQOnboardingDialog
+          open={qqOnboarding}
+          onClose={() => setQQOnboarding(false)}
+          onDone={() => { setQQOnboarding(false); /* dialog reloads the page itself */ }}
         />
       </BatchTrackerProvider>
     </TaskCenterProvider>

@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Murmur",
-  "version": "0.2.18",
+  "version": "0.3.7",
   "identifier": "com.sgaofen.murmur",
   "build": {
     "frontendDist": "../dist",
@@ -13,7 +13,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "Murmur 微语",
+        "title": "Murmur 寰",
         "width": 1280,
         "height": 840,
         "minWidth": 960,

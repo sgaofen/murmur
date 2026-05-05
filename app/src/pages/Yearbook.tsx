@@ -3,6 +3,8 @@ import { getYearbook } from '../data/api';
 import type { Yearbook, YearData } from '../data/api';
 import { displayName, maskedWxid, maskText } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
+import { ProfileSwitcher } from '../components/ProfileSwitcher';
+import { useActivePlatform } from '../utils/activeProfile';
 
 interface Props {
   friendId: string;
@@ -11,6 +13,7 @@ interface Props {
 
 export function YearbookPage({ friendId, onBack }: Props) {
   void usePrivacy();
+  const platform = useActivePlatform();
   const [data, setData] = useState<Yearbook | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -51,7 +54,10 @@ export function YearbookPage({ friendId, onBack }: Props) {
         padding: '14px 28px', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         borderBottom: '0.5px solid var(--et-line)',
       }}>
-        <button onClick={onBack} style={{ all: 'unset', cursor: 'pointer', color: 'var(--et-mute)', fontSize: 13 }}>← 返回</button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+          <button onClick={onBack} style={{ all: 'unset', cursor: 'pointer', color: 'var(--et-mute)', fontSize: 13 }}>← 返回</button>
+          <ProfileSwitcher />
+        </div>
         <div className="et-serif" style={{ fontSize: 14, color: 'var(--et-mute)' }}>双人年代记 · 你 ↔ {friendName}</div>
         <span style={{ fontFamily: 'var(--et-mono)', fontSize: 11, color: 'var(--et-faint)' }}>{maskedWxid(data.wxid)}</span>
       </div>
@@ -76,8 +82,10 @@ export function YearbookPage({ friendId, onBack }: Props) {
         <div style={{ marginTop: 24, display: 'flex', gap: 32, flexWrap: 'wrap' }}>
           <Stat label="跨度" value={`${data.span_days} 天`} sub={`${data.first_date} → ${data.last_date}`} />
           <Stat label="总消息" value={data.total_msgs.toLocaleString()} sub="含图文/语音" />
-          <Stat label="朋友圈往来" value={`${data.moments_back_total + data.moments_out_total}`}
-            sub={`他赞你 ${data.moments_back_total} · 你赞他 ${data.moments_out_total}`} />
+          {platform !== 'qq' && (
+            <Stat label="朋友圈往来" value={`${data.moments_back_total + data.moments_out_total}`}
+              sub={`他赞你 ${data.moments_back_total} · 你赞他 ${data.moments_out_total}`} />
+          )}
         </div>
       </div>
 

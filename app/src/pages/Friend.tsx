@@ -12,6 +12,8 @@ import { AgentReport } from './extras/AgentReport';
 import { mdToHtml, MURMUR_MD_CSS } from '../utils/markdown';
 import { displayName, isPrivacyMode, maskedWxid, maskText } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
+import { ProfileSwitcher } from '../components/ProfileSwitcher';
+import { useActivePlatform } from '../utils/activeProfile';
 
 interface Props {
   friendId: string;
@@ -28,15 +30,18 @@ function FriendChromeBar({ onBack, friend }: { onBack: () => void; friend: Frien
       display: 'flex', alignItems: 'center', justifyContent: 'space-between',
       padding: '14px 28px', borderBottom: '0.5px solid var(--et-line)',
     }}>
-      <button onClick={onBack} style={{
-        all: 'unset', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6,
-        color: 'var(--et-mute)', fontSize: 13, fontWeight: 500,
-      }}>
-        <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5">
-          <path d="M8 2L3 7l5 5" strokeLinecap="round" />
-        </svg>
-        回到年代记
-      </button>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+        <button onClick={onBack} style={{
+          all: 'unset', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6,
+          color: 'var(--et-mute)', fontSize: 13, fontWeight: 500,
+        }}>
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5">
+            <path d="M8 2L3 7l5 5" strokeLinecap="round" />
+          </svg>
+          回到年代记
+        </button>
+        <ProfileSwitcher />
+      </div>
       <div className="et-serif" style={{ fontSize: 14, color: 'var(--et-mute)' }}>和 {name} 的故事</div>
       <span className="et-meta" style={{ fontFamily: 'var(--et-mono)', fontSize: 11, color: 'var(--et-faint)' }}>{maskedWxid(friend.id)}</span>
     </div>
@@ -170,6 +175,10 @@ function SignalsEvidenceCard({ friend }: { friend: Friend & { relationship_signa
   const sig = friend.relationship_signals;
   if (!sig) return null;
   const notes: string[] = sig.signature_notes || [];
+  // QQ has no 朋友圈 equivalent in the local DB (QQ Zone lives in Tencent's
+  // cloud, not nt_msg.db) — drop those two cells in QQ mode so we don't
+  // render a bogus "0 次" stat.
+  const platform = useActivePlatform();
   const numCells: Array<[string, any, string]> = [
     ['持续年', sig.longevity_years, '年'],
     ['线下证据', sig.offline_evidence?.count, '条'],
@@ -177,9 +186,13 @@ function SignalsEvidenceCard({ friend }: { friend: Friend & { relationship_signa
     ['通话', sig.calls, '次'],
     ['道歉/和解', sig.conflict_recovery?.apology_count, '次'],
     ['人生节点', sig.lifecycle?.count, '次'],
-    ['朋友圈他赞你', sig.moments_back, '次'],
-    ['朋友圈你赞他', sig.moments_out, '次'],
   ];
+  if (platform !== 'qq') {
+    numCells.push(
+      ['朋友圈他赞你', sig.moments_back, '次'],
+      ['朋友圈你赞他', sig.moments_out, '次'],
+    );
+  }
   if (notes.length === 0 && numCells.every(([, v]) => !v)) return null;
   return (
     <div style={{

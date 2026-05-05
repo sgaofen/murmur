@@ -10,6 +10,8 @@ import { displayName, maskedWxid, maskText } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
 import { useBatchTracker } from '../components/extras/BatchTracker';
 import type { BatchHandle } from '../components/extras/BatchTracker';
+import { ProfileSwitcher } from '../components/ProfileSwitcher';
+import { useActivePlatform } from '../utils/activeProfile';
 
 const TIER_COLORS: Record<string, string> = {
   self: '#FFE6CF', A: '#FF6B47', B: '#E8B57A',
@@ -294,6 +296,7 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
             fontSize: 12, color: dark ? '#F4ECDA' : '#1A2B4A',
             backdropFilter: 'blur(8px)',
           }}>← 返回首页</button>
+          <ProfileSwitcher />
           <span style={{ fontFamily: 'var(--et-serif)', fontSize: 18, fontWeight: 600,
             color: dark ? '#F4ECDA' : '#1A2B4A' }}>Murmur · 关系网络</span>
           <span style={{ fontSize: 11, color: dark ? 'rgba(244,236,218,0.65)' : 'rgba(26,43,74,0.65)',
@@ -416,11 +419,13 @@ function AnalysisStreamBox({ stream }: { stream: { output: string; stage: string
   );
 }
 
+// QQ 数据没有 SNS — 节点 / 边 / 批量分析里所有 「朋友圈」相关字段全部隐藏。
 function SidePanel({ node, onClose, onOpenFriend, onSelectPeer }: {
   node: GraphNode; onClose: () => void; onOpenFriend: () => void;
   onSelectPeer?: (peerWxid: string) => void;
 }) {
   void usePrivacy();
+  const isQQ = useActivePlatform() === 'qq';
   const maskedName = displayName(node.id, node.name);
   const [detail, setDetail] = useState<(Friend & { stats: FriendStats | null }) | null>(null);
   const [reportContent, setReportContent] = useState<string | null>(null);
@@ -591,8 +596,13 @@ function SidePanel({ node, onClose, onOpenFriend, onSelectPeer }: {
             <div style={{ height: 8 }} />
             <CrossScene label="群聊" value={node.group_msgs || 0} total={total} color="#5A7A99" />
             <div style={{ marginTop: 10, fontSize: 11, color: 'var(--et-mute)' }}>
-              {node.groups != null && <>共群 {node.groups} 个 · </>}
-              <span>朋友圈：他赞你 {node.moments_back || 0} · 你赞他 {node.moments_out || 0}</span>
+              {node.groups != null && <>共群 {node.groups} 个</>}
+              {!isQQ && (
+                <>
+                  {node.groups != null && ' · '}
+                  <span>朋友圈：他赞你 {node.moments_back || 0} · 你赞他 {node.moments_out || 0}</span>
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -777,9 +787,14 @@ function pairEvidenceErrorMessage(e: any): string {
   return msg;
 }
 
-function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
+function EdgePanel(props: {
   edge: GraphEdge; aName: string; bName: string; onClose: () => void;
   onOpenFriend?: (id: string) => void;
+}) { return <EdgePanelInner {...props} isQQ={useActivePlatform() === 'qq'} />; }
+function EdgePanelInner({ edge, aName, bName, onClose, onOpenFriend, isQQ }: {
+  edge: GraphEdge; aName: string; bName: string; onClose: () => void;
+  onOpenFriend?: (id: string) => void;
+  isQQ: boolean;
 }) {
   const [pack, setPack] = useState<string | null>(null);
   const [packError, setPackError] = useState<string | null>(null);
@@ -1011,7 +1026,7 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
           {!isSelfEdge && edge.type !== 'co_active' && rawWeight > 1 && (
             <Stat label="互动信号强度" value={`${rawWeight.toLocaleString()}`} />
           )}
-          {!!edge.moments_cross && (
+          {!isQQ && !!edge.moments_cross && (
             <Stat label="朋友圈互动" value={`${edge.moments_cross} 次`} />
           )}
           {!!edge.mention_count && (
@@ -1031,7 +1046,7 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
               background: 'var(--et-paper-2)', border: '0.5px solid var(--et-line-2)',
             }}>
               <div className="et-serif" style={{ fontSize: 13.5, color: 'var(--et-ink-soft)', lineHeight: 1.6 }}>
-                这条线代表你和 {otherName} 的一对一关系。完整分析会合并私聊、共群、朋友圈和时间线。
+                这条线代表你和 {otherName} 的一对一关系。完整分析会合并私聊、共群{isQQ ? '' : '、朋友圈'}和时间线。
               </div>
               <div style={{ marginTop: 10, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                 {onOpenFriend && (
@@ -1239,8 +1254,9 @@ function EdgePanel({ edge, aName, bName, onClose, onOpenFriend }: {
   );
 }
 
-function BatchAnalysisPanel({
-  dark, agents, batch, status, onLaunch, onReset, onClose,
+function BatchAnalysisPanel(props: any) { return <BatchAnalysisPanelInner {...props} isQQ={useActivePlatform() === 'qq'} />; }
+function BatchAnalysisPanelInner({
+  dark, agents, batch, status, onLaunch, onReset, onClose, isQQ,
 }: {
   dark: boolean;
   agents: LocalAgent[];
@@ -1249,6 +1265,7 @@ function BatchAnalysisPanel({
   onLaunch: (top_pairs: number, cli: 'claude' | 'codex' | 'both', parallel: number) => void;
   onReset: () => void;
   onClose: () => void;
+  isQQ: boolean;
 }) {
   const running = !!batch && !!status?.running;
   const done = !!batch && status && !status.running;
@@ -1285,7 +1302,7 @@ function BatchAnalysisPanel({
       </div>
       <div style={{ fontSize: 12, lineHeight: 1.6, color: dark ? 'rgba(244,236,218,0.75)' : 'rgba(26,43,74,0.7)', marginBottom: 12 }}>
         一次性把关系网里 top-N 重要朋友对的关系档案全跑出来 ——
-        合并私聊互相提及、共群活跃、朋友圈点赞评论，AI 推断他们俩的关系类型 + 时间走向 + 关键证据。
+        合并私聊互相提及、共群活跃{isQQ ? '' : '、朋友圈点赞评论'}，AI 推断他们俩的关系类型 + 时间走向 + 关键证据。
       </div>
       {!running && !done && (
         <>
