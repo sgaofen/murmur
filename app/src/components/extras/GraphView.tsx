@@ -38,9 +38,12 @@ export interface GraphEdge {
 export interface GraphCluster {
   id: string;
   label: string;
-  cx: number; cy: number; cz: number;
-  color: string;
-  n: number;
+  members?: string[];
+  // Legacy positional fields — only populated for old payloads with explicit
+  // cluster centroids. Current backend (label propagation) emits id/label/members only.
+  cx?: number; cy?: number; cz?: number;
+  color?: string;
+  n?: number;
 }
 export interface GraphData {
   nodes: GraphNode[];
@@ -586,22 +589,19 @@ export function GraphView({
           </filter>
         </defs>
 
-        {/* Cluster halos */}
-        {data.clusters.map(c => {
-          const center = project({ x: c.cx, y: c.cy, z: c.cz }, rotY, rotX, zoom, pan.x, pan.y, W, H);
-          const r = 80 + c.n * 1.8;
+        {/* Legacy cluster halos — only renders when backend ships explicit
+            centroid coords (cx/cy/cz). Current backend (_compute_friend_topology)
+            does not. Default canvas stays clean; spotlight visualization is
+            delegated to a design pass. */}
+        {data.clusters.filter(c => typeof c.cx === 'number').map(c => {
+          const center = project({ x: c.cx!, y: c.cy!, z: c.cz! }, rotY, rotX, zoom, pan.x, pan.y, W, H);
+          const r = 80 + (c.n || 0) * 1.8;
           return (
             <g key={c.id}>
               <circle cx={center.x} cy={center.y} r={r * center.depth}
                 fill={c.color} opacity={dark ? 0.08 : 0.06} />
               <circle cx={center.x} cy={center.y} r={r * center.depth}
                 fill="none" stroke={c.color} strokeOpacity={dark ? 0.32 : 0.25} strokeWidth="0.5" strokeDasharray="3 4" />
-              <text x={center.x} y={center.y - r * center.depth - 6}
-                fontFamily="var(--et-sans)" fontSize="10.5" fontWeight="600"
-                letterSpacing="0.18em" textAnchor="middle"
-                fill={dark ? 'rgba(244,236,218,0.55)' : 'rgba(26,43,74,0.55)'}>
-                {c.label.length > 14 ? c.label.slice(0, 14) + '…' : c.label}
-              </text>
             </g>
           );
         })}
@@ -729,10 +729,9 @@ export function GraphView({
                 <circle cx={n.proj.x} cy={n.proj.y} r={r + 7}
                   fill="none" stroke="#FFC857" strokeWidth="2.4" opacity="0.95" />
               )}
-              {n.bridge && (
-                <circle cx={n.proj.x} cy={n.proj.y} r={r + 2}
-                  fill="none" stroke="#E8B57A" strokeWidth="1.4" opacity="0.85" />
-              )}
+              {/* Bridge ring rendering removed — backend ships n.bridge in
+                  every node, but default canvas should stay clean. The
+                  spotlight visualization is delegated to a design pass. */}
               <circle cx={n.proj.x} cy={n.proj.y} r={r}
                 fill={color}
                 stroke={dark ? 'rgba(20,24,42,0.6)' : 'rgba(255,255,255,0.7)'}
