@@ -18,6 +18,15 @@ import time
 from ctypes import wintypes
 from pathlib import Path
 
+# Force utf-8 stdio (PyInstaller frozen ignores PYTHONIOENCODING on Chinese
+# Windows; default cp936 mojibakes Murmur log output and crashes prints with
+# non-cp936 chars).
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except (AttributeError, ValueError):
+    pass
+
 IS_WINDOWS = sys.platform.startswith("win")
 
 # Win32 process enumeration (same as extract_key.py)

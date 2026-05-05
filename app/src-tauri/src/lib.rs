@@ -378,6 +378,11 @@ fn spawn_etcli_serve(app: &AppHandle, evict_stale: bool) -> Option<Child> {
         cmd.current_dir(work_dir);
         cmd.arg("serve").arg("--port").arg("9100");
         cmd.env("PYTHONIOENCODING", "utf-8");
+        // PEP 540 — forces utf-8 stdio even in PyInstaller-frozen builds where
+        // PYTHONIOENCODING alone is silently ignored. Without this on Chinese
+        // Windows, etcli's stderr writes em-dash as gbk (logs mojibake to ��)
+        // and refresh.py crashes printing ✓ with UnicodeEncodeError.
+        cmd.env("PYTHONUTF8", "1");
         cmd.stdin(Stdio::null()).stdout(stdout).stderr(stderr);
         #[cfg(target_os = "windows")]
         {

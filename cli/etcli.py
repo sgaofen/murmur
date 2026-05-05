@@ -13,6 +13,17 @@ import os
 import re
 import sqlite3
 import sys
+
+# Force utf-8 stdio. PyInstaller-frozen Python on Chinese Windows otherwise
+# defaults sys.stdout/stderr to gbk regardless of PYTHONIOENCODING in env, so
+# any non-gbk char (✓ U+2713, em-dash U+2014 in some places, emoji) breaks
+# either as mojibake in serve.log or as UnicodeEncodeError that kills refresh.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except (AttributeError, ValueError):
+    pass
+
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
@@ -592,7 +603,7 @@ STOPWORDS.update("这个 那个 一下 还是 就是 没有 什么 怎么 为啥
 STOP_CHARS = set("的了是我你他她也都在就不和与这那一个有没啊吧呀嗯哦嘛呢吗哈呜哇噢哎唉哟唔嗷嘿哼啦喔把被让给从向对跟比又再才还但而或因所以之上下里外中后前时日年月来去到过")
 NON_TEXT = re.compile(r"\[[^\]]+\]")
 URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
-APP_VERSION = "0.3.16"
+APP_VERSION = "0.3.17"
 YEARBOOK_CACHE_VERSION = 5
 
 
@@ -3847,6 +3858,17 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                                capture_output=True, text=True, encoding="utf-8", errors="replace")
             dt = round((_time.time() - t0) * 1000)
             ok = r.returncode == 0
+            # Echo a tail of the subprocess output to serve.log so multi-account /
+            # encoding / decrypt failures are visible in diag bundles. Without
+            # this, the only place the real error lives is the in-memory HTTP
+            # response, which users can't easily attach.
+            if not ok or r.stderr.strip():
+                tail = (r.stdout + ("\n" + r.stderr if r.stderr else "")).strip()[-1500:]
+                sys.stderr.write(
+                    f"[refresh] rc={r.returncode} ms={dt} wxid={req_wxid or '(auto)'}\n"
+                    f"[refresh] ---- subprocess output (tail) ----\n{tail}\n"
+                    f"[refresh] -----------------------------------\n"
+                )
             # Reload store + flush every cache so the new data shows immediately.
             # /api/refresh is WeChat-specific (it spawns refresh.py which decrypts
             # WeChat DBs), so we operate on _wechat_store NOT self.store — the

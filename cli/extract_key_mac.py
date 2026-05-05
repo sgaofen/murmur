@@ -39,6 +39,15 @@ import sys
 import time
 from pathlib import Path
 
+# Force utf-8 stdio (mirrors etcli/refresh — frozen Python on Windows defaults
+# to cp936 even when launcher sets PYTHONIOENCODING; Mac is fine but the cost
+# of being explicit here is zero).
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except (AttributeError, ValueError):
+    pass
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from paths import discover_wechat_profiles, IS_MAC, murmur_config_path, wechat_main_exec  # noqa: E402
 
