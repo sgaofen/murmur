@@ -139,6 +139,77 @@ function clusterColor(clusterId: string | null | undefined): string {
   return `hsl(${hue}, 65%, 70%)`;
 }
 
+/** Pure HSL hue from a cluster id — handy for generating stroke/fill variants
+ *  without re-hashing. Returns just the integer 0-359. */
+function clusterHue(clusterId: string): number {
+  let h = 5381;
+  for (let i = 0; i < clusterId.length; i++) {
+    h = ((h * 33) ^ clusterId.charCodeAt(i)) | 0;
+  }
+  return ((h % 360) + 360) % 360;
+}
+
+/** Andrew's monotone-chain convex hull. Returns hull vertices in CCW order.
+ *  For ≤ 2 points, returns the input as-is. */
+function convexHull(pts: { x: number; y: number }[]): { x: number; y: number }[] {
+  if (pts.length < 3) return pts.slice();
+  const sorted = [...pts].sort((a, b) => a.x - b.x || a.y - b.y);
+  const cross = (o: { x: number; y: number }, a: { x: number; y: number }, b: { x: number; y: number }) =>
+    (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  const lower: typeof sorted = [];
+  for (const p of sorted) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
+    lower.push(p);
+  }
+  const upper: typeof sorted = [];
+  for (let i = sorted.length - 1; i >= 0; i--) {
+    const p = sorted[i];
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
+    upper.push(p);
+  }
+  upper.pop();
+  lower.pop();
+  return lower.concat(upper);
+}
+
+/** Build a smooth, organic, closed wrap-path around `points`. Inflates each
+ *  hull vertex outward from the centroid by `margin` so nodes sit comfortably
+ *  inside, then connects vertices with cubic Beziers (Catmull-Rom equiv,
+ *  uniform tension 1/6). Result reads as an irregular blob, not a circle —
+ *  that's the user's "立体建模连线把关系网包裹起来" requirement. */
+function smoothHullPath(points: { x: number; y: number; r?: number }[], margin = 28): string {
+  const hull = convexHull(points);
+  if (hull.length < 3) return '';
+  const cx = hull.reduce((s, p) => s + p.x, 0) / hull.length;
+  const cy = hull.reduce((s, p) => s + p.y, 0) / hull.length;
+  const expanded = hull.map((p, i) => {
+    const dx = p.x - cx, dy = p.y - cy;
+    const d = Math.hypot(dx, dy) || 1;
+    // Per-vertex margin — node radius (if known) plus the requested margin.
+    // Picking original points to match indices: hull might reorder, so use the
+    // original point's r when available (defaults to 0).
+    const rNode = (points[i] && points[i].r) ? points[i].r! : 0;
+    const m = margin + rNode * 0.5;
+    return { x: p.x + (dx / d) * m, y: p.y + (dy / d) * m };
+  });
+  const n = expanded.length;
+  const path: string[] = [];
+  path.push(`M${expanded[0].x.toFixed(1)},${expanded[0].y.toFixed(1)}`);
+  for (let i = 0; i < n; i++) {
+    const p0 = expanded[(i - 1 + n) % n];
+    const p1 = expanded[i];
+    const p2 = expanded[(i + 1) % n];
+    const p3 = expanded[(i + 2) % n];
+    const c1x = p1.x + (p2.x - p0.x) / 6;
+    const c1y = p1.y + (p2.y - p0.y) / 6;
+    const c2x = p2.x - (p3.x - p1.x) / 6;
+    const c2y = p2.y - (p3.y - p1.y) / 6;
+    path.push(`C${c1x.toFixed(1)},${c1y.toFixed(1)} ${c2x.toFixed(1)},${c2y.toFixed(1)} ${p2.x.toFixed(1)},${p2.y.toFixed(1)}`);
+  }
+  path.push('Z');
+  return path.join(' ');
+}
+
 function edgeKey(edge: Pick<GraphEdge, 'source' | 'target'> | null | undefined): string {
   if (!edge) return '';
   return [edge.source, edge.target].sort().join('__');
@@ -557,6 +628,40 @@ export function GraphView({
     return s;
   }, [selected, data.edges]);
 
+  /** When spotlighting a bridge, return up to 2 clusters (by member count of
+   *  bridge's neighbors that fall in each cluster) — these are the groups the
+   *  bridge actually stitches together. `<2` clusters means the bridge is
+   *  internal to one cluster (uncommon for true betweenness winners). */
+  const bridgeClusters = useMemo(() => {
+    if (!spotlight || spotlight.kind !== 'bridge') return [] as string[];
+    const counts = new Map<string, number>();
+    data.edges.forEach(e => {
+      const otherId = e.source === spotlight.id ? e.target
+                  : e.target === spotlight.id ? e.source : null;
+      if (!otherId || otherId === 'self') return;
+      const other = data.nodes.find(n => n.id === otherId);
+      if (!other?.cluster) return;
+      counts.set(other.cluster, (counts.get(other.cluster) || 0) + 1);
+    });
+    return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 2).map(([cid]) => cid);
+  }, [spotlight, data]);
+
+  /** Hulls to render: array of { clusterId, members[] } for each focal cluster.
+   *  - cluster spotlight: 1 hull (the spotlit cluster)
+   *  - bridge spotlight: 2 hulls (top 2 clusters bridge connects) */
+  const spotlightHulls = useMemo(() => {
+    if (!spotlight) return [] as { id: string; memberIds: string[] }[];
+    const clustersToWrap = spotlight.kind === 'cluster'
+      ? [spotlight.id]
+      : bridgeClusters;
+    return clustersToWrap.map(cid => ({
+      id: cid,
+      memberIds: data.nodes
+        .filter(n => n.cluster === cid && !n.is_self)
+        .map(n => n.id),
+    })).filter(h => h.memberIds.length >= 3);
+  }, [spotlight, bridgeClusters, data.nodes]);
+
   // Spotlight set: which nodes should be considered "in focus". Kept separate
   // from `neighbors` (which is selection-driven) so a user can pin a cluster
   // OR a bridge while still selecting+inspecting individual nodes inside it.
@@ -566,21 +671,25 @@ export function GraphView({
     if (spotlight.kind === 'cluster') {
       const c = data.clusters.find(c => c.id === spotlight.id);
       if (c) (c.members || []).forEach(m => s.add(m));
-      // Also include any node tagged with this cluster id (members[] is
-      // optional in the type — if backend ever stops sending it the per-node
-      // cluster field still works).
       data.nodes.forEach(n => { if (n.cluster === spotlight.id) s.add(n.id); });
     } else {
-      // bridge: keep the bridge + its direct neighbors so user can see what
-      // it stitches together.
+      // bridge: include the bridge + ALL members of the top-2 clusters it
+      // connects (so the "wrap two groups" visual lands on real cluster
+      // members, not just the bridge's direct neighbors).
       s.add(spotlight.id);
+      const bridgeClusterSet = new Set(bridgeClusters);
+      data.nodes.forEach(n => {
+        if (n.cluster && bridgeClusterSet.has(n.cluster)) s.add(n.id);
+      });
+      // Also keep direct neighbors that don't fall in those clusters — they
+      // shouldn't drop to invisible just because they're outliers.
       data.edges.forEach(e => {
         if (e.source === spotlight.id) s.add(e.target);
         if (e.target === spotlight.id) s.add(e.source);
       });
     }
     return s;
-  }, [spotlight, data.clusters, data.nodes, data.edges]);
+  }, [spotlight, bridgeClusters, data.clusters, data.nodes, data.edges]);
 
   const sortedEdges = useMemo(
     () => [...data.edges].sort((a, b) => {
@@ -634,10 +743,12 @@ export function GraphView({
           </filter>
         </defs>
 
-        {/* Cluster halos */}
-        {data.clusters.map(c => {
-          const center = project({ x: c.cx, y: c.cy, z: c.cz }, rotY, rotX, zoom, pan.x, pan.y, W, H);
-          const r = 80 + c.n * 1.8;
+        {/* Legacy cluster halos (cx/cy/cz path) — only renders for backend
+            payloads that ship explicit centroids. Current backend uses the
+            spotlight-hull path below instead. */}
+        {data.clusters.filter(c => typeof c.cx === 'number').map(c => {
+          const center = project({ x: c.cx!, y: c.cy!, z: c.cz! }, rotY, rotX, zoom, pan.x, pan.y, W, H);
+          const r = 80 + (c.n || 0) * 1.8;
           return (
             <g key={c.id}>
               <circle cx={center.x} cy={center.y} r={r * center.depth}
@@ -653,6 +764,85 @@ export function GraphView({
             </g>
           );
         })}
+
+        {/* Spotlight hulls — organic blob wrap around the focal cluster(s). For
+            cluster spotlight: 1 hull. For bridge spotlight: 2 hulls (the two
+            groups the bridge stitches together) so the user sees what's being
+            bridged. Path is convex-hull → expanded outward → smoothed via
+            Catmull-Rom Bezier. Drawn behind edges so connections still read on top. */}
+        {spotlight && spotlightHulls.map(hull => {
+          const pts = hull.memberIds
+            .map(id => projById[id])
+            .filter(Boolean)
+            .map(n => ({ x: n.proj.x, y: n.proj.y, r: n.size * n.proj.depth }));
+          if (pts.length < 3) return null;
+          const d = smoothHullPath(pts, 32);
+          if (!d) return null;
+          const hue = clusterHue(hull.id);
+          return (
+            <g key={`hull-${hull.id}`}>
+              {/* Outer halo glow — softer, larger */}
+              <path d={smoothHullPath(pts, 56)}
+                fill={`hsl(${hue}, 65%, 70%)`} fillOpacity={0.04}
+                stroke="none" />
+              {/* Inner blob — fill + dashed wireframe stroke */}
+              <path d={d}
+                fill={`hsl(${hue}, 65%, 70%)`}
+                fillOpacity={dark ? 0.16 : 0.12}
+                stroke={`hsl(${hue}, 70%, 55%)`}
+                strokeOpacity={0.85}
+                strokeWidth={1.5}
+                strokeDasharray="6 4"
+                style={{ filter: `drop-shadow(0 0 6px hsla(${hue}, 70%, 55%, 0.4))` }} />
+            </g>
+          );
+        })}
+
+        {/* Bridge connecting beams — when spotlighting a bridge, draw thick
+            animated lines from the bridge to ONE representative member of
+            each connected cluster (the one with the strongest edge). Reads
+            literally as "this person bridges THESE two groups". */}
+        {spotlight?.kind === 'bridge' && bridgeClusters.length >= 1 && (() => {
+          const bridgeNode = projById[spotlight.id];
+          if (!bridgeNode) return null;
+          // For each connected cluster, find the bridge's strongest edge into it
+          const beams: { tx: number; ty: number; hue: number; weight: number }[] = [];
+          bridgeClusters.forEach(cid => {
+            const cands = data.edges
+              .map(e => {
+                const otherId = e.source === spotlight.id ? e.target
+                            : e.target === spotlight.id ? e.source : null;
+                if (!otherId || otherId === 'self') return null;
+                const other = data.nodes.find(n => n.id === otherId);
+                if (other?.cluster !== cid) return null;
+                return { otherId, weight: e.weight };
+              })
+              .filter((x): x is { otherId: string; weight: number } => !!x)
+              .sort((a, b) => b.weight - a.weight);
+            if (!cands.length) return;
+            const top = cands[0];
+            const otherProj = projById[top.otherId];
+            if (!otherProj) return;
+            beams.push({ tx: otherProj.proj.x, ty: otherProj.proj.y, hue: clusterHue(cid), weight: top.weight });
+          });
+          return (
+            <>
+              {beams.map((b, i) => (
+                <line key={`beam-${i}`}
+                  x1={bridgeNode.proj.x} y1={bridgeNode.proj.y}
+                  x2={b.tx} y2={b.ty}
+                  stroke={`hsl(${b.hue}, 75%, 60%)`}
+                  strokeWidth={3.5}
+                  strokeOpacity={0.85}
+                  strokeLinecap="round"
+                  strokeDasharray="8 5">
+                  <animate attributeName="stroke-dashoffset"
+                    from="0" to="-26" dur="1.4s" repeatCount="indefinite" />
+                </line>
+              ))}
+            </>
+          );
+        })()}
 
         {/* Edges */}
         {sortedEdges.map((e, i) => {
@@ -858,7 +1048,8 @@ export function GraphView({
       <Legend dark={dark} />
       <OverviewPanel data={data} dark={dark}
                      spotlight={spotlight}
-                     onSpotlight={setSpotlight} />
+                     onSpotlight={setSpotlight}
+                     onSelect={onSelect} />
 
       {/* Spotlight banner — shown only when a cluster or bridge is pinned.
           Provides explicit "exit spotlight" affordance + names what's in focus. */}
@@ -1072,13 +1263,24 @@ function Legend({ dark }: { dark: boolean }) {
 }
 
 function OverviewPanel({
-  data, dark, spotlight, onSpotlight,
+  data, dark, spotlight, onSpotlight, onSelect,
 }: {
   data: GraphData; dark: boolean;
   spotlight: { kind: 'cluster' | 'bridge'; id: string } | null;
   onSpotlight: (s: { kind: 'cluster' | 'bridge'; id: string } | null) => void;
+  onSelect: (id: string | null) => void;
 }) {
   const stats = data.stats;
+  // Anchor of a cluster = highest-degree (combined_score) member. Used to
+  // auto-select someone when the user opens a cluster, so the side panel
+  // pops with that person's profile.
+  const clusterAnchor = (clusterId: string): string | null => {
+    const candidates = data.nodes.filter(n => n.cluster === clusterId && !n.is_self);
+    if (!candidates.length) return null;
+    return candidates.reduce((best, n) =>
+      ((n.combined_score || 0) > (best.combined_score || 0)) ? n : best
+    ).id;
+  };
   const bg = dark ? 'rgba(20,24,42,0.7)' : 'rgba(251,246,238,0.85)';
   const border = dark ? 'rgba(244,236,218,0.14)' : 'rgba(26,43,74,0.12)';
   const tColor = dark ? '#F4ECDA' : '#1A2B4A';
@@ -1117,7 +1319,15 @@ function OverviewPanel({
             const isActive = spotlight?.kind === 'cluster' && spotlight.id === c.id;
             return (
               <button key={c.id}
-                onClick={() => onSpotlight(isActive ? null : { kind: 'cluster', id: c.id })}
+                onClick={() => {
+                  if (isActive) {
+                    onSpotlight(null);
+                  } else {
+                    onSpotlight({ kind: 'cluster', id: c.id });
+                    const anchor = clusterAnchor(c.id);
+                    if (anchor) onSelect(anchor);
+                  }
+                }}
                 style={{
                   all: 'unset', cursor: 'pointer',
                   display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3,
@@ -1150,7 +1360,14 @@ function OverviewPanel({
               const isActive = spotlight?.kind === 'bridge' && spotlight.id === n.id;
               return (
                 <button key={n.id}
-                  onClick={() => onSpotlight(isActive ? null : { kind: 'bridge', id: n.id })}
+                  onClick={() => {
+                    if (isActive) {
+                      onSpotlight(null);
+                    } else {
+                      onSpotlight({ kind: 'bridge', id: n.id });
+                      onSelect(n.id);
+                    }
+                  }}
                   style={{
                     all: 'unset', cursor: 'pointer',
                     fontFamily: 'var(--et-sans)', fontSize: 10, fontWeight: 600,
