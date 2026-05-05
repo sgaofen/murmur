@@ -9,11 +9,16 @@ interface Props {
   onClose: () => void;
   onDone?: () => void;
   onPickQQ?: () => void;
+  // Non-null when backend reports `bootstrap=true` because EchoStore couldn't
+  // construct (e.g. session.db has no SessionTable, file is not a database,
+  // partial-decrypt residue). Renders a banner above Welcome so users see WHY
+  // they were sent back here, instead of silently looping through onboarding.
+  initError?: string | null;
 }
 
 type Phase = 'welcome' | 'diagnose' | 'mac-no-data' | 'mac-paste-key' | 'mac-auto-extract' | 'mac-resign-prompt' | 'mac-resigning' | 'mac-wait-login' | 'mac-fda-needed' | 'win-no-data' | 'win-need-key' | 'win-decrypt' | 'extract-key' | 'done' | 'error';
 
-export function OnboardingDialog({ open, onClose, onDone, onPickQQ }: Props) {
+export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }: Props) {
   void usePrivacy();
   const [phase, setPhase] = useState<Phase>('welcome');
   const [diag, setDiag] = useState<Diagnose | null>(null);
@@ -280,7 +285,12 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ }: Props) {
           </div>
         </div>
         <div style={{ padding: '14px 32px 28px' }}>
-          {phase === 'welcome' && <Welcome onNext={startDiagnose} onPickQQ={onPickQQ} />}
+          {phase === 'welcome' && (
+            <>
+              {initError && <BootstrapInitErrorBanner reason={initError} />}
+              <Welcome onNext={startDiagnose} onPickQQ={onPickQQ} />
+            </>
+          )}
           {phase === 'diagnose' && <Diagnosing />}
           {phase === 'mac-no-data' && diag && <MacNoData diag={diag} onSaved={startDiagnose} onRetry={startDiagnose} onOpenSettings={openFDAAndWait} />}
           {phase === 'mac-paste-key' && diag && <MacPasteKey diag={diag} onSubmit={submitMacKey} />}
@@ -296,6 +306,30 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ }: Props) {
           {phase === 'done' && <Done onDone={() => { onClose(); onDone?.(); }} />}
           {phase === 'error' && <ErrorView error={error || ''} diag={diag} onRetry={startDiagnose} />}
         </div>
+      </div>
+    </div>
+  );
+}
+
+function BootstrapInitErrorBanner({ reason }: { reason: string }) {
+  return (
+    <div style={{
+      padding: '14px 16px', marginBottom: 16,
+      background: 'rgba(196,90,63,0.10)', border: '0.5px solid rgba(196,90,63,0.45)',
+      borderRadius: 10, lineHeight: 1.6,
+    }}>
+      <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--et-rose)', marginBottom: 6 }}>
+        ⚠ 上次解密的数据无法加载，所以又回到了引导
+      </div>
+      <div style={{ fontSize: 12, color: 'var(--et-ink-soft)', fontFamily: 'var(--et-mono)',
+                     padding: '8px 10px', background: 'var(--et-paper-2)', borderRadius: 6,
+                     marginBottom: 10, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+        {reason}
+      </div>
+      <div style={{ fontSize: 12, color: 'var(--et-ink-soft)' }}>
+        建议：完全退出 Murmur，删除 <code>~/Documents/Murmur/decrypted/</code> 整个目录，
+        然后**先在微信里点开聊天列表 + 几个对话 + 朋友圈**让 WCDB 把所有 DB 的 key 派发进内存，
+        再回 Murmur 重新走下面的引导。
       </div>
     </div>
   );

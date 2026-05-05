@@ -45,6 +45,10 @@ export default function App() {
   );
   const [onboarding, setOnboarding] = useState(false);
   const [qqOnboarding, setQQOnboarding] = useState(false);
+  // Set when /api/info reports bootstrap=true with a non-null init_error.
+  // OnboardingDialog renders a "stuck data" banner with this so users see
+  // WHY they're back at onboarding instead of silently re-looping.
+  const [bootstrapInitError, setBootstrapInitError] = useState<string | null>(null);
   const showDevControls = import.meta.env.VITE_SHOW_DEV_CONTROLS === '1';
 
   useEffect(() => {
@@ -117,6 +121,13 @@ export default function App() {
         return;
       }
       if (info.bootstrap) {
+        // If backend reports a specific init_error (e.g. session.db missing
+        // SessionTable, file is not a database, etc.) DON'T just loop the user
+        // back into the same onboarding that won't fix the underlying broken
+        // decrypted dir. Surface it via the dialog's banner so they can act.
+        if (info.init_error) {
+          setBootstrapInitError(info.init_error);
+        }
         setOnboarding(true);
         return;
       }
@@ -201,9 +212,10 @@ export default function App() {
         <PrivacyToggle position={showDevControls ? 'top-right' : 'bottom-right'} />
         <OnboardingDialog
           open={onboarding}
-          onClose={() => { localStorage.setItem(ONBOARDING_SEEN_KEY, '1'); setOnboarding(false); }}
+          onClose={() => { localStorage.setItem(ONBOARDING_SEEN_KEY, '1'); setOnboarding(false); setBootstrapInitError(null); }}
           onDone={() => window.location.reload()}
           onPickQQ={() => { setOnboarding(false); setQQOnboarding(true); }}
+          initError={bootstrapInitError}
         />
         <QQOnboardingDialog
           open={qqOnboarding}
