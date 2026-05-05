@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { GraphView } from '../components/extras/GraphView';
-import type { GraphData, GraphNode, GraphEdge, GraphCluster } from '../components/extras/GraphView';
+import type { GraphData, GraphNode, GraphEdge, GraphCluster, Spotlight } from '../components/extras/GraphView';
 import { API_BASE, getFriend, getPairPack, findPairReport, getReport, getFriendConnections, invokeAgent, getInvokeStream, getAgents, invokePairAgent, getPairStream } from '../data/api';
 import type { BatchStatus, LocalAgent } from '../data/api';
 import type { FriendConnection } from '../data/api';
@@ -184,6 +184,16 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [selectedEdge, setSelectedEdge] = useState<GraphEdge | null>(null);
+  // Design handoff (kk/Graph Spotlight): cluster + bridge spotlight is owned
+  // up here so multiple GraphView remounts don't lose the focus, and so the
+  // banner / picker have a stable place to live across re-renders.
+  const [spotlight, setSpotlight] = useState<Spotlight>(null);
+  // When entering a spotlight, drop selected node/edge so the side panel
+  // doesn't fight the spotlight layer for the same screen real estate.
+  const handleSpotlight = useCallback((s: Spotlight) => {
+    if (s) { setSelected(null); setSelectedEdge(null); }
+    setSpotlight(s);
+  }, []);
   const [dark, setDark] = useState(false);
   const [autoRotate, setAutoRotate] = useState(true);
   const [autoRotateResumeSignal, setAutoRotateResumeSignal] = useState(0);
@@ -297,6 +307,8 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
         autoRotate={autoRotate}
         autoRotateResumeSignal={autoRotateResumeSignal}
         onAutoRotatePause={pauseAutoRotate}
+        spotlight={spotlight}
+        onChangeSpotlight={handleSpotlight}
       />
       {/* Top chrome bar */}
       <div style={{

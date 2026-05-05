@@ -175,6 +175,65 @@ def _windows_tencent_nested_xwechat_paths() -> list[Path]:
     return out
 
 
+def _windows_anyname_parent_xwechat_paths() -> list[Path]:
+    """Catch-all for users with WeChat data under a non-English parent folder
+    name (e.g. `D:\\我的微信\\xwechat_files`, `C:\\Users\\YY\\资料\\xwechat_files`).
+
+    The hard-coded seed list in `_windows_tencent_nested_xwechat_paths` only
+    covers `Tencent / Tencent Files / Weixin / WeChat`, so a user who moved
+    their data to a Chinese-named parent silently dropped out of auto-discovery
+    (issue #1 follow-up from `jwc19890114`).
+
+    Strategy: list every direct child of `home`, `home/Documents`, OneDrive
+    Documents, and each drive root. For each child that's a directory, single
+    `stat()` to check whether `child/xwechat_files` exists. Skip the noisy
+    system folders so we don't burn 100ms on `C:/Windows`.
+
+    Bounded so startup stays snappy: each base's child enumeration goes through
+    `_safe_listdir` (0.6s timeout, drops network drives / TCC-blocked dirs),
+    capped at 200 entries per base. Total cost on a typical Win10 box: ~150ms.
+    """
+    if not IS_WINDOWS:
+        return []
+    home = Path.home()
+    bases = _dedupe_paths([
+        home,
+        home / "Documents",
+        home / "OneDrive" / "Documents",
+        home / "OneDrive - Personal" / "Documents",
+        *_windows_drive_roots(),
+    ])
+    skip_low = {
+        "windows", "program files", "program files (x86)",
+        "programdata", "system volume information",
+        "recovery", "perflogs", "$recycle.bin",
+        "appdata", "msocache", "intel", "amd",
+    }
+    out: list[Path] = []
+    for base in bases:
+        try:
+            if not base.exists():
+                continue
+        except (PermissionError, OSError):
+            continue
+        entries = _safe_listdir(base, timeout_s=0.6)
+        if not entries:
+            continue
+        for child in entries[:200]:
+            try:
+                if not child.is_dir():
+                    continue
+                low = child.name.lower()
+                if low.startswith("$") or low in skip_low:
+                    continue
+                xwf = child / "xwechat_files"
+                if xwf.exists() and xwf.is_dir():
+                    out.append(xwf)
+            except (PermissionError, OSError):
+                continue
+    return _dedupe_paths(out)
+
+
 def _windows_everything_cli_candidates() -> list[Path]:
     """Best-effort Everything ES locations.
 
@@ -325,6 +384,7 @@ def _windows_xwechat_search_paths() -> list[Path]:
     paths.extend(_windows_xwechat_variants(home, include_base=False))
     paths.extend(_windows_xwechat_variants(home / "Documents", include_base=False))
     paths.extend(_windows_tencent_nested_xwechat_paths())
+    paths.extend(_windows_anyname_parent_xwechat_paths())
     paths += [
         home / "Documents" / "xwechat_files",
         home / "OneDrive" / "Documents" / "xwechat_files",
