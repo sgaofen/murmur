@@ -126,12 +126,15 @@ function layoutNodes(graph: BackendGraph): GraphData {
     });
   });
 
-  // GraphCluster (from GraphView) wants cx/cy/cz/color/n for visual rendering;
-  // we only need the COUNT for the stat card right now. Backend's
-  // graph.clusters carries id/label/members for reports/AI but the renderer
-  // doesn't draw cluster bubbles yet, so leave designClusters empty here and
-  // pull the count from graph.stats.core_circles below.
-  const designClusters: GraphCluster[] = [];
+  // Backend's named_clusters (id/label/members) — pass through so the
+  // OverviewPanel can show top cluster names. GraphCluster's cx/cy/cz/color/n
+  // are optional now; cluster halos around individual nodes use cluster id
+  // directly via clusterColor() — no per-cluster centroid math needed.
+  const designClusters: GraphCluster[] = (graph.clusters || []).map(c => ({
+    id: c.id,
+    label: c.label,
+    members: c.members,
+  }));
 
   const edges: GraphEdge[] = graph.edges.map(e => ({
     source: e.source,
