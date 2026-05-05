@@ -523,7 +523,10 @@ class QQStore:
                     for ym, cnt in rows:
                         if ym:
                             monthly[ym] += int(cnt or 0)
-                except sqlite3.OperationalError:
+                except sqlite3.DatabaseError:
+                    # Broadened from OperationalError to also catch corrupt /
+                    # encrypted nt_msg.db tables — same fix as etcli.py 0.3.9.
+                    # Without this, a partially-decrypted QQNT DB 500s home_summary.
                     continue
         finally:
             c.close()
@@ -543,7 +546,8 @@ class QQStore:
                     ).fetchone()
                     if r and r[0] and (earliest == 0 or r[0] < earliest):
                         earliest = int(r[0])
-                except sqlite3.OperationalError:
+                except sqlite3.DatabaseError:
+                    # Broadened from OperationalError — see heat_monthly() above.
                     continue
         finally:
             c.close()
