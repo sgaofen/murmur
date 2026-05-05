@@ -191,8 +191,24 @@ class EchoStore:
 
     def __init__(self, data_dir: Path, me: Optional[str] = None):
         self.dir = Path(data_dir)
-        if not (self.dir / "session.db").exists():
+        sess = self.dir / "session.db"
+        if not sess.exists():
             raise FileNotFoundError(f"session.db not found in {self.dir}")
+        # Guard against empty 4 KB stub session.db files — without this the
+        # store loads "successfully" with zero contacts and Home stays stuck
+        # on an "after-init but no data" state.
+        try:
+            c = sqlite3.connect(f"file:{sess.as_posix()}?mode=ro", uri=True)
+            try:
+                has_table = c.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='SessionTable' LIMIT 1"
+                ).fetchone()
+            finally:
+                c.close()
+            if not has_table:
+                raise FileNotFoundError(f"session.db in {self.dir} has no SessionTable (likely empty stub)")
+        except sqlite3.Error as e:
+            raise FileNotFoundError(f"session.db in {self.dir} unreadable: {e}")
         self.me = me or self._guess_self_wxid()
         self._contacts: Optional[dict[str, Contact]] = None
         self._sessions: Optional[list[Session]] = None
@@ -505,7 +521,7 @@ STOPWORDS.update("这个 那个 一下 还是 就是 没有 什么 怎么 为啥
 STOP_CHARS = set("的了是我你他她也都在就不和与这那一个有没啊吧呀嗯哦嘛呢吗哈呜哇噢哎唉哟唔嗷嘿哼啦喔把被让给从向对跟比又再才还但而或因所以之上下里外中后前时日年月来去到过")
 NON_TEXT = re.compile(r"\[[^\]]+\]")
 URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
-APP_VERSION = "0.2.18"
+APP_VERSION = "0.3.7"
 YEARBOOK_CACHE_VERSION = 5
 
 
@@ -656,9 +672,34 @@ _PACK_BUILD_LOCK = _t.Lock()
 _PAIR_BUILD_LOCK = _t.Lock()
 _STORE_READ_LOCK = _t.RLock()
 
-# Disk cache root: ~/Documents/Murmur/cache/<key>.json
+# ---- per-account isolation ----
+# Disk cache + AI report layout (post-v0.3.1):
+#   ~/Documents/Murmur/cache/<slug>/<key>.json
+#   ~/Desktop/Murmur/agent_reports/<slug>/...
+# where <slug> = "wechat-<wxid>" or "qq-<qq_number>".
+# This stops cross-account data bleed when the user toggles the ProfileSwitcher:
+# previously a WeChat home_summary.json or AI report stayed on disk and got
+# served back when the active store was QQ.
+
+def _account_slug() -> str:
+    """Per-account directory slug for caches/reports.
+
+    Late-binds against `_MurmurAPIHandler` because the class is defined later
+    in this module. Returns "default" during the bootstrap window before any
+    store loads — keeps imports + module init from crashing on cold start.
+    """
+    try:
+        plat = _MurmurAPIHandler._active_platform
+        ident = _MurmurAPIHandler._active_id
+        if plat and ident:
+            return f"{plat}-{_safe_filename(ident)}"
+    except Exception:
+        pass
+    return "default"
+
+
 def _disk_cache_dir() -> Path:
-    p = Path.home() / "Documents" / "Murmur" / "cache"
+    p = Path.home() / "Documents" / "Murmur" / "cache" / _account_slug()
     p.mkdir(parents=True, exist_ok=True)
     return p
 
@@ -672,7 +713,7 @@ def _agent_reports_root() -> Path:
     override = os.environ.get("MURMUR_AGENT_REPORTS_DIR")
     if override:
         return Path(override).expanduser()
-    return _agent_workspace_root() / "agent_reports"
+    return _agent_workspace_root() / "agent_reports" / _account_slug()
 
 def _codex_model_args() -> list[str]:
     model = os.environ.get("MURMUR_CODEX_MODEL", "gpt-5.2").strip()
@@ -1069,6 +1110,11 @@ def relationship_signals(msgs: list, *, is_group: bool, me: str = "self",
             "last_30d_to_90d_msgs": last_30d_to_90d,
             "days_since_last": int(days_since_last),
         },
+        # Expose so friend_detail can pass these straight to the sidebar /
+        # OfflineSignalsTable. Without them, sig_block.get("moments_back", 0)
+        # returned 0 forever even when signature_notes said "朋友圈互动 10 次".
+        "moments_back": moments_back,
+        "moments_out": moments_out,
         "tier": tier,
         "tier_label": tier_label,
         "signature_notes": signature_notes,
@@ -2525,7 +2571,19 @@ def build_msg_index(store: EchoStore) -> tuple[dict[str, int], dict[str, list[st
     return counts, locations, last_ts
 
 
+def _is_qq_store(store) -> bool:
+    """Return True if `store` is a QQStore (vs EchoStore for WeChat).
+
+    Used to branch helper functions whose implementations differ between
+    WeChat's Msg_<md5(username)> tables and QQ's nt_msg.db schema.
+    """
+    return store is not None and store.__class__.__name__ == "QQStore"
+
+
 def fast_message_count(store: EchoStore, wxid: str) -> int:
+    if _is_qq_store(store):
+        counts, _last = store.build_index()  # type: ignore[attr-defined]
+        return counts.get(wxid, 0)
     counts, _locs, _ = build_msg_index(store)
     table = f"Msg_{hashlib.md5(wxid.encode()).hexdigest()}"
     return counts.get(table, 0)
@@ -2533,6 +2591,8 @@ def fast_message_count(store: EchoStore, wxid: str) -> int:
 
 def heat_monthly_via_sql(store: EchoStore) -> Counter:
     """Aggregate message counts per YYYY-MM by running GROUP BY across every Msg_* table."""
+    if _is_qq_store(store):
+        return store.heat_monthly()  # type: ignore[attr-defined]
     monthly: Counter = Counter()
     for p in sorted(store.dir.glob("message_*.db")):
         if any(skip in p.name for skip in ("_fts", "_resource", "biz_")):
@@ -2602,7 +2662,7 @@ def home_summary(store: EchoStore) -> dict:
     monthly = heat_monthly_via_sql(store)
     months_sorted = sorted(monthly.keys())[-12:] if monthly else []
     values = [monthly[m] for m in months_sorted] or [0] * 12
-    max_v = max(values) if values else 1
+    max_v = max(values) or 1  # guard: empty / all-zero history (fresh / tiny accounts)
     norm = [round(v / max_v, 3) for v in values]
     short_labels = [m.split("-")[1].lstrip("0") + "月" for m in months_sorted] or [
         f"{i+1}月" for i in range(12)
@@ -2616,25 +2676,29 @@ def home_summary(store: EchoStore) -> dict:
     total_contacts = len(sessions)
     total_close = sum(1 for _s, cnt in scored if cnt >= 500)
 
-    # earliest message ts: scan all msg DBs for global MIN(create_time) once
-    earliest_ts = 0
-    for p in sorted(store.dir.glob("message_*.db")):
-        if any(skip in p.name for skip in ("_fts", "_resource", "biz_")):
-            continue
-        c = store._conn(p.name)
-        try:
-            tables = [r[0] for r in c.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'Msg_%'"
-            ).fetchall()]
-            for t in tables:
-                try:
-                    r = c.execute(f"SELECT MIN(create_time) FROM {t}").fetchone()
-                    if r and r[0] and (earliest_ts == 0 or r[0] < earliest_ts):
-                        earliest_ts = r[0]
-                except sqlite3.OperationalError:
-                    continue
-        finally:
-            c.close()
+    # earliest message ts: per-platform — WeChat scans message_*.db for MIN(create_time);
+    # QQStore goes straight to nt_msg.db's c2c_msg_table + group_msg_table.
+    if _is_qq_store(store):
+        earliest_ts = store.earliest_ts()  # type: ignore[attr-defined]
+    else:
+        earliest_ts = 0
+        for p in sorted(store.dir.glob("message_*.db")):
+            if any(skip in p.name for skip in ("_fts", "_resource", "biz_")):
+                continue
+            c = store._conn(p.name)
+            try:
+                tables = [r[0] for r in c.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'Msg_%'"
+                ).fetchall()]
+                for t in tables:
+                    try:
+                        r = c.execute(f"SELECT MIN(create_time) FROM {t}").fetchone()
+                        if r and r[0] and (earliest_ts == 0 or r[0] < earliest_ts):
+                            earliest_ts = r[0]
+                    except sqlite3.OperationalError:
+                        continue
+            finally:
+                c.close()
     days_since = ((datetime.now(CST).timestamp() - earliest_ts) // 86400) if earliest_ts else 0
 
     data = {
@@ -3134,14 +3198,18 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             try:
                 d = discover_data_dir()
                 if d and d.exists():
-                    _MurmurAPIHandler.store = EchoStore(d)
+                    _MurmurAPIHandler._set_wechat_store(EchoStore(d))
                     sys.stderr.write(f"[etcli serve] auto-promoted from bootstrap → store loaded from {d}\n")
             except Exception as e:
                 sys.stderr.write(f"[etcli serve] bootstrap auto-promote failed: {e}\n")
 
         # Bootstrap mode: only a small allowlist works without decrypted data.
         _NO_STORE_GET = {"/api/info", "/api/agents", "/api/diagnose", "/api/reports", "/api/log-tail",
-                          "/api/scan-disks/status"}
+                          "/api/scan-disks/status", "/api/profiles"}
+        # QQ endpoints have their own data lifecycle (separate stores keyed by
+        # qq number) so they bypass the WeChat-store bootstrap gate entirely.
+        if path.startswith("/api/qq/"):
+            return self._dispatch_qq_get(path, qs)
         if self.store is None and path not in _NO_STORE_GET and not path.startswith("/api/report/"):
             return self._send_json({
                 "error": "no_decrypted_data",
@@ -3178,8 +3246,14 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             return self._send_json({
                 "data_dir": str(self.store.dir),
                 "self_wxid": self.store.me,
+                "account_id": self.store.me,
+                "platform": self.__class__._active_platform,
+                "active_id": self.__class__._active_id,
                 "version": APP_VERSION,
             })
+
+        if path == "/api/profiles":
+            return self._send_json(self.__class__._build_profiles_payload())
 
         if path == "/api/log-tail":
             try:
@@ -3200,7 +3274,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         # _NO_STORE_GET but missing here, so users hit 503 the moment they
         # opened the Reports page on a fresh install.
         _gate_pass = (path in {"/api/diagnose", "/api/agents", "/api/reports", "/api/log-tail",
-                                "/api/scan-disks/status"}
+                                "/api/scan-disks/status", "/api/profiles"}
                       or path.startswith("/api/report/"))
         if _gate_pass:
             pass  # these don't need store, fall through to their handlers
@@ -3575,11 +3649,24 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         url = urllib.parse.urlparse(self.path)
         path = url.path
 
+        # QQ endpoints have an independent data lifecycle from WeChat — they
+        # bypass the WeChat-store bootstrap gate.
+        if path.startswith("/api/qq/"):
+            return self._dispatch_qq_post(path)
+
         # Bootstrap endpoints that work even when store is None (no decrypted data yet)
         # Mac onboarding adds a few extra (resign-wechat, open-fda, open-folder); keep them whitelisted.
         BOOTSTRAP_POSTS = {"/api/refresh", "/api/save-key", "/api/extract-key", "/api/wechat-root",
                            "/api/open-folder", "/api/resign-wechat", "/api/open-fda",
-                           "/api/scan-disks", "/api/scan-disks/cancel"}
+                           "/api/scan-disks", "/api/scan-disks/cancel", "/api/active-profile"}
+        if path == "/api/active-profile":
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length) if length else b"{}"
+            try:
+                opts = json.loads(body.decode("utf-8") or "{}")
+            except json.JSONDecodeError:
+                opts = {}
+            return self._set_active_profile(opts)
         if self.store is None and path not in BOOTSTRAP_POSTS:
             return self._send_json({
                 "error": "no_decrypted_data",
@@ -3667,21 +3754,18 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     try:
                         new_dir = discover_data_dir()
                         if new_dir and new_dir.exists():
-                            _MurmurAPIHandler.store = EchoStore(new_dir)
+                            _MurmurAPIHandler._set_wechat_store(EchoStore(new_dir))
                     except Exception as e:
                         sys.stderr.write(f"[refresh] post-decrypt store init failed: {e}\n")
                 else:
                     self.store._contacts = None
                     self.store._sessions = None
                     self.store._msg_db_for_session.clear()
-                _GRAPH_CACHE.clear()
-                _CONN_CACHE.clear()
-                _FRIEND_DETAIL_CACHE.clear()
-                _FRIENDS_LIST_CACHE.clear()
-                _YEARBOOK_CACHE.clear()
-                _SNS_SIGNALS_CACHE["data"] = None
-                _FF_MOMENTS_CACHE["data"] = None
-                _HOME_SUMMARY_CACHE["data"] = None
+                # Drop every memoized layer — same flush path the profile-swap
+                # endpoint uses. Without this the /api/friends list stays empty
+                # after refresh because _MSG_INDEX_CACHE was populated earlier
+                # when the decrypted dir was still empty stubs.
+                _MurmurAPIHandler._flush_analysis_caches()
                 _disk_clear()  # nuke persisted caches too — data is fresh
             return self._send_json({
                 "ok": ok,
@@ -4540,6 +4624,286 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
 
         return self._send_json({"error": "Not found", "path": path}, status=404)
 
+
+    # ============================================================
+    # Multi-platform store registry. `self.store` is the *active* store —
+    # an EchoStore (WeChat) or QQStore (QQ). Both expose the same surface
+    # (contacts/sessions/messages/message_count/contact) so every analysis
+    # function stays platform-agnostic. See cli/qq_paths.py, cli/qq_decrypt.py,
+    # cli/qq_store.py.
+    # ============================================================
+    _wechat_store: Optional[EchoStore] = None
+    _qq_stores: dict = {}
+    _qq_keys_cfg_path = Path.home() / ".murmur" / "qq_keys.json"
+    _active_platform: str = "wechat"
+    _active_id: Optional[str] = None  # wxid for wechat, qq_number for qq
+
+    @classmethod
+    def _qq_load_keys_config(cls) -> dict:
+        if not cls._qq_keys_cfg_path.exists():
+            return {}
+        try:
+            return json.loads(cls._qq_keys_cfg_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+    @classmethod
+    def _qq_save_keys_config(cls, cfg: dict) -> None:
+        cls._qq_keys_cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        cls._qq_keys_cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    @classmethod
+    def _qq_get_store(cls, qq_number: str):
+        if qq_number in cls._qq_stores:
+            return cls._qq_stores[qq_number]
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import qq_store as _qstore  # noqa: E402
+        decrypted_dir = Path.home() / "Documents" / "Murmur" / "decrypted_qq" / qq_number
+        if not (decrypted_dir / "nt_msg.db").exists():
+            return None
+        s = _qstore.QQStore(decrypted_dir, qq_number=qq_number)
+        cls._qq_stores[qq_number] = s
+        return s
+
+    # ---------- shared helpers used by /api/profiles + /api/active-profile ----------
+
+    @classmethod
+    def _set_wechat_store(cls, store: EchoStore, *, set_active: bool = True) -> None:
+        cls._wechat_store = store
+        if set_active:
+            cls.store = store
+            cls._active_platform = "wechat"
+            cls._active_id = store.me
+
+    @classmethod
+    def _flush_analysis_caches(cls) -> None:
+        """Drop every memoized analysis layer so the next request reflects the new store.
+
+        Most caches are global (module-level dicts) — they're keyed by wxid only
+        and would otherwise serve stale WeChat data when the user switched to QQ.
+        """
+        for cache in (_GRAPH_CACHE, _CONN_CACHE, _FRIEND_DETAIL_CACHE,
+                       _FRIENDS_LIST_CACHE, _YEARBOOK_CACHE):
+            try:
+                cache.clear()
+            except Exception:
+                pass
+        for d in (_SNS_SIGNALS_CACHE, _FF_MOMENTS_CACHE, _HOME_SUMMARY_CACHE,
+                   _HOME_CACHE):
+            d["data"] = None  # type: ignore[index]
+        # Drop the WeChat msg-index cache so a swap back to WeChat re-scans.
+        # QQStore caches its own per-instance, so QQ→QQ swaps stay fast.
+        _MSG_INDEX_CACHE["counts"] = None
+        _MSG_INDEX_CACHE["locations"] = None
+        _MSG_INDEX_CACHE["last_ts"] = None
+
+    @staticmethod
+    def _mask_id(s: str) -> str:
+        if not s:
+            return ""
+        if s.startswith("qq:"):
+            n = s[3:]
+            if len(n) <= 6:
+                return "QQ " + n
+            return "QQ " + n[:3] + "…" + n[-3:]
+        if s.startswith("wxid_"):
+            head = s[:6]  # "wxid_x"
+            return head + "…" + s[-4:]
+        if len(s) <= 8:
+            return s
+        return s[:4] + "…" + s[-4:]
+
+    @classmethod
+    def _build_profiles_payload(cls) -> dict:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import qq_paths as _qpaths  # noqa: E402
+        out: list[dict] = []
+        # WeChat
+        try:
+            wprofs = _paths.discover_wechat_profiles()
+        except Exception:
+            wprofs = []
+        cfg = _paths.load_config()
+        saved_wkey = bool(cfg.get("decrypt_key")) or (Path.home() / ".murmur" / "decrypted_keys.json").exists()
+        for p in wprofs:
+            dec_dir = _paths.decrypted_root_for(p, must_exist=True)
+            ready = bool(dec_dir)
+            n_sessions = 0
+            last_ts = 0
+            if ready and cls._wechat_store and Path(cls._wechat_store.dir) == dec_dir:
+                try:
+                    sess = cls._wechat_store.sessions()
+                    n_sessions = len(sess)
+                    last_ts = max((s.last_timestamp for s in sess), default=0)
+                except Exception:
+                    pass
+            state = "ready" if ready else ("needs_decrypt" if saved_wkey else "needs_key")
+            pid = p.wxid
+            out.append({
+                "id": pid,
+                "platform": "wechat",
+                "display_id": cls._mask_id(pid),
+                "qq_number": None,
+                "n_sessions": n_sessions,
+                "last_active_ts": last_ts or None,
+                "state": state,
+                "is_active": (cls._active_platform == "wechat" and cls._active_id == pid),
+            })
+        # QQ
+        try:
+            qprofs = _qpaths.discover_qq_profiles()
+        except Exception:
+            qprofs = []
+        saved_qkeys = cls._qq_load_keys_config()
+        for q in qprofs:
+            dec_dir = _qpaths.qq_decrypted_root_for(q, must_exist=False)
+            ready = (dec_dir is not None) and (dec_dir / "nt_msg.db").exists()
+            n_sessions = 0
+            last_ts = 0
+            if ready:
+                qs = cls._qq_stores.get(q.qq_number)
+                if qs is not None:
+                    try:
+                        sess = qs.sessions()
+                        n_sessions = len(sess)
+                        last_ts = max((s.last_timestamp for s in sess), default=0)
+                    except Exception:
+                        pass
+            state = "ready" if ready else ("needs_decrypt" if q.qq_number in saved_qkeys else "needs_key")
+            pid = f"qq:{q.qq_number}"
+            out.append({
+                "id": pid,
+                "platform": "qq",
+                "display_id": cls._mask_id(pid),
+                "qq_number": q.qq_number,
+                "n_sessions": n_sessions,
+                "last_active_ts": last_ts or None,
+                "state": state,
+                "is_active": (cls._active_platform == "qq" and cls._active_id == q.qq_number),
+            })
+        return {
+            "active_platform": cls._active_platform,
+            "active_id": cls._active_id,
+            "profiles": out,
+        }
+
+    def _set_active_profile(self, opts: dict):
+        cls = self.__class__
+        platform = (opts.get("platform") or "").strip()
+        ident = (opts.get("id") or "").strip()
+        if platform not in ("wechat", "qq"):
+            return self._send_json({"ok": False, "error": "platform must be 'wechat' or 'qq'"}, 400)
+        if not ident:
+            return self._send_json({"ok": False, "error": "id required"}, 400)
+        if platform == "wechat":
+            # Reuse cached store if it matches; otherwise (re)load from disk
+            if cls._wechat_store is not None and cls._wechat_store.me == ident:
+                store = cls._wechat_store
+            else:
+                d = discover_data_dir()
+                if not d or not d.exists():
+                    return self._send_json({"ok": False, "error": "no decrypted WeChat data"}, 404)
+                store = EchoStore(d)
+                cls._wechat_store = store
+            cls.store = store
+            cls._active_platform = "wechat"
+            cls._active_id = store.me or ident
+        else:  # qq
+            qs = cls._qq_get_store(ident)
+            if qs is None:
+                return self._send_json({"ok": False, "error": f"qq {ident} not decrypted"}, 404)
+            cls.store = qs
+            cls._active_platform = "qq"
+            cls._active_id = ident
+        cls._flush_analysis_caches()
+        return self._send_json({
+            "ok": True,
+            "active_platform": cls._active_platform,
+            "active_id": cls._active_id,
+        })
+
+    def _dispatch_qq_get(self, path: str, qs: dict):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import qq_paths as _qpaths  # noqa: E402
+
+        if path == "/api/qq/profiles":
+            # Onboarding-only listing (keys + has_decrypted flags). For the
+            # cross-platform switcher use /api/profiles instead.
+            profiles = _qpaths.discover_qq_profiles()
+            keys = self._qq_load_keys_config()
+            out = []
+            for p in profiles:
+                dec_dir = _qpaths.qq_decrypted_root_for(p, must_exist=False)
+                has_decrypted = (dec_dir is not None) and (dec_dir / "nt_msg.db").exists()
+                out.append({
+                    "qq_number": p.qq_number,
+                    "encrypted_root": str(p.nt_db_dir),
+                    "decrypted_root": str(dec_dir) if dec_dir else None,
+                    "has_decrypted_data": has_decrypted,
+                    "has_saved_key": p.qq_number in keys,
+                })
+            return self._send_json({
+                "platform": "qq",
+                "profiles": out,
+                "qq_running": bool(_qpaths.qq_running_pids()),
+                "qq_install": str(_qpaths.find_qq_install_dir()) if _qpaths.find_qq_install_dir() else None,
+            })
+
+        return self._send_json({"error": "unknown qq endpoint", "path": path}, 404)
+
+    def _dispatch_qq_post(self, path: str):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import qq_paths as _qpaths  # noqa: E402
+        import qq_decrypt as _qdec  # noqa: E402
+
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length else b"{}"
+        try:
+            opts = json.loads(body.decode("utf-8") or "{}")
+        except json.JSONDecodeError:
+            opts = {}
+
+        if path == "/api/qq/extract-key":
+            timeout = int(opts.get("timeout", 240))
+            r = _qdec.extract_key_via_powershell(timeout=timeout)
+            return self._send_json(r)
+
+        if path == "/api/qq/save-key":
+            qq = str(opts.get("qq", "")).strip()
+            key = str(opts.get("key", "")).strip()
+            if not qq or not key:
+                return self._send_json({"ok": False, "error": "qq + key required"}, 400)
+            cfg = self._qq_load_keys_config()
+            cfg[qq] = key
+            self._qq_save_keys_config(cfg)
+            return self._send_json({"ok": True, "qq": qq})
+
+        if path == "/api/qq/decrypt":
+            qq = str(opts.get("qq", "")).strip()
+            key = str(opts.get("key", "")).strip()
+            if not qq:
+                return self._send_json({"ok": False, "error": "qq required"}, 400)
+            if not key:
+                key = self._qq_load_keys_config().get(qq, "")
+            if not key:
+                return self._send_json({"ok": False, "error": "no saved key — extract-key first"}, 400)
+            profiles = _qpaths.discover_qq_profiles()
+            prof = next((p for p in profiles if p.qq_number == qq), None)
+            if not prof:
+                return self._send_json({"ok": False, "error": f"qq {qq} not found in Tencent Files"}, 404)
+            dst = _qpaths.qq_decrypted_root_for(prof)
+            try:
+                results = _qdec.decrypt_profile(prof.nt_db_dir, dst, key)
+            except _qdec.WrongKeyError as e:
+                return self._send_json({"ok": False, "error": f"wrong key: {e}"}, 400)
+            self.__class__._qq_stores.pop(qq, None)
+            ok = any(v.startswith("ok") for v in results.values())
+            return self._send_json({
+                "ok": ok, "qq": qq, "decrypted_root": str(dst),
+                "results": results,
+            })
+
+        return self._send_json({"error": "unknown qq endpoint", "path": path}, 404)
 
     def _serve_media(self, md5: str):
         """Serve a media file by its content md5. Auto-decrypts .dat files."""

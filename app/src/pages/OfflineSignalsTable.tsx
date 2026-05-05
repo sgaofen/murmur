@@ -3,6 +3,7 @@ import type { Friend } from '../data/types';
 import { getAllFriends, getFriend } from '../data/api';
 import { displayName, maskedWxid, maskText } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
+import { ProfileSwitcher } from '../components/ProfileSwitcher';
 
 interface SignalRow {
   id: string;
@@ -135,6 +136,7 @@ export function OfflineSignalsTable({ onBack, onOpenFriend }: Props) {
         <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
           <button onClick={onBack} style={{ all: 'unset', cursor: 'pointer',
             color: 'var(--et-mute)', fontSize: 13 }}>← 返回</button>
+          <ProfileSwitcher />
           <div className="et-serif" style={{ fontSize: 18, fontWeight: 600, color: 'var(--et-ink)' }}>
             朋友信号矩阵 · 离线表格视图
           </div>

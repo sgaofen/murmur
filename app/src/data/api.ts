@@ -21,9 +21,41 @@ async function j<T>(path: string, init?: RequestInit): Promise<T> {
 export interface InfoResponse {
   data_dir?: string;
   self_wxid?: string;
+  account_id?: string;
+  platform?: 'wechat' | 'qq';
+  active_id?: string | null;
   version?: string;
   bootstrap?: boolean;
   message?: string;
+}
+
+// Cross-platform profile listing — drives the ProfileSwitcher.
+export interface ProfileEntry {
+  id: string;                 // 'wxid_xxx' for WeChat, 'qq:939919010' for QQ
+  platform: 'wechat' | 'qq';
+  display_id: string;         // already masked: 'wxid_n…97a5' / 'QQ 939…010'
+  qq_number: string | null;
+  n_sessions: number;
+  last_active_ts: number | null;
+  state: 'ready' | 'needs_decrypt' | 'needs_key' | 'extracting';
+  is_active: boolean;
+}
+export interface ProfilesResponse {
+  active_platform: 'wechat' | 'qq';
+  active_id: string | null;
+  profiles: ProfileEntry[];
+}
+export async function getProfiles(): Promise<ProfilesResponse> {
+  return j('/api/profiles');
+}
+export async function setActiveProfile(platform: 'wechat' | 'qq', id: string): Promise<{
+  ok: boolean; active_platform?: string; active_id?: string; error?: string;
+}> {
+  return j('/api/active-profile', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ platform, id }),
+  });
 }
 
 export async function getInfo(): Promise<InfoResponse> {
@@ -244,6 +276,49 @@ export async function cancelDiskScan(): Promise<ScanState & { ok: boolean }> {
   });
 }
 
+// ----- QQNT (Tencent QQ NT) — separate platform from WeChat -----
+
+export interface QQProfile {
+  qq_number: string;
+  encrypted_root: string;
+  decrypted_root: string | null;
+  has_decrypted_data: boolean;
+  has_saved_key: boolean;
+}
+export interface QQProfilesResponse {
+  platform: 'qq';
+  profiles: QQProfile[];
+  qq_running: boolean;
+  qq_install: string | null;
+}
+export async function getQQProfiles(): Promise<QQProfilesResponse> {
+  return j('/api/qq/profiles');
+}
+
+export async function extractQQKey(timeout = 240): Promise<{ ok: boolean; key: string | null; log: string; error: string | null }> {
+  return j('/api/qq/extract-key', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ timeout }),
+  });
+}
+
+export async function saveQQKey(qq: string, key: string): Promise<{ ok: boolean; qq?: string; error?: string }> {
+  return j('/api/qq/save-key', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ qq, key }),
+  });
+}
+
+export async function decryptQQ(qq: string, key?: string): Promise<{ ok: boolean; qq: string; decrypted_root?: string; results?: Record<string, string>; error?: string }> {
+  return j('/api/qq/decrypt', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ qq, key }),
+  });
+}
+
 export async function resignWechat(opts: { relaunch?: boolean } = {}): Promise<{
   ok: boolean; ms?: number; log?: string[]; error?: string; stderr?: string; next_steps?: string;
 }> {
@@ -429,4 +504,4 @@ export async function openFolder(path?: string): Promise<{ ok: boolean; opened?:
   });
 }
 
-export const APP_VERSION = 'v0.2.18 · Murmur 微语';
+export const APP_VERSION = 'v0.3.7 · Murmur 微语';

@@ -827,19 +827,50 @@ def discover_wechat_profiles() -> list[WeChatProfile]:
                     nested_candidates.append(sub)
             except (PermissionError, OSError):
                 continue
-        if not wxid_subs and nested_candidates:
-            for nested in nested_candidates:
-                inner = _safe_listdir(nested)
-                if inner is None:
+        # Always also descend into a nested xwechat_files/ if present — some
+        # WeChat 4.x installs (OneDrive migration etc.) end up with BOTH:
+        #   <root>/wxid_xxx/                       ← empty 89 MB shell
+        #   <root>/xwechat_files/wxid_xxx/         ← the real 11 GB data
+        # If we only checked the outer level we'd silently pick the shell.
+        # Collect both, then dedupe by wxid name preferring the bigger db_storage.
+        for nested in nested_candidates:
+            inner = _safe_listdir(nested)
+            if inner is None:
+                continue
+            for sub in inner:
+                try:
+                    if _is_wxid_dir(sub):
+                        wxid_subs.append(sub)
+                except (PermissionError, OSError):
                     continue
-                for sub in inner:
+
+        # When the same wxid_* name appears at multiple depths, prefer the
+        # one with larger total db_storage size — that's the real data dir.
+        if wxid_subs:
+            by_name: dict[str, list[Path]] = {}
+            for s in wxid_subs:
+                by_name.setdefault(s.name, []).append(s)
+
+            def _db_storage_size(d: Path) -> int:
+                ds = d / "db_storage"
+                if not ds.exists():
+                    return 0
+                total = 0
+                for p in ds.rglob("*"):
                     try:
-                        if _is_wxid_dir(sub):
-                            wxid_subs.append(sub)
+                        if p.is_file():
+                            total += p.stat().st_size
                     except (PermissionError, OSError):
                         continue
-                if wxid_subs:
-                    break  # one nested level is enough
+                return total
+
+            picked: list[Path] = []
+            for name, dirs in by_name.items():
+                if len(dirs) == 1:
+                    picked.append(dirs[0])
+                else:
+                    picked.append(max(dirs, key=_db_storage_size))
+            wxid_subs = picked
 
         for sub in wxid_subs:
             wxid_full = sub.name
@@ -856,6 +887,31 @@ def discover_wechat_profiles() -> list[WeChatProfile]:
                 platform=plat,
             ))
     return profiles
+
+
+def _is_real_decrypted_dir(p: Path) -> bool:
+    """A decrypted dir is "ready" only if session.db has at least one user table.
+
+    Without this guard a 4 KB empty SQLite stub (which has been observed sneaking
+    into the dir between extract-key and refresh) would pass the existence check
+    and lock EchoStore into a permanently empty state — frontend then shows
+    "后端没起来" forever even though etcli is fine.
+    """
+    sess = p / "session.db"
+    if not sess.exists() or sess.stat().st_size < 4096:
+        return False
+    import sqlite3 as _sqlite3
+    try:
+        c = _sqlite3.connect(f"file:{sess.as_posix()}?mode=ro", uri=True)
+        try:
+            row = c.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='SessionTable' LIMIT 1"
+            ).fetchone()
+            return bool(row)
+        finally:
+            c.close()
+    except _sqlite3.Error:
+        return False
 
 
 def decrypted_root_for(profile: WeChatProfile, *, must_exist: bool = False) -> Path:
@@ -884,7 +940,7 @@ def decrypted_root_for(profile: WeChatProfile, *, must_exist: bool = False) -> P
     ]
     if must_exist:
         for p in candidates:
-            if p.exists() and (p / "session.db").exists():
+            if p.exists() and _is_real_decrypted_dir(p):
                 return p
         return None  # type: ignore[return-value]
     # For new writes, prefer first existing if any (continuity), else default Murmur location

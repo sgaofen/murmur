@@ -8,11 +8,12 @@ interface Props {
   open: boolean;
   onClose: () => void;
   onDone?: () => void;
+  onPickQQ?: () => void;
 }
 
 type Phase = 'welcome' | 'diagnose' | 'mac-no-data' | 'mac-paste-key' | 'mac-auto-extract' | 'mac-resign-prompt' | 'mac-resigning' | 'mac-wait-login' | 'mac-fda-needed' | 'win-no-data' | 'win-need-key' | 'win-decrypt' | 'extract-key' | 'done' | 'error';
 
-export function OnboardingDialog({ open, onClose, onDone }: Props) {
+export function OnboardingDialog({ open, onClose, onDone, onPickQQ }: Props) {
   void usePrivacy();
   const [phase, setPhase] = useState<Phase>('welcome');
   const [diag, setDiag] = useState<Diagnose | null>(null);
@@ -254,7 +255,7 @@ export function OnboardingDialog({ open, onClose, onDone }: Props) {
           </div>
         </div>
         <div style={{ padding: '14px 32px 28px' }}>
-          {phase === 'welcome' && <Welcome onNext={startDiagnose} />}
+          {phase === 'welcome' && <Welcome onNext={startDiagnose} onPickQQ={onPickQQ} />}
           {phase === 'diagnose' && <Diagnosing />}
           {phase === 'mac-no-data' && diag && <MacNoData diag={diag} onSaved={startDiagnose} onRetry={startDiagnose} onOpenSettings={openFDAAndWait} />}
           {phase === 'mac-paste-key' && diag && <MacPasteKey diag={diag} onSubmit={submitMacKey} />}
@@ -275,7 +276,7 @@ export function OnboardingDialog({ open, onClose, onDone }: Props) {
   );
 }
 
-function Welcome({ onNext }: { onNext: () => void }) {
+function Welcome({ onNext, onPickQQ }: { onNext: () => void; onPickQQ?: () => void }) {
   return (
     <>
       <div className="et-serif" style={{ fontSize: 17, lineHeight: 1.7, color: 'var(--et-ink-soft)', marginBottom: 18 }}>
@@ -298,7 +299,14 @@ function Welcome({ onNext }: { onNext: () => void }) {
           </div>
         ))}
       </div>
-      <button onClick={onNext} style={primaryBtn}>开始</button>
+      <button onClick={onNext} style={primaryBtn}>开始（微信）</button>
+      {onPickQQ && (
+        <button onClick={onPickQQ} style={{
+          ...primaryBtn, marginTop: 8, background: 'transparent',
+          color: 'var(--et-ink)', boxShadow: 'none',
+          border: '1px solid var(--et-line-2)',
+        }}>🐧 切换到 QQ</button>
+      )}
     </>
   );
 }
