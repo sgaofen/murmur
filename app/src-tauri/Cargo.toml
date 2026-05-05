@@ -1,6 +1,6 @@
 [package]
 name = "murmur"
-version = "0.3.9"
+version = "0.3.10"
 description = "Murmur · 你的微信社交故事 — 100% 本地"
 authors = ["sgaofen"]
 license = "MIT"

@@ -521,7 +521,7 @@ STOPWORDS.update("这个 那个 一下 还是 就是 没有 什么 怎么 为啥
 STOP_CHARS = set("的了是我你他她也都在就不和与这那一个有没啊吧呀嗯哦嘛呢吗哈呜哇噢哎唉哟唔嗷嘿哼啦喔把被让给从向对跟比又再才还但而或因所以之上下里外中后前时日年月来去到过")
 NON_TEXT = re.compile(r"\[[^\]]+\]")
 URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
-APP_VERSION = "0.3.9"
+APP_VERSION = "0.3.10"
 YEARBOOK_CACHE_VERSION = 5
 
 
@@ -3748,20 +3748,29 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                                capture_output=True, text=True, encoding="utf-8", errors="replace")
             dt = round((_time.time() - t0) * 1000)
             ok = r.returncode == 0
-            # Reload store + flush every cache so the new data shows immediately
+            # Reload store + flush every cache so the new data shows immediately.
+            # /api/refresh is WeChat-specific (it spawns refresh.py which decrypts
+            # WeChat DBs), so we operate on _wechat_store NOT self.store — the
+            # latter may be a QQStore if QQ is currently the active platform, in
+            # which case `_msg_db_for_session.clear()` 500s with AttributeError.
             if ok:
-                if self.store is None:
-                    # Bootstrap mode: this was the first decrypt — instantiate store now
+                wechat_store = _MurmurAPIHandler._wechat_store
+                if wechat_store is None:
+                    # First-time decrypt — instantiate WeChat store now. Don't
+                    # auto-promote it to active if a different platform is in use.
                     try:
                         new_dir = discover_data_dir()
                         if new_dir and new_dir.exists():
-                            _MurmurAPIHandler._set_wechat_store(EchoStore(new_dir))
+                            set_active = (_MurmurAPIHandler._active_platform == "wechat"
+                                           or _MurmurAPIHandler.store is None)
+                            _MurmurAPIHandler._set_wechat_store(EchoStore(new_dir),
+                                                                  set_active=set_active)
                     except Exception as e:
                         sys.stderr.write(f"[refresh] post-decrypt store init failed: {e}\n")
                 else:
-                    self.store._contacts = None
-                    self.store._sessions = None
-                    self.store._msg_db_for_session.clear()
+                    wechat_store._contacts = None
+                    wechat_store._sessions = None
+                    wechat_store._msg_db_for_session.clear()
                 # Drop every memoized layer — same flush path the profile-swap
                 # endpoint uses. Without this the /api/friends list stays empty
                 # after refresh because _MSG_INDEX_CACHE was populated earlier
