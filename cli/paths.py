@@ -882,12 +882,27 @@ def discover_wechat_profiles() -> list[WeChatProfile]:
             profile_key = str(sub)
             if profile_key in seen_profiles:
                 continue
+            # Require the wxid dir to actually contain decryptable data.
+            # Without this guard, a `wxid_*/` directory whose `db_storage/` is
+            # empty (or missing entirely) gets reported as a valid profile —
+            # diagnose then says "微信数据 已找到 ✓", refresh.py iterates 0 DBs
+            # and exits 0, the post-decrypt promote finds no session.db, and
+            # the user sees "decrypt subprocess returned 0 but no decrypted
+            # directory found". Filter such empty shells out at discovery.
+            db_storage = sub / "db_storage"
+            try:
+                if not db_storage.is_dir():
+                    continue
+                if not any(db_storage.rglob("*.db")):
+                    continue
+            except (PermissionError, OSError):
+                continue
             seen_profiles.add(profile_key)
             wxid_short = _re.sub(r"_[0-9a-f]+$", "", wxid_full)
             profiles.append(WeChatProfile(
                 wxid=wxid_full,
                 wxid_short=wxid_short,
-                encrypted_root=sub / "db_storage",
+                encrypted_root=db_storage,
                 cache_root=sub,
                 platform=plat,
             ))
