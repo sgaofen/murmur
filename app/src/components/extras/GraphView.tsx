@@ -782,6 +782,40 @@ export function GraphView({
           }}>重置视角</button>
         )}
       </div>
+
+      {/* Zoom controls — visible buttons for trackpad / no-wheel users */}
+      <div style={{
+        position: 'absolute', right: 24, bottom: 24,
+        display: 'flex', flexDirection: 'column', gap: 6,
+        fontFamily: 'var(--et-sans)',
+      }}>
+        <button onClick={() => setZoom(z => Math.min(4, z + 0.2))}
+          title="放大 (键盘 +)"
+          style={{
+            all: 'unset', cursor: 'pointer',
+            width: 36, height: 36, borderRadius: 999,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontSize: 20, fontWeight: 300, lineHeight: 1,
+            background: dark ? 'rgba(244,236,218,0.10)' : 'rgba(255,255,255,0.85)',
+            color: dark ? '#F4ECDA' : 'var(--et-ink)',
+            border: `0.5px solid ${dark ? 'rgba(244,236,218,0.25)' : 'rgba(26,43,74,0.18)'}`,
+            boxShadow: dark ? '0 2px 6px rgba(0,0,0,0.35)' : '0 2px 6px rgba(26,43,74,0.10)',
+            backdropFilter: 'blur(6px)',
+          }}>+</button>
+        <button onClick={() => setZoom(z => Math.max(0.25, z - 0.2))}
+          title="缩小 (键盘 -)"
+          style={{
+            all: 'unset', cursor: 'pointer',
+            width: 36, height: 36, borderRadius: 999,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontSize: 22, fontWeight: 300, lineHeight: 1,
+            background: dark ? 'rgba(244,236,218,0.10)' : 'rgba(255,255,255,0.85)',
+            color: dark ? '#F4ECDA' : 'var(--et-ink)',
+            border: `0.5px solid ${dark ? 'rgba(244,236,218,0.25)' : 'rgba(26,43,74,0.18)'}`,
+            boxShadow: dark ? '0 2px 6px rgba(0,0,0,0.35)' : '0 2px 6px rgba(26,43,74,0.10)',
+            backdropFilter: 'blur(6px)',
+          }}>−</button>
+      </div>
       <style>{`@keyframes mr-pulse{0%,100%{opacity:.4;transform:scale(1)}50%{opacity:1;transform:scale(1.6)}}`}</style>
     </div>
   );
