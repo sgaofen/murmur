@@ -912,10 +912,9 @@ def get_friend_mentions_cached(store: EchoStore, top_n: int = 50,
 
 def _graph_cache_key(scope: str, min_private: int, recent_days: int,
                      top_n: int, show_clusters: bool) -> str:
-    # v4 bumps the cache key so the new core-circle / bridge topology fields
-    # (label propagation + Brandes betweenness) reach existing installs even
-    # though older v3 cache entries on disk are technically still loadable.
-    return f"graph_v4:{scope}:{min_private}:{recent_days}:{top_n}:{show_clusters}"
+    # v3 adds the direct-evidence gate for pair packs/reports. Keep it separate
+    # from older graph caches so stale co-group-only edges cannot pass as evidence.
+    return f"graph_v3:{scope}:{min_private}:{recent_days}:{top_n}:{show_clusters}"
 
 
 def get_relationship_graph_cached(store: EchoStore, *,
@@ -5943,46 +5942,26 @@ def build_relationship_graph(store: EchoStore, *,
     edges = [e for e in edges
              if e["source"] in node_id_set and e["target"] in node_id_set]
 
-    # ---- Real core-circle + bridge detection on the friend-friend subgraph ----
-    # 1) Cluster ("核心圈") via weighted label-propagation. Gives natural communities
-    #    of friends who interact among themselves more than with the rest. Avoids
-    #    NetworkX as a dependency — keeps the PyInstaller bundle small.
-    # 2) Bridge ("桥梁人物") via betweenness centrality (Brandes' algorithm).
-    #    Top 12% of friend nodes by betweenness, capped at 8.
-    cluster_map, bridge_set, named_clusters = _compute_friend_topology(
-        nodes, edges, contacts,
-    )
-    for n in nodes:
-        if n.get("is_self"):
-            n["cluster"] = None
-            n["bridge"] = False
-            continue
-        n["cluster"] = cluster_map.get(n["id"])
-        n["bridge"] = n["id"] in bridge_set
-
+    # Clusters — only render if explicitly requested. Default off to reduce visual noise.
+    clusters = []
     if show_clusters:
-        # Legacy: group-based clusters (pre-topology). Kept under explicit query
-        # flag so any external callers expecting that shape still work.
-        legacy_clusters = []
         for gname, members in group_members.items():
             kept = [m for m in members if m in node_id_set]
             if len(kept) < 2:
                 continue
             c = contacts.get(gname)
-            legacy_clusters.append({
+            clusters.append({
                 "id": gname,
                 "label": (c.display() if c else gname),
                 "members": kept + ["self"],
             })
-        legacy_clusters.sort(key=lambda c: -len(c["members"]))
-        clusters_out = legacy_clusters[:8]
-    else:
-        clusters_out = named_clusters
+        clusters.sort(key=lambda c: -len(c["members"]))
+        clusters = clusters[:8]
 
     return {
         "nodes": nodes,
         "edges": edges,
-        "clusters": clusters_out,
+        "clusters": clusters,
         "stats": {
             "total_people": len(nodes) - 1,
             "total_edges": len(edges),
@@ -5990,131 +5969,8 @@ def build_relationship_graph(store: EchoStore, *,
             "groups": len(group_members),
             "scope": scope,
             "filters": {"min_private": min_private, "recent_days": recent_days},
-            "core_circles": len(named_clusters),
-            "bridges": len(bridge_set),
         },
     }
-
-
-def _compute_friend_topology(
-    nodes: list[dict],
-    edges: list[dict],
-    contacts: dict,
-) -> tuple[dict[str, str], set[str], list[dict]]:
-    """Pure-Python community detection + betweenness on the friend-friend graph.
-
-    Returns:
-        cluster_map: node_id → cluster_label_string ("核心圈 #1" 等)
-        bridge_set:  set of node_ids deemed bridges (top betweenness)
-        named_clusters: serializable cluster list with id / label / members,
-                         only includes clusters with ≥3 members. self always
-                         joins each cluster ("you 处在中心" UI assumption).
-    """
-    # Build weighted adjacency on FRIEND-FRIEND edges only. Excluding self
-    # avoids the trivial single-cluster collapse where every node connects to
-    # self and label-propagation flattens the topology.
-    adj: dict[str, dict[str, float]] = {}
-    for n in nodes:
-        if n.get("is_self"):
-            continue
-        adj[n["id"]] = {}
-    for e in edges:
-        a, b = e["source"], e["target"]
-        if a == "self" or b == "self":
-            continue
-        if a not in adj or b not in adj:
-            continue
-        w = float(e.get("weight", 1) or 1)
-        adj[a][b] = adj[a].get(b, 0.0) + w
-        adj[b][a] = adj[b].get(a, 0.0) + w
-
-    # ---- Label propagation (weighted, deterministic order) ----
-    labels = {v: v for v in adj}
-    order = sorted(adj.keys())  # deterministic — stable cluster ids across runs
-    for _ in range(30):
-        changed = False
-        for v in order:
-            neigh = adj[v]
-            if not neigh:
-                continue
-            counts: dict[str, float] = {}
-            for u, w in neigh.items():
-                lbl = labels[u]
-                counts[lbl] = counts.get(lbl, 0.0) + w
-            # Pick majority label; tie-break by lex order for determinism
-            best = max(counts.items(), key=lambda kv: (kv[1], kv[0]))[0]
-            if labels[v] != best:
-                labels[v] = best
-                changed = True
-        if not changed:
-            break
-
-    # Group nodes by label, keep only clusters with ≥3 members (smaller groups
-    # are noise — pairs aren't really a "圈").
-    by_label: dict[str, list[str]] = {}
-    for v, lbl in labels.items():
-        by_label.setdefault(lbl, []).append(v)
-    significant = [(lbl, mems) for lbl, mems in by_label.items() if len(mems) >= 3]
-    significant.sort(key=lambda lm: -len(lm[1]))
-
-    cluster_map: dict[str, str] = {}
-    named_clusters: list[dict] = []
-    for i, (raw_lbl, mems) in enumerate(significant, 1):
-        cid = f"core_{i}"
-        # Pick the highest-degree member as the cluster's "anchor name" for
-        # human-readable label
-        anchor = max(mems, key=lambda v: sum(adj[v].values()))
-        c = contacts.get(anchor)
-        anchor_name = c.display() if c else anchor
-        named_clusters.append({
-            "id": cid,
-            "label": f"{anchor_name} 这一圈 ({len(mems)} 人)",
-            "members": mems + ["self"],
-        })
-        for m in mems:
-            cluster_map[m] = cid
-
-    # ---- Betweenness centrality (Brandes, unweighted BFS — fast enough at <500
-    # nodes; weighted Dijkstra not worth the complexity here since edge weights
-    # are similar magnitudes and we only care about top-K relative ordering).
-    bc: dict[str, float] = {v: 0.0 for v in adj}
-    for s in adj:
-        S: list[str] = []
-        P: dict[str, list[str]] = {v: [] for v in adj}
-        sigma: dict[str, float] = {v: 0.0 for v in adj}
-        dist: dict[str, int] = {v: -1 for v in adj}
-        sigma[s] = 1.0
-        dist[s] = 0
-        Q: list[str] = [s]
-        while Q:
-            v = Q.pop(0)
-            S.append(v)
-            for w_node in adj[v]:
-                if dist[w_node] < 0:
-                    dist[w_node] = dist[v] + 1
-                    Q.append(w_node)
-                if dist[w_node] == dist[v] + 1:
-                    sigma[w_node] += sigma[v]
-                    P[w_node].append(v)
-        delta: dict[str, float] = {v: 0.0 for v in adj}
-        while S:
-            w_node = S.pop()
-            for v in P[w_node]:
-                if sigma[w_node] > 0:
-                    delta[v] += (sigma[v] / sigma[w_node]) * (1 + delta[w_node])
-            if w_node != s:
-                bc[w_node] += delta[w_node]
-    # Undirected normalization
-    for v in bc:
-        bc[v] /= 2.0
-
-    # Top 12% of friends by betweenness, capped at 8, only nodes with bc > 0
-    ranked = sorted(((v, score) for v, score in bc.items() if score > 0),
-                     key=lambda x: -x[1])
-    bridge_count = min(8, max(2, len(ranked) // 8))
-    bridge_set = {v for v, _ in ranked[:bridge_count]}
-
-    return cluster_map, bridge_set, named_clusters
 
 
 def _detect_local_agents() -> list[dict]:
