@@ -129,6 +129,77 @@ def read_diagnostic_logs(max_lines: int = 80) -> dict:
     }
 
 
+def _mask_user_paths(s: str) -> str:
+    """Replace user's home dir + wxid suffix with stable placeholders so the
+    diag bundle can be pasted into a public issue without leaking the user's
+    Windows username or full WeChat ID."""
+    if not s:
+        return s
+    home = str(Path.home())
+    out = s.replace(home, "~")
+    # Mask wxid suffix: wxid_n0cir36u32si12_97a5 → wxid_n…97a5
+    import re as _re
+    out = _re.sub(r"wxid_([a-z0-9]{2})[a-z0-9]+_([a-f0-9]{4})", r"wxid_\1…\2", out)
+    # Mask QQ numbers (>=5 digits) similarly
+    out = _re.sub(r"\bqq[: /]?(\d{3})\d+(\d{3})\b", r"qq:\1…\2", out)
+    return out
+
+
+def _build_diag_bundle() -> str:
+    """Compose the markdown blob users paste into a GitHub issue."""
+    import platform as _plat
+    lines: list[str] = []
+    lines.append("## Murmur diag bundle")
+    lines.append("")
+    lines.append(f"- **version**: {APP_VERSION}")
+    lines.append(f"- **platform**: {_plat.system()} {_plat.release()} ({_plat.machine()})")
+    lines.append(f"- **python**: {sys.version.split()[0]}")
+    lines.append(f"- **active_platform / active_id**: {_MurmurAPIHandler._active_platform} / "
+                 f"{_mask_user_paths(_MurmurAPIHandler._active_id or '(none)')}")
+    lines.append(f"- **store loaded**: {_MurmurAPIHandler.store is not None}")
+    if _MurmurAPIHandler._init_error:
+        lines.append(f"- **init_error**: `{_mask_user_paths(_MurmurAPIHandler._init_error)}`")
+    # Discovered profiles
+    try:
+        wprofs = _paths.discover_wechat_profiles()
+        lines.append(f"- **wechat profiles found**: {len(wprofs)}")
+        for p in wprofs:
+            lines.append(f"  - {_mask_user_paths(p.wxid)}  enc={_mask_user_paths(str(p.encrypted_root))}  "
+                         f"decrypted={(_paths.decrypted_root_for(p, must_exist=True) is not None)}")
+    except Exception as e:
+        lines.append(f"- **wechat profile discovery failed**: {type(e).__name__}: {e}")
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import qq_paths as _qpaths
+        qprofs = _qpaths.discover_qq_profiles()
+        lines.append(f"- **qq profiles found**: {len(qprofs)}")
+        for q in qprofs:
+            lines.append(f"  - qq:{_mask_user_paths('qq:' + q.qq_number).split(':',1)[-1]}  "
+                         f"enc={_mask_user_paths(str(q.nt_db_dir))}")
+    except Exception as e:
+        lines.append(f"- **qq profile discovery failed**: {type(e).__name__}: {e}")
+    # Caps
+    try:
+        caps = _paths.detect_capabilities()
+        lines.append(f"- **caps**: can_decrypt_db={caps.can_decrypt_db}, can_extract_key={caps.can_extract_key}, "
+                     f"weixin_running={caps.weixin_running}, has_wechat_data={caps.has_wechat_data}")
+    except Exception as e:
+        lines.append(f"- **caps detection failed**: {type(e).__name__}: {e}")
+    # Logs
+    logs = read_diagnostic_logs(max_lines=40)
+    lines.append("")
+    lines.append("### serve.log (last 40)")
+    lines.append("```")
+    lines.append(_mask_user_paths(logs.get("serve", "(empty)")))
+    lines.append("```")
+    lines.append("")
+    lines.append("### tauri-shell.log (last 40)")
+    lines.append("```")
+    lines.append(_mask_user_paths(logs.get("tauri_shell", "(empty)")))
+    lines.append("```")
+    return "\n".join(lines)
+
+
 def self_wxid(prefs_path: Optional[Path] = None) -> Optional[str]:
     """Best-effort self wxid: legacy echotrace prefs first, else from active profile."""
     p = prefs_path or _flutter_prefs_path()
@@ -521,7 +592,7 @@ STOPWORDS.update("这个 那个 一下 还是 就是 没有 什么 怎么 为啥
 STOP_CHARS = set("的了是我你他她也都在就不和与这那一个有没啊吧呀嗯哦嘛呢吗哈呜哇噢哎唉哟唔嗷嘿哼啦喔把被让给从向对跟比又再才还但而或因所以之上下里外中后前时日年月来去到过")
 NON_TEXT = re.compile(r"\[[^\]]+\]")
 URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
-APP_VERSION = "0.3.14"
+APP_VERSION = "0.3.15"
 YEARBOOK_CACHE_VERSION = 5
 
 
@@ -3209,7 +3280,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
 
         # Bootstrap mode: only a small allowlist works without decrypted data.
         _NO_STORE_GET = {"/api/info", "/api/agents", "/api/diagnose", "/api/reports", "/api/log-tail",
-                          "/api/scan-disks/status", "/api/profiles"}
+                          "/api/scan-disks/status", "/api/profiles", "/api/diag-bundle"}
         # QQ endpoints have their own data lifecycle (separate stores keyed by
         # qq number) so they bypass the WeChat-store bootstrap gate entirely.
         if path.startswith("/api/qq/"):
@@ -3270,6 +3341,12 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 max_lines = 80
             return self._send_json(read_diagnostic_logs(max_lines=max_lines))
 
+        if path == "/api/diag-bundle":
+            # One-shot: returns a markdown blob the user can paste straight into
+            # a GitHub issue. We mask the user's home dir and wxid so they don't
+            # leak more than they intend; everything else is structural.
+            return self._send_json({"markdown": _build_diag_bundle()})
+
         if path == "/api/scan-disks/status":
             # Polling endpoint for the background disk scan started by POST /api/scan-disks.
             return self._send_json(_paths.get_scan_state())
@@ -3282,7 +3359,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         # _NO_STORE_GET but missing here, so users hit 503 the moment they
         # opened the Reports page on a fresh install.
         _gate_pass = (path in {"/api/diagnose", "/api/agents", "/api/reports", "/api/log-tail",
-                                "/api/scan-disks/status", "/api/profiles"}
+                                "/api/scan-disks/status", "/api/profiles", "/api/diag-bundle"}
                       or path.startswith("/api/report/"))
         if _gate_pass:
             pass  # these don't need store, fall through to their handlers
