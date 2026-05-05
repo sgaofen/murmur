@@ -287,9 +287,11 @@ export interface QQProfile {
 }
 export interface QQProfilesResponse {
   platform: 'qq';
+  supported?: boolean;
   profiles: QQProfile[];
   qq_running: boolean;
   qq_install: string | null;
+  error?: string;
 }
 export async function getQQProfiles(): Promise<QQProfilesResponse> {
   return j('/api/qq/profiles');
@@ -504,4 +506,4 @@ export async function openFolder(path?: string): Promise<{ ok: boolean; opened?:
   });
 }
 
-export const APP_VERSION = 'v0.3.7 · Murmur 微语';
+export const APP_VERSION = 'v0.3.8 · Murmur 微语';

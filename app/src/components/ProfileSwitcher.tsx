@@ -32,12 +32,12 @@ export function ProfileSwitcher() {
     return (
       <button
         type="button"
-        onClick={() => requestOnboarding('qq')}
-        title="添加 QQ 账号"
+        onClick={() => requestOnboarding('wechat')}
+        title="添加账号"
         style={addOnlyChip}
       >
         <span style={{ fontSize: 13, lineHeight: 1 }}>＋</span>
-        <span>添加 QQ</span>
+        <span>添加账号</span>
       </button>
     );
   }
