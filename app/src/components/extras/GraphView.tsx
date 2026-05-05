@@ -38,9 +38,13 @@ export interface GraphEdge {
 export interface GraphCluster {
   id: string;
   label: string;
-  cx: number; cy: number; cz: number;
-  color: string;
-  n: number;
+  // Visual positioning fields are optional — we currently only render cluster
+  // membership via per-node halos (clusterColor) + names in OverviewPanel,
+  // not as 3D bubbles. Backend's _compute_friend_topology emits id/label only.
+  cx?: number; cy?: number; cz?: number;
+  color?: string;
+  n?: number;
+  members?: string[];
 }
 export interface GraphData {
   nodes: GraphNode[];
@@ -119,6 +123,20 @@ interface Props {
   autoRotateResumeSignal?: number;
   onAutoRotatePause?: () => void;
   height?: number;
+}
+
+/** Map a cluster id (e.g., "core_3") to a stable pastel HSL color. Different
+ *  clusters get visually distinct hues so members can be grouped at a glance,
+ *  but lightness is high to keep the rings calm next to tier colors. */
+function clusterColor(clusterId: string | null | undefined): string {
+  if (!clusterId) return 'rgba(0,0,0,0)';
+  // Hash the id to a hue. djb2 is fine — short ids, no collisions in practice.
+  let h = 5381;
+  for (let i = 0; i < clusterId.length; i++) {
+    h = ((h * 33) ^ clusterId.charCodeAt(i)) | 0;
+  }
+  const hue = ((h % 360) + 360) % 360;
+  return `hsl(${hue}, 65%, 70%)`;
 }
 
 function edgeKey(edge: Pick<GraphEdge, 'source' | 'target'> | null | undefined): string {
@@ -729,9 +747,29 @@ export function GraphView({
                 <circle cx={n.proj.x} cy={n.proj.y} r={r + 7}
                   fill="none" stroke="#FFC857" strokeWidth="2.4" opacity="0.95" />
               )}
-              {n.bridge && (
-                <circle cx={n.proj.x} cy={n.proj.y} r={r + 2}
-                  fill="none" stroke="#E8B57A" strokeWidth="1.4" opacity="0.85" />
+              {/* Cluster halo — soft pastel ring colored by cluster id, sits BEHIND
+                  the tier-color node fill so it reads as group membership without
+                  competing with tier color. */}
+              {n.cluster && !n.is_self && (
+                <circle cx={n.proj.x} cy={n.proj.y} r={r + 8}
+                  fill="none" stroke={clusterColor(n.cluster)}
+                  strokeWidth="3.5" opacity="0.5" />
+              )}
+              {/* Bridge marker — bold dashed orange ring + animated pulse glow.
+                  Three nodes max (top-betweenness), so making them unmistakable
+                  is fine; it's the structural backbone of the user's network. */}
+              {n.bridge && !n.is_self && (
+                <>
+                  <circle cx={n.proj.x} cy={n.proj.y} r={r + 14}
+                    fill="none" stroke="#FF6B47" strokeWidth="2.5"
+                    strokeDasharray="4 3" opacity="0.95">
+                    <animate attributeName="r"
+                      values={`${r + 12};${r + 18};${r + 12}`}
+                      dur="2.4s" repeatCount="indefinite" />
+                    <animate attributeName="opacity"
+                      values="0.95;0.4;0.95" dur="2.4s" repeatCount="indefinite" />
+                  </circle>
+                </>
               )}
               <circle cx={n.proj.x} cy={n.proj.y} r={r}
                 fill={color}
@@ -754,6 +792,20 @@ export function GraphView({
                   {n.is_self ? '你' : displayName(n.id, n.name)}
                 </text>
               )}
+              {/* "桥" pill below the name for bridge nodes — extra-explicit so the
+                  user can spot the structural backbone at a glance. */}
+              {n.bridge && !n.is_self && !dim && (
+                <text x={n.proj.x} y={n.proj.y + r + 28}
+                  textAnchor="middle"
+                  fontFamily="var(--et-sans)"
+                  fontSize={10} fontWeight={700}
+                  fill="#FF6B47"
+                  stroke={dark ? 'rgba(11,15,34,0.85)' : 'rgba(247,241,230,0.95)'}
+                  strokeWidth={3} paintOrder="stroke fill"
+                  style={{ pointerEvents: 'none' }}>
+                  ✦ 桥梁
+                </text>
+              )}
             </g>
           );
         })}
@@ -764,7 +816,7 @@ export function GraphView({
       )}
 
       <Legend dark={dark} />
-      <OverviewPanel stats={data.stats} dark={dark} />
+      <OverviewPanel data={data} dark={dark} />
 
       <div style={{
         position: 'absolute', left: 24, top: 74, display: 'flex', alignItems: 'center', gap: 12,
@@ -929,11 +981,15 @@ function Legend({ dark }: { dark: boolean }) {
   );
 }
 
-function OverviewPanel({ stats, dark }: { stats: GraphData['stats']; dark: boolean }) {
+function OverviewPanel({ data, dark }: { data: GraphData; dark: boolean }) {
+  const stats = data.stats;
   const bg = dark ? 'rgba(20,24,42,0.7)' : 'rgba(251,246,238,0.85)';
   const border = dark ? 'rgba(244,236,218,0.14)' : 'rgba(26,43,74,0.12)';
   const tColor = dark ? '#F4ECDA' : '#1A2B4A';
   const mute = dark ? 'rgba(244,236,218,0.6)' : 'rgba(26,43,74,0.6)';
+  const bridgeNodes = data.nodes.filter(n => n.bridge && !n.is_self);
+  // Show top 3 clusters (largest first) by member count
+  const topClusters = (data.clusters || []).slice(0, 3);
   return (
     <div style={{
       position: 'absolute', right: 24, bottom: 24,
@@ -955,6 +1011,40 @@ function OverviewPanel({ stats, dark }: { stats: GraphData['stats']; dark: boole
         <Stat dark={dark} num={stats.clusters} label="个核心圈" />
         <Stat dark={dark} num={stats.bridges} label="个桥梁人物" />
       </div>
+      {topClusters.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <div style={{ fontFamily: 'var(--et-sans)', fontSize: 10, letterSpacing: '0.1em',
+            color: mute, marginBottom: 6 }}>核心圈（最大的 {Math.min(3, topClusters.length)} 个）</div>
+          {topClusters.map(c => (
+            <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3,
+              fontFamily: 'var(--et-sans)', fontSize: 11, color: tColor }}>
+              <span style={{ width: 8, height: 8, borderRadius: '50%',
+                background: clusterColor(c.id), flexShrink: 0 }} />
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {displayName(c.id, c.label || c.id)}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+      {bridgeNodes.length > 0 && (
+        <div style={{ marginTop: 10 }}>
+          <div style={{ fontFamily: 'var(--et-sans)', fontSize: 10, letterSpacing: '0.1em',
+            color: mute, marginBottom: 6 }}>桥梁人物</div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+            {bridgeNodes.map(n => (
+              <span key={n.id} style={{
+                fontFamily: 'var(--et-sans)', fontSize: 10, fontWeight: 600,
+                color: '#FF6B47', padding: '2px 8px', borderRadius: 999,
+                border: '0.5px solid rgba(255,107,71,0.4)',
+                background: dark ? 'rgba(255,107,71,0.15)' : 'rgba(255,107,71,0.08)',
+              }}>
+                ✦ {displayName(n.id, n.name)}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
       <div style={{ marginTop: 14, paddingTop: 12, borderTop: `0.5px dashed ${border}`,
         fontFamily: 'var(--et-serif)', fontSize: 13, lineHeight: 1.6, color: tColor, fontStyle: 'italic' }}>
         “你不在场时，他们也在彼此身上留下痕迹——{stats.ffEdges} 条不经过你的连线。”
