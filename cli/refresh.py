@@ -16,6 +16,15 @@ import tempfile
 import time
 from pathlib import Path
 
+# Force utf-8 stdio so multi-account auto-detect's `print("✓ 匹配")` doesn't
+# UnicodeEncodeError on Chinese Windows (PyInstaller etcli.exe ignores
+# PYTHONIOENCODING; sys.stdout defaults to gbk; ✓ U+2713 has no gbk mapping).
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except (AttributeError, ValueError):
+    pass
+
 # Cross-platform path discovery
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from paths import (
