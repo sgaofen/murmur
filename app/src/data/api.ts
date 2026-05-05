@@ -119,6 +119,13 @@ export async function getDiagnose(): Promise<Diagnose> {
   return j('/api/diagnose');
 }
 
+/** One-shot pre-formatted markdown for users to paste into a GitHub issue.
+ * Includes version, platform, profiles, masked paths, init_error, and the
+ * tail of both log files. See cli/etcli.py:_build_diag_bundle for shape. */
+export async function getDiagBundle(): Promise<{ markdown: string }> {
+  return j('/api/diag-bundle');
+}
+
 export interface LocalAgent {
   cli: string;
   name: string;
@@ -515,4 +522,4 @@ export async function openFolder(path?: string): Promise<{ ok: boolean; opened?:
   });
 }
 
-export const APP_VERSION = 'v0.3.14 · Murmur 微语';
+export const APP_VERSION = 'v0.3.15 · Murmur 微语';

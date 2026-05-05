@@ -3,6 +3,7 @@ import { extractKey, getDiagnose, openFullDiskAccess, refreshData, resignWechat,
 import type { Diagnose, ScanState, ScanFound } from '../data/api';
 import { maskText } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
+import { DiagBundleButton } from '../components/DiagBundleButton';
 
 interface Props {
   open: boolean;
@@ -326,11 +327,12 @@ function BootstrapInitErrorBanner({ reason }: { reason: string }) {
                      marginBottom: 10, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
         {reason}
       </div>
-      <div style={{ fontSize: 12, color: 'var(--et-ink-soft)' }}>
+      <div style={{ fontSize: 12, color: 'var(--et-ink-soft)', marginBottom: 10 }}>
         建议：完全退出 Murmur，删除 <code>~/Documents/Murmur/decrypted/</code> 整个目录，
         然后**先在微信里点开聊天列表 + 几个对话 + 朋友圈**让 WCDB 把所有 DB 的 key 派发进内存，
         再回 Murmur 重新走下面的引导。
       </div>
+      <DiagBundleButton size="sm" />
     </div>
   );
 }
@@ -1174,6 +1176,9 @@ function ErrorView({ error, diag, onRetry }: { error: string; diag: Diagnose | n
         <details style={{ marginBottom: 14 }}>
           <summary style={{ cursor: 'pointer', fontSize: 12, color: 'var(--et-mute)' }}>查看诊断信息（请提交 issue 时附上）</summary>
           <CapabilityList diag={diag} />
+          <div style={{ marginTop: 10 }}>
+            <DiagBundleButton size="sm" />
+          </div>
         </details>
       )}
       {isWinHookInstallFailure && (
