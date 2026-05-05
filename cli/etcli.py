@@ -521,7 +521,7 @@ STOPWORDS.update("这个 那个 一下 还是 就是 没有 什么 怎么 为啥
 STOP_CHARS = set("的了是我你他她也都在就不和与这那一个有没啊吧呀嗯哦嘛呢吗哈呜哇噢哎唉哟唔嗷嘿哼啦喔把被让给从向对跟比又再才还但而或因所以之上下里外中后前时日年月来去到过")
 NON_TEXT = re.compile(r"\[[^\]]+\]")
 URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
-APP_VERSION = "0.3.10"
+APP_VERSION = "0.3.11"
 YEARBOOK_CACHE_VERSION = 5
 
 
@@ -3200,9 +3200,12 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 d = discover_data_dir()
                 if d and d.exists():
                     _MurmurAPIHandler._set_wechat_store(EchoStore(d))
+                    _MurmurAPIHandler._init_error = None  # cleared on success
                     sys.stderr.write(f"[etcli serve] auto-promoted from bootstrap → store loaded from {d}\n")
             except Exception as e:
-                sys.stderr.write(f"[etcli serve] bootstrap auto-promote failed: {e}\n")
+                msg = f"{type(e).__name__}: {e}"
+                _MurmurAPIHandler._init_error = msg
+                sys.stderr.write(f"[etcli serve] bootstrap auto-promote failed: {msg}\n")
 
         # Bootstrap mode: only a small allowlist works without decrypted data.
         _NO_STORE_GET = {"/api/info", "/api/agents", "/api/diagnose", "/api/reports", "/api/log-tail",
@@ -3243,6 +3246,10 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     "bootstrap": True,
                     "needs_onboarding": True,
                     "reason": diagnose_hint,
+                    # init_error is set whenever the most recent EchoStore() / QQStore()
+                    # construction threw — frontend should show this verbatim instead
+                    # of relooping the user through onboarding pretending nothing failed.
+                    "init_error": self.__class__._init_error,
                 })
             return self._send_json({
                 "data_dir": str(self.store.dir),
@@ -3753,6 +3760,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             # WeChat DBs), so we operate on _wechat_store NOT self.store — the
             # latter may be a QQStore if QQ is currently the active platform, in
             # which case `_msg_db_for_session.clear()` 500s with AttributeError.
+            init_error: Optional[str] = None
             if ok:
                 wechat_store = _MurmurAPIHandler._wechat_store
                 if wechat_store is None:
@@ -3760,13 +3768,18 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     # auto-promote it to active if a different platform is in use.
                     try:
                         new_dir = discover_data_dir()
-                        if new_dir and new_dir.exists():
+                        if new_dir is None or not new_dir.exists():
+                            init_error = "decrypt subprocess returned 0 but no decrypted directory found"
+                        else:
                             set_active = (_MurmurAPIHandler._active_platform == "wechat"
                                            or _MurmurAPIHandler.store is None)
                             _MurmurAPIHandler._set_wechat_store(EchoStore(new_dir),
                                                                   set_active=set_active)
+                            _MurmurAPIHandler._init_error = None
                     except Exception as e:
-                        sys.stderr.write(f"[refresh] post-decrypt store init failed: {e}\n")
+                        init_error = f"{type(e).__name__}: {e}"
+                        _MurmurAPIHandler._init_error = init_error
+                        sys.stderr.write(f"[refresh] post-decrypt store init failed: {init_error}\n")
                 else:
                     wechat_store._contacts = None
                     wechat_store._sessions = None
@@ -3781,6 +3794,10 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 "ok": ok,
                 "ms": dt,
                 "details": (r.stdout + (r.stderr if not ok else "")).strip()[-2000:],
+                # Refresh subprocess succeeded (ok=true) BUT the store still couldn't
+                # init — this used to silently swallow the error and let the frontend
+                # think everything was fine, then loop back into bootstrap. Surface it.
+                "init_error": init_error,
             })
 
         if path == "/api/media/index":
@@ -4494,7 +4511,8 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             existing = {}
             if cfg.exists():
                 try:
-                    existing = json.loads(cfg.read_text(encoding="utf-8"))
+                    # utf-8-sig — survive PowerShell-written BOM, same as paths.load_config
+                    existing = json.loads(cfg.read_text(encoding="utf-8-sig"))
                 except Exception:
                     pass
             existing["decrypt_key"] = key
@@ -4647,13 +4665,20 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
     _qq_keys_cfg_path = Path.home() / ".murmur" / "qq_keys.json"
     _active_platform: str = "wechat"
     _active_id: Optional[str] = None  # wxid for wechat, qq_number for qq
+    # Last reason store-init failed (auto-promote / refresh post-decrypt etc.).
+    # Surfaced by /api/info as `bootstrap_reason` and /api/refresh as `init_error`
+    # so the frontend can show the real cause instead of looping the user back
+    # into onboarding pretending nothing went wrong.
+    _init_error: Optional[str] = None
 
     @classmethod
     def _qq_load_keys_config(cls) -> dict:
         if not cls._qq_keys_cfg_path.exists():
             return {}
         try:
-            return json.loads(cls._qq_keys_cfg_path.read_text(encoding="utf-8"))
+            # utf-8-sig — same BOM tolerance as paths.load_config; PowerShell
+            # 5.1 default Set-Content -Encoding UTF8 writes BOM.
+            return json.loads(cls._qq_keys_cfg_path.read_text(encoding="utf-8-sig"))
         except Exception:
             return {}
 

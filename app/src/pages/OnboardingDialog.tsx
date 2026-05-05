@@ -103,8 +103,23 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ }: Props) {
     setPhase('win-decrypt');
     try {
       const r = await refreshData();
-      if (r.ok) setPhase('done');
-      else { setError(r.details || '解密失败'); setPhase('error'); }
+      if (!r.ok) {
+        setError(r.details || '解密失败');
+        setPhase('error');
+        return;
+      }
+      // Decrypt subprocess succeeded BUT the backend's auto-promote still
+      // failed — show the real reason instead of pretending success and then
+      // looping back into bootstrap on reload. Common cause: session.db
+      // decrypted but missing SessionTable, or partial decrypt residue.
+      if (r.init_error) {
+        setError(`解密完成但后端无法加载这份数据：${r.init_error}\n\n` +
+                 `常见原因：session.db 损坏 / 表名不匹配 / 解密目录里有上次失败的残留文件。\n` +
+                 `建议：完全退出 Murmur，删除 ~/Documents/Murmur/decrypted/ 整个目录，重新走引导（抓 key 前先在微信里点开聊天列表 + 几个对话 + 朋友圈让 WCDB 派发完整 key）。`);
+        setPhase('error');
+        return;
+      }
+      setPhase('done');
     } catch (e: any) {
       setError(e?.message || String(e));
       setPhase('error');
@@ -171,12 +186,22 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ }: Props) {
       setProgress('密钥已就位，开始解密…');
       setPhase('win-decrypt');
       const r2 = await refreshData();
-      if (r2.ok) {
-        setPhase('done');
-      } else {
+      if (!r2.ok) {
         setError(r2.details || '解密失败');
         setPhase('error');
+        return;
       }
+      // Same init_error guard as runDecrypt() — refresh subprocess succeeded
+      // but EchoStore re-init still threw (e.g. session.db missing SessionTable).
+      // Without this branch the user sees ✓ 一切就绪 → reload → bootstrap loop.
+      if (r2.init_error) {
+        setError(`解密完成但后端无法加载这份数据：${r2.init_error}\n\n` +
+                 `常见原因：session.db 损坏 / 表名不匹配 / 解密目录里有上次失败的残留文件。\n` +
+                 `建议：完全退出 Murmur，删除 ~/Documents/Murmur/decrypted/ 整个目录，重新走引导。`);
+        setPhase('error');
+        return;
+      }
+      setPhase('done');
     } catch (e: any) {
       setError(e?.message || String(e));
       setPhase('error');

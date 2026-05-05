@@ -47,7 +47,12 @@ def load_config() -> dict:
     if not p.exists():
         return {}
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
+        # utf-8-sig strips BOM if present — PowerShell 5.1's
+        # Set-Content -Encoding UTF8 writes a BOM by default, which makes
+        # plain utf-8 json.loads silently return {} and refresh.py decide
+        # there's no decrypt_key. utf-8-sig handles both BOM-prefixed and
+        # plain UTF-8 files transparently.
+        return json.loads(p.read_text(encoding="utf-8-sig"))
     except Exception:
         return {}
 

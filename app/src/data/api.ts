@@ -27,6 +27,10 @@ export interface InfoResponse {
   version?: string;
   bootstrap?: boolean;
   message?: string;
+  reason?: string;
+  // Last EchoStore/QQStore init exception, surfaced so OnboardingDialog
+  // shows the real cause instead of silently looping back to extract-key.
+  init_error?: string | null;
 }
 
 // Cross-platform profile listing — drives the ProfileSwitcher.
@@ -194,7 +198,12 @@ export async function indexMedia(): Promise<{
   return j('/api/media/index', { method: 'POST' });
 }
 
-export async function refreshData(): Promise<{ ok: boolean; ms: number; details: string }> {
+export async function refreshData(): Promise<{
+  ok: boolean; ms: number; details: string;
+  // Set when the decrypt subprocess returned 0 but the post-decrypt store
+  // re-init still threw — caller should treat success+init_error as failure.
+  init_error?: string | null;
+}> {
   return j('/api/refresh', { method: 'POST' });
 }
 
@@ -506,4 +515,4 @@ export async function openFolder(path?: string): Promise<{ ok: boolean; opened?:
   });
 }
 
-export const APP_VERSION = 'v0.3.10 · Murmur 微语';
+export const APP_VERSION = 'v0.3.11 · Murmur 微语';
