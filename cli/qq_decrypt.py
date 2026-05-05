@@ -35,14 +35,20 @@ except ImportError as e:
     raise SystemExit("missing dep: cryptography (pip install cryptography)") from e
 
 
-# QQNT-specific constants. Confirmed by HMAC-verifying real DBs end-to-end.
+# QQNT cipher constants. Both SHA1 and SHA512 HMAC variants exist in the wild:
+# - 9.9.x ≤ 9.9.16: HMAC-SHA1, RESERVE=48 (16 IV + 20 HMAC + 12 pad to 16-block)
+# - 9.9.x ≥ 9.9.17 (per QQBackup/qq-win-db-key issue #50): HMAC-SHA512, RESERVE=64
+# We trial-decrypt page 1 with each variant and pick the one that verifies —
+# kills the wrong-key false-positive that issue #5 hit on QQ NT 9.9.29.
 PAGE_SIZE = 4096
-RESERVE   = 48          # 16 IV + 20 HMAC + 12 align padding (per SQLCipher v3 ceil((16+20)/16)*16)
-HMAC_SIZE = 20          # full HMAC-SHA1 stored, not truncated
 IV_SIZE   = 16
 HEADER_PAGE_BYTES = 1024  # QQNT-prefixed metadata page; strip before SQLCipher kicks in
 KDF_ITER  = 4000
 HMAC_KEY_ITER = 2
+
+# Back-compat aliases (referenced elsewhere in the code base — keep symbols stable).
+RESERVE   = 48          # default to SHA1 variant
+HMAC_SIZE = 20
 
 SQLITE_HEADER = b"SQLite format 3\x00"  # 16 bytes — replaces the salt in plaintext output
 
@@ -51,32 +57,58 @@ class WrongKeyError(ValueError):
     """The provided passphrase does not produce a valid HMAC on page 1."""
 
 
+# Each variant: (label, hmac_hash_name, hmac_size_bytes, reserve)
+_QQNT_CIPHER_VARIANTS = [
+    ("sha1",   "sha1",   20, 48),   # 9.9.x ≤ 9.9.16
+    ("sha512", "sha512", 32, 64),   # 9.9.17+ — QQBackup/qq-win-db-key issue #50
+]
+
+
 def _derive_keys(password: bytes, salt: bytes) -> tuple[bytes, bytes]:
-    """QQNT key derivation (SHA512 KDF, SHA1 HMAC)."""
+    """QQNT key derivation (SHA512 KDF — that part hasn't changed across QQNT
+    versions; only the HMAC algorithm differs)."""
     aes_key = hashlib.pbkdf2_hmac("sha512", password, salt, KDF_ITER, 32)
     mac_salt = bytes(b ^ 0x3a for b in salt)
     hmac_key = hashlib.pbkdf2_hmac("sha512", aes_key, mac_salt, HMAC_KEY_ITER, 32)
     return aes_key, hmac_key
 
 
-def verify_passphrase(db_path: Path, passphrase: str) -> bool:
-    """Cheap check: does this passphrase decrypt page 1's HMAC? Doesn't decrypt anything."""
+def _verify_with_variant(stripped: bytes, passphrase: bytes,
+                          hmac_hash: str, hmac_size: int, reserve: int) -> bool:
+    """Try a single (hmac_hash, reserve) combination. Returns True iff page 1 HMAC verifies."""
+    salt = stripped[:IV_SIZE]
+    _, hmac_key = _derive_keys(passphrase, salt)
+    body_end = PAGE_SIZE - reserve
+    body = stripped[IV_SIZE:body_end]
+    iv = stripped[body_end:body_end + IV_SIZE]
+    stored_hmac = stripped[body_end + IV_SIZE:body_end + IV_SIZE + hmac_size]
+    page_no_le = (1).to_bytes(4, "little")
+    m = hmac_mod.new(hmac_key, digestmod=getattr(hashlib, hmac_hash))
+    m.update(body); m.update(iv); m.update(page_no_le)
+    return hmac_mod.compare_digest(m.digest()[:hmac_size], stored_hmac)
+
+
+def detect_cipher_variant(db_path: Path, passphrase: str) -> tuple[str, int, int] | None:
+    """Identify which QQNT cipher variant this DB uses with this passphrase.
+    Returns (hmac_hash, hmac_size, reserve) or None if no variant matches."""
     raw = db_path.read_bytes()
     if len(raw) < HEADER_PAGE_BYTES + PAGE_SIZE:
-        return False
+        return None
     stripped = raw[HEADER_PAGE_BYTES:HEADER_PAGE_BYTES + PAGE_SIZE]
-    if len(stripped) < PAGE_SIZE:
-        return False
-    salt = stripped[:IV_SIZE]
-    _, hmac_key = _derive_keys(passphrase.encode("utf-8"), salt)
-    body_end = PAGE_SIZE - RESERVE
-    body = stripped[IV_SIZE:body_end]  # page 1 has salt at first 16 bytes; body starts after
-    iv = stripped[body_end:body_end + IV_SIZE]
-    stored_hmac = stripped[body_end + IV_SIZE:body_end + IV_SIZE + HMAC_SIZE]
-    page_no_le = (1).to_bytes(4, "little")
-    m = hmac_mod.new(hmac_key, digestmod=hashlib.sha1)
-    m.update(body); m.update(iv); m.update(page_no_le)
-    return hmac_mod.compare_digest(m.digest()[:HMAC_SIZE], stored_hmac)
+    pp = passphrase.encode("utf-8")
+    for label, hmac_hash, hmac_size, reserve in _QQNT_CIPHER_VARIANTS:
+        try:
+            if _verify_with_variant(stripped, pp, hmac_hash, hmac_size, reserve):
+                return (hmac_hash, hmac_size, reserve)
+        except Exception:
+            continue
+    return None
+
+
+def verify_passphrase(db_path: Path, passphrase: str) -> bool:
+    """Cheap check: does this passphrase decrypt page 1's HMAC under any known
+    QQNT variant (SHA1 or SHA512)? Doesn't decrypt anything."""
+    return detect_cipher_variant(db_path, passphrase) is not None
 
 
 def decrypt_db(src: Path, dst: Path, passphrase: str) -> int:
@@ -94,9 +126,15 @@ def decrypt_db(src: Path, dst: Path, passphrase: str) -> int:
         raise ValueError(f"{src} body length {len(stripped)} not multiple of {PAGE_SIZE}")
     n_pages = len(stripped) // PAGE_SIZE
 
+    # Variant detection — try SHA1 first (legacy), then SHA512 (QQ NT 9.9.17+).
+    variant = detect_cipher_variant(src, passphrase)
+    if variant is None:
+        raise WrongKeyError("passphrase failed HMAC on page 1 — wrong key")
+    hmac_hash, hmac_size, reserve = variant
+
     salt = stripped[:IV_SIZE]
     aes_key, hmac_key = _derive_keys(passphrase.encode("utf-8"), salt)
-    body_end = PAGE_SIZE - RESERVE
+    body_end = PAGE_SIZE - reserve
     backend = default_backend()
 
     out = bytearray()
@@ -107,16 +145,15 @@ def decrypt_db(src: Path, dst: Path, passphrase: str) -> int:
         body_start = IV_SIZE if p_idx == 0 else 0
         body = page[body_start:body_end]
         iv = page[body_end:body_end + IV_SIZE]
-        stored_hmac = page[body_end + IV_SIZE:body_end + IV_SIZE + HMAC_SIZE]
+        stored_hmac = page[body_end + IV_SIZE:body_end + IV_SIZE + hmac_size]
 
         page_no_le = (p_idx + 1).to_bytes(4, "little")
-        m = hmac_mod.new(hmac_key, digestmod=hashlib.sha1)
+        m = hmac_mod.new(hmac_key, digestmod=getattr(hashlib, hmac_hash))
         m.update(body); m.update(iv); m.update(page_no_le)
-        if not hmac_mod.compare_digest(m.digest()[:HMAC_SIZE], stored_hmac):
-            if p_idx == 0:
-                raise WrongKeyError("passphrase failed HMAC on page 1 — wrong key")
+        if not hmac_mod.compare_digest(m.digest()[:hmac_size], stored_hmac):
             # Subsequent failures: write zeros (corrupted page; user can still
-            # read other tables). Logging upstream catches this.
+            # read other tables). Logging upstream catches this. Page 1 already
+            # checked above by detect_cipher_variant; if we got here, p_idx>=1.
             if p_idx == 0:
                 out.extend(SQLITE_HEADER)
             out.extend(b"\x00" * (PAGE_SIZE - (IV_SIZE if p_idx == 0 else 0)))
@@ -129,7 +166,7 @@ def decrypt_db(src: Path, dst: Path, passphrase: str) -> int:
             out.extend(SQLITE_HEADER)  # synthesize standard SQLite header
         out.extend(plain)
         # zero-pad the reserve so the output is exactly PAGE_SIZE per page
-        out.extend(b"\x00" * RESERVE)
+        out.extend(b"\x00" * reserve)
         decrypted += 1
 
     dst.parent.mkdir(parents=True, exist_ok=True)

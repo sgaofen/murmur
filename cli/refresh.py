@@ -88,6 +88,33 @@ def find_decrypt_key(profile: WeChatProfile, override: str | None = None) -> str
     return None
 
 
+def verify_passphrase(profile: WeChatProfile, key_hex: str) -> bool:
+    """Try to decrypt the first page of profile's session.db with key_hex.
+    Returns True iff HMAC verifies — i.e. the key is for THIS profile.
+
+    Used to auto-pick the right wxid when the user has multiple WeChat
+    accounts and we don't know which one the saved key belongs to.
+    """
+    sess = profile.encrypted_root / "session" / "session.db"
+    if not sess.exists():
+        return False
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from decrypt_py import decrypt_db as _decrypt_one
+    except Exception:
+        return False
+    tmp = Path(tempfile.mkdtemp(prefix="murmur_verify_"))
+    try:
+        out = tmp / "session.db"
+        try:
+            _decrypt_one(sess, out, key_hex)
+        except Exception:
+            return False
+        return out.exists() and out.stat().st_size > 0
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def select_profile(args) -> WeChatProfile:
     profiles = discover_wechat_profiles()
     if not profiles:
@@ -97,10 +124,35 @@ def select_profile(args) -> WeChatProfile:
             if p.wxid == args.wxid or p.wxid_short == args.wxid:
                 return p
         raise SystemExit(f"找不到账号 {args.wxid}. 已发现: {[p.wxid for p in profiles]}")
-    if len(profiles) > 1:
-        print("[!] 发现多个账号，使用第一个 (--wxid 可指定):")
+    if len(profiles) == 1:
+        return profiles[0]
+    # Multi-account: try the saved key against each profile's session.db
+    # to auto-pick the one the key actually belongs to. This kills the
+    # GitHub issues #4 #6 #7 class where refresh.py blindly picked
+    # profiles[0], failed HMAC against the wrong account, and looped.
+    saved_key = find_decrypt_key(profiles[0], override=args.key)
+    if saved_key:
+        print(f"[!] 发现 {len(profiles)} 个账号，自动验证保存的 key 属于哪一个...")
         for p in profiles:
-            print(f"    - {p.wxid}")
+            try:
+                ok = verify_passphrase(p, saved_key)
+            except Exception as e:
+                print(f"    {p.wxid}: 验证抛异常 {type(e).__name__}: {e}")
+                continue
+            mark = "✓ 匹配" if ok else "× 不匹配"
+            print(f"    {p.wxid}: {mark}")
+            if ok:
+                print(f"[+] 自动选中 {p.wxid}（保存的 key 验证通过）")
+                return p
+        raise SystemExit(
+            f"保存的 key 在 {len(profiles)} 个账号上都验证失败。"
+            f"请用 --wxid 指定，或者重新抓 key（确保抓的时候微信登录的是想分析的那个号）。"
+        )
+    # No key saved → can't auto-detect; ask user to pick explicitly
+    print(f"[!] 发现 {len(profiles)} 个账号，但未找到保存的 key 来自动选择：")
+    for p in profiles:
+        print(f"    - {p.wxid}")
+    print("[!] 默认使用第一个 (--wxid 可指定):")
     return profiles[0]
 
 
