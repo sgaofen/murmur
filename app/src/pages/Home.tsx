@@ -511,6 +511,12 @@ function summarizeRefreshFailure(details: string): string {
   if (text.includes('核心数据库未解密')) {
     return '核心数据库未解密：请重新抓密钥后再更新数据。';
   }
+  // Pre-flight WeChat-running block from refresh.py (v0.4.0). When the user
+  // cancels the override confirm() this still surfaces a clear message
+  // instead of dumping raw stderr.
+  if (text.includes('检测到微信') || text.includes('Weixin 正在运行')) {
+    return '微信仍在运行，已阻断解密。完全退出微信（系统托盘 → 退出），然后重新点更新。';
+  }
   const firstUsefulLine = text
     .split(/\r?\n/)
     .map(line => line.trim())

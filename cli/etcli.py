@@ -4762,11 +4762,18 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             # error code so the frontend can render a friendly dialog with
             # an "I've quit WeChat / force decrypt" override instead of the
             # generic refresh-failed banner.
+            #
+            # IMPORTANT: refresh.py emits the message via `raise SystemExit(...)`
+            # which writes to STDERR not STDOUT — the previous version only
+            # checked stdout, so the flag never set, the frontend never saw
+            # it, and the user got an endless silent loop of refresh-failed
+            # without the override dialog ever appearing.
+            combined_out = (r.stdout or "") + (r.stderr or "")
             wechat_running_block = (
                 not ok
-                and ("检测到微信" in (r.stdout or "")
-                     or "Weixin 正在运行" in (r.stdout or "")
-                     or "WeChat is running" in (r.stdout or ""))
+                and ("检测到微信" in combined_out
+                     or "Weixin 正在运行" in combined_out
+                     or "WeChat is running" in combined_out)
             )
             # Echo a tail of the subprocess output to serve.log so multi-account /
             # encoding / decrypt failures are visible in diag bundles. Without
