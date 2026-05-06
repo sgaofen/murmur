@@ -82,9 +82,11 @@ export interface GraphData {
 }
 
 // ── [PATCH-1] Spotlight 类型 ──────────────────────────────────────────────
-// 上层 (Graph.tsx) 维护 spotlight 状态。null = 默认干净画布；'circle' = 聚焦
-// 某个核心圈。Bridge 模式被产品砍了（rank-by-radius 布局下两群不能视觉
-// 分离，金光线效果鸡肋），保留 type narrow 以便随时复活。
+// 上层 (Graph.tsx) 维护 spotlight 状态。null = 默认干净画布；'circle' =
+// 聚焦某核心圈（hull envelope 半透明 3D 包裹）。
+// 桥梁功能产品决定永久砍掉（rank-by-radius 布局下两群聚焦视觉效果鸡肋，
+// 反复迭代未达预期）。后端仍计算 bridge betweenness 留作 stats，但 UI 不
+// 再有任何入口、按钮、渲染。
 export type Spotlight =
   | null
   | { kind: 'circle'; clusterId: string };
@@ -171,6 +173,58 @@ interface Props {
   // ─────────────────────────────────────────────────────────────────────────
 }
 
+/** Andrew's monotone-chain convex hull — returns hull vertices in CCW order. */
+function convexHull2D(pts: { x: number; y: number }[]): { x: number; y: number }[] {
+  if (pts.length < 3) return pts.slice();
+  const sorted = [...pts].sort((a, b) => a.x - b.x || a.y - b.y);
+  const cross = (o: {x:number;y:number}, a: {x:number;y:number}, b: {x:number;y:number}) =>
+    (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  const lower: typeof sorted = [];
+  for (const p of sorted) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
+    lower.push(p);
+  }
+  const upper: typeof sorted = [];
+  for (let i = sorted.length - 1; i >= 0; i--) {
+    const p = sorted[i];
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
+    upper.push(p);
+  }
+  upper.pop(); lower.pop();
+  return lower.concat(upper);
+}
+
+/** Build a smooth closed SVG path that wraps a set of 2D points. Convex hull
+ *  → expand each vertex outward from centroid by `margin` → Catmull-Rom-to-
+ *  Bezier closed loop. Used for the cluster spotlight envelope (one big
+ *  transparent 3D-feeling shape that "刚好包裹" the cluster). */
+function smoothEnvelopePath(points: { x: number; y: number }[], margin: number): string {
+  const hull = convexHull2D(points);
+  if (hull.length < 3) return '';
+  const cx = hull.reduce((s, p) => s + p.x, 0) / hull.length;
+  const cy = hull.reduce((s, p) => s + p.y, 0) / hull.length;
+  const expanded = hull.map(p => {
+    const dx = p.x - cx, dy = p.y - cy;
+    const d = Math.hypot(dx, dy) || 1;
+    return { x: p.x + (dx / d) * margin, y: p.y + (dy / d) * margin };
+  });
+  const n = expanded.length;
+  const out: string[] = [`M${expanded[0].x.toFixed(1)},${expanded[0].y.toFixed(1)}`];
+  for (let i = 0; i < n; i++) {
+    const p0 = expanded[(i - 1 + n) % n];
+    const p1 = expanded[i];
+    const p2 = expanded[(i + 1) % n];
+    const p3 = expanded[(i + 2) % n];
+    const c1x = p1.x + (p2.x - p0.x) / 6;
+    const c1y = p1.y + (p2.y - p0.y) / 6;
+    const c2x = p2.x - (p3.x - p1.x) / 6;
+    const c2y = p2.y - (p3.y - p1.y) / 6;
+    out.push(`C${c1x.toFixed(1)},${c1y.toFixed(1)} ${c2x.toFixed(1)},${c2y.toFixed(1)} ${p2.x.toFixed(1)},${p2.y.toFixed(1)}`);
+  }
+  out.push('Z');
+  return out.join(' ');
+}
+
 function edgeKey(edge: Pick<GraphEdge, 'source' | 'target'> | null | undefined): string {
   if (!edge) return '';
   return [edge.source, edge.target].sort().join('__');
@@ -205,7 +259,7 @@ export function GraphView({
 
   const [hover, setHover] = useState<string | null>(null);
   const [hoverEdge, setHoverEdge] = useState<{ source: string; target: string } | null>(null);
-  // [PATCH-4] picker 弹层。bridge 已下线，只剩 'circle'。
+  // [PATCH-4] picker 弹层（桥梁已永久砍掉，只剩 'circle'）
   const [pickerKind, setPickerKind] = useState<'circle' | null>(null);
 
   const pauseAutoRotateForUser = useCallback(() => {
@@ -635,19 +689,53 @@ export function GraphView({
               <feMergeNode in="SourceGraphic" />
             </feMerge>
           </filter>
-          {/* ── [PATCH-2] Metaball gooey filter ────────────────────────── */}
-          <filter id="metaball" x="-20%" y="-20%" width="140%" height="140%">
-            <feGaussianBlur in="SourceGraphic" stdDeviation="14" result="blur" />
+          {/* ── [PATCH-2] Metaball gooey filter ──────────────────────────
+              Bigger blur (24) than design default (14) so spherical-cap
+              wedge members spread along a 150-700 px radial spoke can
+              still merge into a single ribbon-shaped blob. Threshold
+              alpha matrix kept aggressive (22, -10) for crisp edges.
+              Drop-shadow + inner-highlight stacked outside this filter
+              add the 3D feel (see render block). */}
+          <filter id="metaball" x="-30%" y="-30%" width="160%" height="160%">
+            <feGaussianBlur in="SourceGraphic" stdDeviation="24" result="blur" />
             <feColorMatrix in="blur"
               values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 22 -10"
               result="goo" />
             <feBlend in="SourceGraphic" in2="goo" />
           </filter>
+          {/* Sharp inner-highlight layer — small white circles offset toward
+              upper-left of each member to fake light source / 3D bump. */}
           <filter id="metaball-sharp" x="-20%" y="-20%" width="140%" height="140%">
             <feGaussianBlur in="SourceGraphic" stdDeviation="9" result="blur" />
             <feColorMatrix in="blur"
               values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 26 -12"
               result="goo" />
+          </filter>
+          {/* Soft outer shadow — gives the blob a 3D "lift off the
+              background" feel. Layered behind the metaball. */}
+          <filter id="metaball-shadow" x="-50%" y="-50%" width="200%" height="200%">
+            <feGaussianBlur in="SourceGraphic" stdDeviation="18" result="blur" />
+            <feColorMatrix in="blur"
+              values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.6 0"
+              result="shadow" />
+          </filter>
+          {/* Envelope soft-edge — light gaussian blur on the hull path so
+              the boundary reads as 3D shell, not a flat polygon. */}
+          <filter id="envelope-soft" x="-20%" y="-20%" width="140%" height="140%">
+            <feGaussianBlur stdDeviation="2" result="b1" />
+            <feMerge>
+              <feMergeNode in="b1" />
+              <feMergeNode in="SourceGraphic" />
+            </feMerge>
+          </filter>
+          {/* Envelope outer glow — wider blur for the outermost layer of the
+              cluster envelope, gives the wrap a "lit-up" 3D feel. */}
+          <filter id="envelope-glow" x="-40%" y="-40%" width="180%" height="180%">
+            <feGaussianBlur stdDeviation="10" result="b1" />
+            <feMerge>
+              <feMergeNode in="b1" />
+              <feMergeNode in="SourceGraphic" />
+            </feMerge>
           </filter>
           <filter id="hot-edge" x="-30%" y="-30%" width="160%" height="160%">
             <feGaussianBlur stdDeviation="4" result="b1" />
@@ -676,38 +764,46 @@ export function GraphView({
           );
         })}
 
-        {/* ── [PATCH-3] Spotlight: 核心圈 metaball blob ───────────────────
-            渲染在普通 edges/nodes 之下，靠 metaball filter 把成员外圈
-            糊在一起，形成有机的「圈」轮廓。不修改任何已有节点。 */}
+        {/* ── [PATCH-3] Spotlight: 核心圈 hull envelope ───────────────────
+            一个大的半透明 3D 包络，把整个 cluster 的成员 "刚好" 罩在里
+            面。算法：取所有成员投影后 (x, y) 的凸包 → 整体往外膨胀 ~50 px
+            → Catmull-Rom 转 cubic Bezier 平滑 → 三层叠加做立体感 (外发
+            光 + 主体 + 内描边)。膨胀后的 hull 形状跟成员真实分布 "贴合"，
+            不是硬圆，符合用户「立体的大的东西刚好包裹起来」诉求。 */}
         {spotlight?.kind === 'circle' && (() => {
           const color = clusterColor(spotlight.clusterId, data.clusters);
+          const members = projNodes.filter(n => spotMembers.has(n.id));
+          if (members.length < 3) return null;
+          const points = members.map(n => ({ x: n.proj.x, y: n.proj.y }));
+          // Inflate per-vertex by depth-aware margin so the envelope hugs
+          // member spheres, not their centers
+          const margin = 55;
+          const innerPath = smoothEnvelopePath(points, margin);
+          const outerPath = smoothEnvelopePath(points, margin + 22);
+          const innerLinePath = smoothEnvelopePath(points, margin - 6);
+          if (!innerPath || !outerPath) return null;
           return (
             <g style={{ pointerEvents: 'none' }}>
-              <g filter="url(#metaball)" opacity="0.55">
-                {projNodes
-                  .filter(n => spotMembers.has(n.id))
-                  .map(n => {
-                    const r = Math.max(28, n.size * n.proj.depth * 2.2);
-                    return <circle key={`spot-${n.id}`} cx={n.proj.x} cy={n.proj.y} r={r} fill={color} />;
-                  })}
-              </g>
-              {/* 高光层：每个成员一个亮点，叠出 3D 立体感 */}
-              <g filter="url(#metaball-sharp)" opacity="0.6">
-                {projNodes
-                  .filter(n => spotMembers.has(n.id))
-                  .map(n => {
-                    const r = Math.max(20, n.size * n.proj.depth * 1.5);
-                    return <circle key={`spot-hi-${n.id}`}
-                      cx={n.proj.x - r * 0.25} cy={n.proj.y - r * 0.25}
-                      r={r * 0.7}
-                      fill="#fff" opacity="0.5" />;
-                  })}
-              </g>
+              {/* 外发光：大半径软描边 + 极低透明度，烘 3D 立体感 */}
+              <path d={outerPath}
+                fill={color} fillOpacity={0.05}
+                stroke={color} strokeOpacity={0.25} strokeWidth={1}
+                filter="url(#envelope-glow)" />
+              {/* 主体：半透明填充 + 中等描边 */}
+              <path d={innerPath}
+                fill={color} fillOpacity={dark ? 0.13 : 0.10}
+                stroke={color} strokeOpacity={0.7} strokeWidth={2}
+                filter="url(#envelope-soft)" />
+              {/* 内描边：细线，靠近成员一点点，加深「贴合」感 */}
+              <path d={innerLinePath}
+                fill="none"
+                stroke={color} strokeOpacity={0.5} strokeWidth={1}
+                strokeDasharray="3 5" />
             </g>
           );
         })()}
 
-        {/* Bridge spotlight render block removed (feature deprecated). */}
+        {/* Bridge spotlight render permanently removed (feature deprecated). */}
 
         {/* Edges */}
         <g opacity={spotlight ? 0.18 : 1} style={{ filter: spotlight ? 'saturate(0.4)' : undefined }}>
@@ -1131,11 +1227,11 @@ function SpotlightBanner({ spotlight, data, dark, onClose }: {
   spotlight: Spotlight; data: GraphData; dark: boolean; onClose: () => void;
 }) {
   if (!spotlight) return null;
-  const c = data.clusters.find(x => x.id === spotlight.clusterId);
   // Cluster labels embed the anchor's real name ("太の 这一圈 (11 人)").
   // maskText routes the anchor name through the privacy alias table that
   // PrivacyIdentityIndex pre-populates for all friends, so toggling 隐私
   // mode swaps "太の" → "朋友 XX" without us re-fetching anything.
+  const c = data.clusters.find(x => x.id === spotlight.clusterId);
   const title = maskText(c?.label || '核心圈');
   const sub = `${c?.members?.length || 0} 位成员 · 你不在场时，他们仍在一起说话`;
   const bg = dark ? 'rgba(20,24,42,0.85)' : 'rgba(251,246,238,0.92)';
@@ -1176,7 +1272,7 @@ function PickerOverlay({ kind, data, dark, onPick, onClose }: {
   kind: 'circle'; data: GraphData; dark: boolean;
   onPick: (s: Spotlight) => void; onClose: () => void;
 }) {
-  void kind;  // bridge 已下线；保留参数以便上游 prop 形状不变
+  void kind;  // bridge 永久砍掉；保留参数形状方便日后扩展
   const items = data.clusters.map(c => ({
     id: c.id, label: c.label,
     sub: `${c.members?.length || 0} 位成员`,

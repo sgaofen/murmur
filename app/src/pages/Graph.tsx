@@ -65,13 +65,20 @@ interface BackendGraph {
 }
 
 /**
- * Layout: Fibonacci sphere — uniform distribution on a sphere, no clumping.
+ * Layout: Original Fibonacci sphere + GENTLE cluster bias.
  *
- * - Self at origin (0,0,0)
- * - Friends sorted by combined_score (top friends inner, weak ones outer)
- * - Each friend gets a unique direction (golden-angle spiral)
- * - Distance = function of rank: r ∈ [90, 380]
- * - Plus per-node tier-based jitter so visually distinct tiers don't sit on the exact same sphere
+ * Default version is the first-version Fibonacci sphere — friends spread
+ * uniformly via golden-angle spiral, radius from origin = f(combined_score
+ * rank), range 150-700. Result: spectacular criss-cross sphere.
+ *
+ * Then a SOFT directional pull: each cluster member's angular direction is
+ * slerp-ed PARTWAY (CLUSTER_BIAS = 0.45) toward the cluster's centroid
+ * direction. Radius unchanged. Members keep their original spread but lean
+ * toward a common region — same big neighborhood without collapsing.
+ *
+ * Why gentle: previous attempts (0.55+ slerp, sector caps, planet system)
+ * all over-clustered → "粘在一起，看不清". Original spread is the aesthetic;
+ * cluster cohesion is a soft hint, not a hard partition.
  */
 function layoutNodes(graph: BackendGraph): GraphData {
   const nodes: GraphNode[] = [];
@@ -85,37 +92,90 @@ function layoutNodes(graph: BackendGraph): GraphData {
     });
   }
 
+  type Vec3 = { x: number; y: number; z: number };
   const friends = graph.nodes.filter(n => !n.is_self)
     .sort((a, b) => (b.combined_score || 0) - (a.combined_score || 0));
   const N = Math.max(1, friends.length);
-  const PHI = Math.PI * (1 + Math.sqrt(5));  // golden angle ≈ 137.5°
+  const PHI = Math.PI * (1 + Math.sqrt(5));
+  const maxScore = (friends[0]?.combined_score || 1);
 
+  // Step 1 — Original Fibonacci direction + radius for every friend.
+  type Slot = { dir: Vec3; r: number };
+  const slots = new Map<string, Slot>();
   friends.forEach((bn, i) => {
     const t = (i + 0.5) / N;
     const phi = Math.acos(1 - 2 * t);
     const theta = PHI * i;
-    const score = bn.combined_score || 0;
-    const maxScore = (friends[0].combined_score || 1);
-    const norm = score / maxScore;
-    // Wider radius range → more breathing room (was 90-380, now 150-700)
+    const dir: Vec3 = {
+      x: Math.sin(phi) * Math.cos(theta),
+      y: Math.cos(phi),
+      z: Math.sin(phi) * Math.sin(theta),
+    };
+    const norm = (bn.combined_score || 0) / maxScore;
     const r = 150 + (1 - norm) * 550;
-    // Stronger jitter so rings aren't tight (was 8-36, now 20-80)
-    const tierJitter = ({ A: 20, B: 35, C: 50, D: 70, E: 80 } as Record<string, number>)[bn.tier] || 60;
-    const jx = (Math.sin(i * 7.1) * tierJitter);
-    const jy = (Math.cos(i * 5.3) * tierJitter);
-    const jz = (Math.sin(i * 3.7) * tierJitter);
-    const x = r * Math.sin(phi) * Math.cos(theta) + jx;
-    const y = r * Math.cos(phi) + jy;
-    const z = r * Math.sin(phi) * Math.sin(theta) + jz;
+    slots.set(bn.id, { dir, r });
+  });
 
+  // Step 2 — For each cluster ≥3 members, compute centroid direction and
+  // gently slerp each member toward it. Bias = 0.45 means members keep ~55%
+  // of their original angular distance from centroid → loose grouping.
+  const clusterIdToMembers = new Map<string, typeof friends>();
+  for (const f of friends) {
+    if (!f.cluster) continue;
+    if (!clusterIdToMembers.has(f.cluster)) clusterIdToMembers.set(f.cluster, []);
+    clusterIdToMembers.get(f.cluster)!.push(f);
+  }
+  const CLUSTER_BIAS = 0.45;  // 0 = no grouping, 1 = collapse onto centroid
+  for (const [, mems] of clusterIdToMembers) {
+    if (mems.length < 3) continue;
+    // Average direction (already unit) → unit centroid
+    let cx = 0, cy = 0, cz = 0;
+    for (const m of mems) {
+      const s = slots.get(m.id)!;
+      cx += s.dir.x; cy += s.dir.y; cz += s.dir.z;
+    }
+    const clen = Math.hypot(cx, cy, cz) || 1;
+    const centroid: Vec3 = { x: cx / clen, y: cy / clen, z: cz / clen };
+    // Slerp every member's direction partway to centroid
+    for (const m of mems) {
+      const s = slots.get(m.id)!;
+      const dot = Math.max(-1, Math.min(1,
+        s.dir.x * centroid.x + s.dir.y * centroid.y + s.dir.z * centroid.z));
+      const omega = Math.acos(dot);
+      if (omega < 1e-5) continue;  // already at centroid; nothing to do
+      const sinO = Math.sin(omega);
+      const k1 = Math.sin((1 - CLUSTER_BIAS) * omega) / sinO;
+      const k2 = Math.sin(CLUSTER_BIAS * omega) / sinO;
+      s.dir = {
+        x: s.dir.x * k1 + centroid.x * k2,
+        y: s.dir.y * k1 + centroid.y * k2,
+        z: s.dir.z * k1 + centroid.z * k2,
+      };
+      // Re-normalize to handle floating-point drift
+      const len = Math.hypot(s.dir.x, s.dir.y, s.dir.z) || 1;
+      s.dir = { x: s.dir.x / len, y: s.dir.y / len, z: s.dir.z / len };
+    }
+  }
+
+  // Step 3 — Emit nodes (direction × radius + tier jitter).
+  friends.forEach((bn, i) => {
+    const s = slots.get(bn.id)!;
+    // Original tier jitter — keep the breathing-room aesthetic intact since
+    // the slerp is gentle and members are still mostly spread by Fibonacci.
+    const tierJitter = ({ A: 20, B: 35, C: 50, D: 70, E: 80 } as Record<string, number>)[bn.tier] || 60;
+    const jx = Math.sin(i * 7.1) * tierJitter;
+    const jy = Math.cos(i * 5.3) * tierJitter;
+    const jz = Math.sin(i * 3.7) * tierJitter;
+    const pos = { x: s.dir.x * s.r, y: s.dir.y * s.r, z: s.dir.z * s.r };
     nodes.push({
       id: bn.id, name: bn.name,
       is_self: false, tier: bn.tier,
       cluster: bn.cluster ?? null, color: TIER_COLORS[bn.tier] || '#9E9583',
       bridge: !!bn.bridge,
-      // Bigger nodes (was 4-14, now 8-26)
       size: Math.max(8, Math.min(26, bn.size * 0.35)),
-      x, y, z,
+      x: pos.x + jx,
+      y: pos.y + jy,
+      z: pos.z + jz,
       msgs: bn.private_msgs + bn.group_msgs,
       private_msgs: bn.private_msgs,
       group_msgs: bn.group_msgs,
