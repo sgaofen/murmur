@@ -1,7 +1,7 @@
 {
   "name": "app",
   "private": true,
-  "version": "0.3.17",
+  "version": "0.4.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -15,6 +15,7 @@
     "tauri:build:dmg": "npm run backend:bundle && node scripts/tauri-build.mjs app,dmg"
   },
   "dependencies": {
+    "html-to-image": "^1.11.13",
     "react": "^19.2.5",
     "react-dom": "^19.2.5"
   },

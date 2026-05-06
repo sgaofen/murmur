@@ -3,14 +3,15 @@ import { Avatar } from '../components/Avatar';
 import { MessageCard } from '../components/MessageCard';
 import { RingChart } from '../components/RingChart';
 import { Stamp } from '../components/Stamp';
-import { getFriend, getMessages, getMoments, getReport, getFriendConnections, getInvokeStream } from '../data/api';
-import type { FriendConnection } from '../data/api';
+import { getFriend, getMessages, getMoments, getReport, getFriendConnections, getInvokeStream, exportFriendChat } from '../data/api';
+import type { FriendConnection, ExportFormat } from '../data/api';
 import type { Friend, FriendStats, Moment } from '../data/types';
-import { AIExportDialog } from './AIExportDialog';
+import { AIAssistantDrawer, ReportReadyBanner } from './AIAssistantDrawer';
 import { MediaGallery } from './extras/MediaGallery';
-import { AgentReport } from './extras/AgentReport';
+import { RelationshipReportView } from './extras/RelationshipReportView';
+import { PairAnalysisPanel } from './extras/PairAnalysisPanel';
 import { mdToHtml, MURMUR_MD_CSS } from '../utils/markdown';
-import { displayName, isPrivacyMode, maskedWxid, maskText } from '../utils/privacy';
+import { displayName, maskedWxid, maskText } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
 import { ProfileSwitcher } from '../components/ProfileSwitcher';
 import { useActivePlatform } from '../utils/activeProfile';
@@ -240,6 +241,11 @@ function ConnectionsCard({ friend, onOpen }: {
 }) {
   void usePrivacy();
   const [conns, setConns] = useState<FriendConnection[] | null>(null);
+  // Selected pair partner to show the PairAnalysisPanel modal for. Click the
+  // small "📤" chip per row → modal with three-format download buttons. This
+  // is the only easily-discoverable entry point to the pair-export feature
+  // outside the 3D Graph; users were missing it.
+  const [exportPeer, setExportPeer] = useState<{ id: string; name: string } | null>(null);
   useEffect(() => {
     getFriendConnections(friend.id).then(r => setConns(r.connections)).catch(() => setConns([]));
   }, [friend.id]);
@@ -254,29 +260,58 @@ function ConnectionsCard({ friend, onOpen }: {
       border: '0.5px solid var(--et-line-2)', borderRadius: 'var(--et-r)',
     }}>
       <div className="et-eyebrow">关联朋友 · {displayName(friend.id, friend.name)} 在你的社交圈里</div>
-      <div className="et-h2" style={{ marginTop: 6, color: 'var(--et-ink)' }}>他认识的你的朋友（点击查看）</div>
+      <div className="et-h2" style={{ marginTop: 6, color: 'var(--et-ink)' }}>他认识的你的朋友（点击看人 · 📤 导出这对）</div>
       <div style={{ marginTop: 14, display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8 }}>
         {top.map(c => (
-          <button key={c.wxid + c.edge_type} onClick={() => onOpen(c.wxid)} style={{
-            all: 'unset', cursor: 'pointer',
-            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-            padding: '10px 14px', borderRadius: 10,
+          <div key={c.wxid + c.edge_type} style={{
+            display: 'flex', alignItems: 'stretch',
             background: 'var(--et-paper-2)', border: '0.5px solid var(--et-line-2)',
-          }}
-          onMouseEnter={(e) => e.currentTarget.style.background = 'var(--et-orange-soft)'}
-          onMouseLeave={(e) => e.currentTarget.style.background = 'var(--et-paper-2)'}>
-            <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--et-ink)',
-              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 240 }}>
-              {displayName(c.wxid, c.name)}
-            </span>
-            <span style={{ fontSize: 10, color: 'var(--et-mute)' }}>
-              {c.edge_type === 'mutual_reply' ? `群里互动 ${c.weight}` :
-               c.edge_type === 'mention' ? `提及 ${c.mention_count ?? '—'}` :
-               c.edge_type === 'moments_cross' ? `朋友圈 ${c.moments_cross ?? '—'}` :
-               c.edge_type === 'co_group' ? `共群 ${c.shared_group_count ?? c.weight}` :
-               `${c.weight}`}
-            </span>
-          </button>
+            borderRadius: 10, overflow: 'hidden',
+          }}>
+            <button onClick={() => onOpen(c.wxid)} style={{
+              all: 'unset', cursor: 'pointer',
+              flex: 1, minWidth: 0,
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              padding: '10px 14px',
+            }}
+            onMouseEnter={(e) => e.currentTarget.style.background = 'var(--et-orange-soft)'}
+            onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}>
+              <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--et-ink)',
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 200 }}>
+                {displayName(c.wxid, c.name)}
+              </span>
+              <span style={{ fontSize: 10, color: 'var(--et-mute)' }}>
+                {c.edge_type === 'mutual_reply' ? `群里互动 ${c.weight}` :
+                 c.edge_type === 'mention' ? `提及 ${c.mention_count ?? '—'}` :
+                 c.edge_type === 'moments_cross' ? `朋友圈 ${c.moments_cross ?? '—'}` :
+                 c.edge_type === 'co_group' ? `共群 ${c.shared_group_count ?? c.weight}` :
+                 `${c.weight}`}
+              </span>
+            </button>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setExportPeer({ id: c.wxid, name: c.name });
+              }}
+              title={`导出 ${displayName(friend.id, friend.name)} ↔ ${displayName(c.wxid, c.name)} 的关系档案`}
+              style={{
+                all: 'unset', cursor: 'pointer',
+                padding: '0 12px',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                color: 'var(--et-mute)', fontSize: 14,
+                borderLeft: '0.5px solid var(--et-line-2)',
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background = 'var(--et-orange-soft)';
+                e.currentTarget.style.color = 'var(--et-orange-2)';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = 'transparent';
+                e.currentTarget.style.color = 'var(--et-mute)';
+              }}>
+              📤
+            </button>
+          </div>
         ))}
       </div>
       {conns.length > 12 && (
@@ -284,6 +319,47 @@ function ConnectionsCard({ friend, onOpen }: {
           还有 {conns.length - 12} 条更弱的连线 …
         </div>
       )}
+      {exportPeer && (
+        <PairExportModal
+          a={friend.id} aName={friend.name}
+          b={exportPeer.id} bName={exportPeer.name}
+          onClose={() => setExportPeer(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function PairExportModal({
+  a, aName, b, bName, onClose,
+}: { a: string; aName: string; b: string; bName: string; onClose: () => void }) {
+  // Esc closes
+  useEffect(() => {
+    const fn = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', fn);
+    return () => window.removeEventListener('keydown', fn);
+  }, [onClose]);
+  return (
+    <div onClick={onClose} style={{
+      position: 'fixed', inset: 0, zIndex: 100,
+      background: 'rgba(20,24,42,0.42)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24,
+    }}>
+      <div onClick={(e) => e.stopPropagation()} style={{
+        width: 540, maxWidth: '92%',
+        background: 'var(--et-bg)',
+        borderRadius: 'var(--et-r-lg)',
+        boxShadow: 'var(--et-shadow-3)',
+        position: 'relative', overflow: 'hidden',
+      }}>
+        <button onClick={onClose} style={{
+          position: 'absolute', top: 14, right: 14, all: 'unset', cursor: 'pointer',
+          width: 28, height: 28, borderRadius: 8, color: 'var(--et-mute)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          fontSize: 16, zIndex: 1,
+        }}>×</button>
+        <PairAnalysisPanel a={a} b={b} aName={aName} bName={bName} />
+      </div>
     </div>
   );
 }
@@ -452,9 +528,11 @@ function ReportViewerOverlay({ relPath, friendName, onClose }: {
 function ActionDock({ onExportAI, onShowMessages, onExportChat, onOpenYearbook }: {
   onExportAI: () => void;
   onShowMessages: () => void;
-  onExportChat: () => void;
+  onExportChat: (fmt: ExportFormat) => Promise<void>;
   onOpenYearbook: () => void;
 }) {
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [busy, setBusy] = useState<ExportFormat | null>(null);
   const Btn = ({ icon, label, sub, primary, disabled, onClick }: {
     icon: string; label: string; sub: string; primary?: boolean; disabled?: boolean; onClick?: () => void;
   }) => (
@@ -480,12 +558,48 @@ function ActionDock({ onExportAI, onShowMessages, onExportChat, onOpenYearbook }
       </div>
     </button>
   );
+
+  async function pick(fmt: ExportFormat) {
+    setBusy(fmt);
+    try {
+      await onExportChat(fmt);
+    } finally {
+      setBusy(null);
+      setPickerOpen(false);
+    }
+  }
+
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
-      <Btn icon="📖" label="完整聊天记录" sub="按时间倒序浏览" onClick={onShowMessages} />
-      <Btn icon="📤" label="导出聊天 .json" sub="本地文件" onClick={onExportChat} />
-      <Btn icon="💑" label="双人年代记" sub="按年份的故事时间线" onClick={onOpenYearbook} />
-      <Btn icon="🤖" label="导出 AI 分析包" sub="一键打包给 AI 看" primary onClick={onExportAI} />
+    <div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+        <Btn icon="📖" label="完整聊天记录" sub="按时间倒序浏览" onClick={onShowMessages} />
+        <Btn icon="📤" label="导出聊天" sub={pickerOpen ? '选择格式…' : 'JSON · HTML · TXT'} onClick={() => setPickerOpen(v => !v)} />
+        <Btn icon="💑" label="双人年代记" sub="按年份的故事时间线" onClick={onOpenYearbook} />
+        <Btn icon="🤖" label="导出 AI 分析包" sub="一键打包给 AI 看" primary onClick={onExportAI} />
+      </div>
+      {pickerOpen && (
+        <div style={{
+          marginTop: 10, padding: 10,
+          background: 'var(--et-paper)', border: '0.5px solid var(--et-line-2)',
+          borderRadius: 'var(--et-r)', display: 'flex', gap: 8,
+        }}>
+          {(['json', 'html', 'txt'] as ExportFormat[]).map(f => (
+            <button key={f} onClick={() => pick(f)} disabled={busy !== null} style={{
+              all: 'unset', cursor: busy !== null ? 'wait' : 'pointer',
+              flex: 1, textAlign: 'center', padding: '10px 0',
+              background: busy === f ? 'var(--et-orange)' : 'var(--et-paper-2)',
+              color: busy === f ? '#fff' : 'var(--et-ink)',
+              border: '0.5px solid var(--et-line-2)', borderRadius: 8,
+              fontSize: 12, fontWeight: 600, textTransform: 'uppercase',
+              opacity: busy !== null && busy !== f ? 0.4 : 1,
+            }}>{busy === f ? '导出中…' : f}</button>
+          ))}
+          <button onClick={() => setPickerOpen(false)} style={{
+            all: 'unset', cursor: 'pointer', padding: '0 14px',
+            color: 'var(--et-mute)', fontSize: 12,
+          }}>取消</button>
+        </div>
+      )}
     </div>
   );
 }
@@ -597,17 +711,6 @@ function MessagesDrawer({ open, friend, onClose }: { open: boolean; friend: Frie
   );
 }
 
-function downloadAsFile(filename: string, content: string, mime: string = 'application/json') {
-  const blob = new Blob([content], { type: mime });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 0);
-}
-
 export function FriendPage({ friendId, onBack, onOpenFriend }: Props) {
   void usePrivacy();
   const [friend, setFriend] = useState<Friend | null>(null);
@@ -615,6 +718,12 @@ export function FriendPage({ friendId, onBack, onOpenFriend }: Props) {
   const [moments, setMoments] = useState<Moment[]>([]);
   const [momentsLoading, setMomentsLoading] = useState(true);
   const [exportOpen, setExportOpen] = useState(false);
+  // Manual-AI pack just generated — surfaces a ReportReadyBanner with copy /
+  // open-folder / send-online links until the user dismisses it. Replaces
+  // the old Step-2 modal that was inside AIExportDialog.
+  const [readyPack, setReadyPack] = useState<{
+    ok: boolean; path: string; size: number; name: string; content: string;
+  } | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<FriendTab>('story');
@@ -705,20 +814,14 @@ export function FriendPage({ friendId, onBack, onOpenFriend }: Props) {
     };
   }, [friendId]);
 
-  async function handleExportChat() {
+  async function handleExportChat(fmt: ExportFormat) {
     if (!friend) return;
     try {
-      const msgs = await getMessages(friendId, { limit: 5000 });
-      const privacy = isPrivacyMode();
-      const exported = privacy
-        ? msgs.map((m: any) => ({
-            ...m,
-            from: displayName(m.from_id, m.from),
-            from_id: m.from_id ? maskedWxid(m.from_id) : m.from_id,
-            text: maskText(m.text || ''),
-          }))
-        : msgs;
-      downloadAsFile(`${displayName(friend.id, friend.name)}_chat.json`, JSON.stringify(exported, null, 2));
+      // Routes through cli/exporters.py — full history (no 5000-cap), preserves
+      // compress_content text bodies, picks the right Content-Disposition name.
+      // Exports always carry the raw display name; privacy mode in the UI doesn't
+      // mask file contents, by design — the file is a personal local archive.
+      await exportFriendChat(friend.id, fmt);
     } catch (e: any) {
       alert('导出失败：' + maskText(e?.message || String(e)));
     }
@@ -738,7 +841,7 @@ export function FriendPage({ friendId, onBack, onOpenFriend }: Props) {
 
   // If user invoked an agent, show the report page instead of the regular friend layout
   if (agentInvoke) {
-    return <AgentReport friend={friend} cli={agentInvoke} onClose={() => {
+    return <RelationshipReportView friend={friend} cli={agentInvoke} onClose={() => {
       setAgentInvoke(null);
       // Re-fetch friend so the freshly-saved aiReport surfaces in the summary card
       getFriend(friendId).then(d => { setFriend(d); setStats(d.stats); }).catch(() => {});
@@ -787,8 +890,29 @@ export function FriendPage({ friendId, onBack, onOpenFriend }: Props) {
         </div>
       </div>
       )}
-      <AIExportDialog open={exportOpen} onClose={() => setExportOpen(false)} friend={friend}
-                       onLocalAgent={(cli) => { setExportOpen(false); setAgentInvoke(cli); }} />
+      <AIAssistantDrawer
+        open={exportOpen}
+        onClose={() => setExportOpen(false)}
+        friend={friend}
+        onComplete={(pack) => { setReadyPack(pack); setExportOpen(false); }}
+        onLocalAgent={(cli) => { setExportOpen(false); setAgentInvoke(cli); }}
+      />
+      {readyPack && (
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, zIndex: 40 }}>
+          <ReportReadyBanner
+            pack={readyPack}
+            friend={friend}
+            onOpenLocation={() => { /* openFolder is invoked inside the banner */ }}
+            onCopy={() => { void navigator.clipboard.writeText(readyPack.content); }}
+            onSendOnline={() => {
+              // Manual hand-off: the user copies + pastes themselves. We just
+              // open ChatGPT in a new tab as a starting point.
+              window.open('https://chat.openai.com/', '_blank');
+            }}
+            onDismiss={() => setReadyPack(null)}
+          />
+        </div>
+      )}
       <MessagesDrawer open={drawerOpen} friend={friend} onClose={closeMessagesDrawer} />
       {reportOpen && friend.aiReport && (
         <ReportViewerOverlay

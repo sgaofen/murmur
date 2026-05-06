@@ -39,6 +39,109 @@ MSG_TYPES = {
 }
 
 
+# WeChat 4.x sometimes encodes appmsg-like messages with these large-int local_type
+# values instead of 49 (the legacy slot). WeFlow's chatService.ts:80-104 catalogs the
+# same set; sourced from real-world databases.
+_APPMSG_LARGEINT_TYPES = {244813135921, 8589934592049, 8594229559345}
+
+
+# `<appmsg><type>N</type>...` sub-classifier. WeFlow's xmlType set, trimmed to the
+# ones that map to a meaningful 1-line preview.
+_APPMSG_SUBTYPE_LABELS = {
+    "5":  "链接", "6": "文件", "8": "表情", "15": "聊天记录",
+    "17": "位置共享", "19": "聊天记录", "24": "笔记",
+    "33": "小程序", "36": "小程序",
+    "51": "视频号", "57": "引用",
+    "63": "音乐", "74": "位置", "76": "音乐",
+    "2000": "转账", "2001": "红包",
+}
+
+
+def _coerce_appmsg_text(content, store) -> str:
+    """Decode an appmsg blob into a UTF-8 XML string.
+
+    Same zstd-then-utf8 dance as the type-1 branch. Returns "" on garbage.
+    """
+    if not content:
+        return ""
+    if isinstance(content, bytes):
+        if content.startswith(b"\x28\xb5\x2f\xfd"):
+            try:
+                if store._zstd is None:
+                    import zstandard as _zs
+                    store._zstd = _zs.ZstdDecompressor()
+                content = store._zstd.decompress(content)
+            except Exception:
+                pass
+        try:
+            content = content.decode("utf-8", errors="replace")
+        except Exception:
+            return ""
+    return content if isinstance(content, str) else ""
+
+
+def _xml_inner(text: str, tag: str) -> str:
+    """Tiny tag-content extractor — enough for the appmsg surface area without
+    pulling lxml. Returns first match's inner text, stripped, or empty.
+    """
+    m = re.search(rf"<{tag}>([\s\S]*?)</{tag}>", text)
+    if not m:
+        return ""
+    inner = m.group(1).strip()
+    # Strip CDATA wrapper if present.
+    cd = re.match(r"^<!\[CDATA\[([\s\S]*?)\]\]>$", inner)
+    return (cd.group(1) if cd else inner).strip()
+
+
+def _render_appmsg(xml_text: str) -> str:
+    """Turn an <appmsg> XML body into a one-line preview.
+
+    Always returns a string starting with `[label]` so downstream readers can
+    still tell it's an attachment. For quote (type 57) we additionally pull the
+    quoted speaker + content. Returns "" only when the XML is unrecognisable
+    — caller will fall back to the bare type stub.
+    """
+    if "<appmsg" not in xml_text:
+        return ""
+    # Carve out the <appmsg>...</appmsg> body so refermsg subnodes don't
+    # confuse the title/des extractors below.
+    m = re.search(r"<appmsg[\s\S]*?>([\s\S]*?)</appmsg>", xml_text)
+    body = m.group(1) if m else xml_text
+    refer_block = ""
+    refer_m = re.search(r"<refermsg>([\s\S]*?)</refermsg>", body)
+    if refer_m:
+        refer_block = refer_m.group(1)
+        body = body.replace(refer_m.group(0), "")
+
+    sub = _xml_inner(body, "type")
+    label = _APPMSG_SUBTYPE_LABELS.get(sub) or "分享"
+    title = _xml_inner(body, "title")
+    des = _xml_inner(body, "des")
+
+    if sub == "57" and refer_block:
+        quoted_speaker = _xml_inner(refer_block, "displayname") or _xml_inner(refer_block, "chatusr")
+        quoted_text = _xml_inner(refer_block, "content")
+        # quoted_text on 4.x is sometimes the verbatim quoted appmsg XML again
+        # — skim it down to a single readable phrase.
+        if "<msg" in quoted_text or "<appmsg" in quoted_text:
+            inner = _xml_inner(quoted_text, "title") or _xml_inner(quoted_text, "des") or "[复杂消息]"
+            quoted_text = inner
+        head = f"[引用 {quoted_speaker}：{quoted_text[:60]}]" if quoted_speaker else f"[引用：{quoted_text[:60]}]"
+        return f"{head} {title}".strip() if title else head
+
+    if sub in ("2000", "2001"):
+        # Transfer / red packet — title carries amount/wishes; des is usually empty.
+        return f"[{label}] {title}".strip()
+
+    if title and des and title != des:
+        return f"[{label}] {title} — {des[:80]}"
+    if title:
+        return f"[{label}] {title[:120]}"
+    if des:
+        return f"[{label}] {des[:120]}"
+    return f"[{label}]"
+
+
 # ---------- config / discovery ----------
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -438,12 +541,23 @@ class EchoStore:
         # WeChat 4.x can have the same Msg_<md5> table in multiple message_*.db files
         # (one per rolled period). We need to read every one and merge.
         all_rows: list[tuple[int, int, str, str, str]] = []  # (ts, mtype, sender_wxid, sender_name, text)
-        seen_keys: set[tuple[int, int, str]] = set()  # dedupe by (ts, sender_id, stable_content_hash)
+        # Dedupe key now includes local_id so two genuinely-identical short messages
+        # within the same DB (e.g. user spamming "好" twice in 1 second) don't collapse
+        # to one. Cross-DB rollover can leak through here — but rollover boundary
+        # duplicates are very rare in 4.x and showing one extra row is far better
+        # than silently merging real repeats. local_id is per-DB so the (fname, local_id)
+        # pair uniquely identifies a row across the whole result set.
+        seen_keys: set[tuple[str, int, int, int, str]] = set()  # (fname, local_id, ts, sender_id, content_hash)
 
         for fname, table in locs:
             c = self._conn(fname)
             try:
                 n2i = {row[0]: row[1] for row in c.execute("SELECT rowid, user_name FROM Name2Id").fetchall()}
+                # WeChat 4.x can store the actual text in `compress_content` (zstd-wrapped)
+                # while `message_content` is empty/short. Older schemas only have
+                # message_content. PRAGMA tells us which exists so the SQL stays valid.
+                tbl_cols = {row[1] for row in c.execute(f"PRAGMA table_info({table})").fetchall()}
+                has_compress = "compress_content" in tbl_cols
                 wheres = []
                 params: list = []
                 if since is not None:
@@ -454,12 +568,21 @@ class EchoStore:
                     params.append(until)
                 if text_only:
                     wheres.append("local_type = 1")
-                sql = f"SELECT local_id, create_time, real_sender_id, local_type, message_content FROM {table}"
+                content_cols = "message_content, compress_content" if has_compress else "message_content, NULL"
+                sql = f"SELECT local_id, create_time, real_sender_id, local_type, {content_cols} FROM {table}"
                 if wheres:
                     sql += " WHERE " + " AND ".join(wheres)
                 sql += " ORDER BY create_time ASC, local_id ASC"
                 # Don't apply limit here; we'll cap after merging
-                for local_id, ts, sender_id, mtype, content in c.execute(sql, params):
+                for local_id, ts, sender_id, mtype, content, compress in c.execute(sql, params):
+                    # Prefer compress_content when it carries a real zstd payload — that's
+                    # where WeChat 4.x routinely puts the actual text body. Only swap for
+                    # text-type rows; non-text rows keep their original (XML/blob) content.
+                    if (mtype == 1
+                            and isinstance(compress, (bytes, bytearray))
+                            and len(compress) >= 4
+                            and bytes(compress[:4]) == b"\x28\xb5\x2f\xfd"):
+                        content = bytes(compress)
                     # Light dedup against duplicates that may sit at db-rollover boundaries
                     if isinstance(content, bytes):
                         content_bytes = content
@@ -468,7 +591,7 @@ class EchoStore:
                     else:
                         content_bytes = str(content).encode("utf-8", errors="replace")
                     content_hash = hashlib.sha1(content_bytes).hexdigest()
-                    key = (int(ts or 0), int(sender_id or 0), content_hash)
+                    key = (fname, int(local_id or 0), int(ts or 0), int(sender_id or 0), content_hash)
                     if key in seen_keys:
                         continue
                     seen_keys.add(key)
@@ -517,7 +640,22 @@ class EchoStore:
             if content.count("�") > max(2, len(content) // 8):
                 return ""
             return content
-        # non-text: try a tagged stub. Avoid decompressing big blobs by default.
+        # appmsg (type 49) plus 4.x large-int variants — the actual content is
+        # XML inside <appmsg>...</appmsg>. WeFlow's chatService.ts:4191 has the
+        # same `<refermsg>` strip pattern. We extract title / des / quoted text
+        # so quotes/links/transfers/files surface real content, not a stub.
+        if mtype == 49 or mtype in _APPMSG_LARGEINT_TYPES:
+            xml_text = _coerce_appmsg_text(content, self)
+            if xml_text:
+                # Strip "wxid_xxx:\n" group prefix before XML scanning
+                if is_group:
+                    m = re.match(r"^[^\s:]+:\n", xml_text)
+                    if m:
+                        xml_text = xml_text[m.end():]
+                rendered = _render_appmsg(xml_text)
+                if rendered:
+                    return rendered
+        # non-text fallback: tagged stub. Avoid decompressing big blobs by default.
         label = MSG_TYPES.get(mtype, f"type_{mtype}")
         return f"[{label}]"
 
@@ -603,8 +741,8 @@ STOPWORDS.update("这个 那个 一下 还是 就是 没有 什么 怎么 为啥
 STOP_CHARS = set("的了是我你他她也都在就不和与这那一个有没啊吧呀嗯哦嘛呢吗哈呜哇噢哎唉哟唔嗷嘿哼啦喔把被让给从向对跟比又再才还但而或因所以之上下里外中后前时日年月来去到过")
 NON_TEXT = re.compile(r"\[[^\]]+\]")
 URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
-APP_VERSION = "0.3.17"
-YEARBOOK_CACHE_VERSION = 5
+APP_VERSION = "0.4.0"
+YEARBOOK_CACHE_VERSION = 6
 
 
 def _ts_to_dt(ts: int):
@@ -1781,18 +1919,25 @@ def extract_mentions_of_friend(store: EchoStore, target_wxid: str,
 
 
 def extract_pair_mentions_direct(store: EchoStore, wxid_a: str, wxid_b: str) -> dict:
-    """Direct, pair-specific mention scan; avoids the top-50 global cache missing long-tail pairs."""
+    """Direct, pair-specific mention scan; avoids the top-50 global cache missing long-tail pairs.
+
+    Per-side example budget bumped 5→12 (and final merge cap 10→24) so the
+    AI sees far more concrete instances of "you talked about A in your chat
+    with B" — that's the primary disambiguator between a real social link
+    and a coincidental name-mention.
+    """
     canonical = tuple(sorted([wxid_a, wxid_b]))
-    b_in_a_chat = _scan_mentions_in_chat(store, wxid_a, wxid_b, max_examples=5)
-    a_in_b_chat = _scan_mentions_in_chat(store, wxid_b, wxid_a, max_examples=5)
+    b_in_a_chat = _scan_mentions_in_chat(store, wxid_a, wxid_b, max_examples=12)
+    a_in_b_chat = _scan_mentions_in_chat(store, wxid_b, wxid_a, max_examples=12)
+    merged = b_in_a_chat["examples"] + a_in_b_chat["examples"]
+    merged.sort(key=lambda x: x.get("ts", 0), reverse=True)
     return {
         "wxid_a": canonical[0],
         "wxid_b": canonical[1],
         f"mentions_in_chat_with_{wxid_a}": b_in_a_chat["count"],
         f"mentions_in_chat_with_{wxid_b}": a_in_b_chat["count"],
         "total_mentions": b_in_a_chat["count"] + a_in_b_chat["count"],
-        "examples": sorted((b_in_a_chat["examples"] + a_in_b_chat["examples"])[:10],
-                           key=lambda x: x.get("ts", 0), reverse=True),
+        "examples": merged[:24],
         "names_a": a_in_b_chat["names"],
         "names_b": b_in_a_chat["names"],
     }
@@ -1859,6 +2004,98 @@ def sample_non_text_events(store: EchoStore, username: str, limit: int = 12) -> 
     return out
 
 
+def _yearbook_evidence_block(store: 'EchoStore', wxid: str) -> str:
+    """Render the yearbook's hard-evidence metrics as a markdown sub-section
+    suitable for injection into build_analysis_pack.
+
+    Picks the LATEST year's stats — those are most relevant for "where is
+    this relationship now". Older year aggregates are already captured in
+    format_report_markdown's longevity / signature_notes block.
+    """
+    try:
+        yb = friend_yearbook(store, wxid)
+    except Exception:
+        return ""
+    years = yb.get("years") or []
+    if not years:
+        return ""
+    y = years[-1]  # most recent year — what AI should cite as "current state"
+    bits: list[str] = ["\n## 数据指纹（直接量化的硬证据）\n"]
+    bits.append(
+        f"> 这是 {y.get('year')} 年里的统计指纹。**请在下方分析中直接引用具体数字**——"
+        f"不要写成「比较多」「经常」，要写成「{y.get('msg_count', 0)} 条消息」、"
+        f"「连续 {y.get('longest_streak_days', 0)} 天有交流」这种带数字的句式。\n"
+    )
+    bits.append(f"- 总条数：{y.get('msg_count', 0)} 条；活跃天数：{y.get('active_days', 0)} 天")
+    bits.append(f"- 你 vs 他主导比：{y.get('self_pct', 0)}% / {100 - y.get('self_pct', 0)}%")
+    if y.get("longest_streak_days"):
+        streak_days = y["longest_streak_days"]
+        sdate = y.get("streak_start") or "?"
+        edate = y.get("streak_end") or "?"
+        bits.append(f"- 最长连聊：**{streak_days} 天**（{sdate} → {edate}）")
+    if y.get("longest_silence_days"):
+        bits.append(
+            f"- 最长沉默：{y['longest_silence_days']} 天（{y.get('silence_from') or '?'} 起）"
+        )
+    if (y.get("session_starts_self") or 0) + (y.get("session_starts_other") or 0) > 0:
+        bits.append(
+            f"- 谁先开聊：你 {y.get('session_starts_self', 0)} 次 vs 他 "
+            f"{y.get('session_starts_other', 0)} 次（你主动率 {y.get('initiative_self_pct', 0)}%）"
+        )
+    if y.get("late_night_msgs"):
+        bits.append(
+            f"- 深夜（23-4 时）消息：{y['late_night_msgs']} 条，占 {y.get('late_night_pct', 0)}%；"
+            f"深夜里他说话占 {y.get('midnight_friend_pct', 0)}%（剩下是你）"
+        )
+    sec = y.get("median_reply_sec") or 0
+    if sec > 0:
+        if sec < 60:
+            txt = f"{sec} 秒"
+        elif sec < 3600:
+            txt = f"{round(sec / 60)} 分"
+        else:
+            txt = f"{sec / 3600:.1f} 小时"
+        bits.append(f"- 中位回复时长：{txt}（同一会话里互相之间的回复间隔中位数）")
+    f_half = y.get("first_half_msgs") or 0
+    s_half = y.get("second_half_msgs") or 0
+    if f_half + s_half > 0:
+        if s_half > f_half * 1.2:
+            trend = "↑ 越聊越多"
+        elif f_half > s_half * 1.2:
+            trend = "↓ 后期降温"
+        else:
+            trend = "→ 全年平稳"
+        bits.append(
+            f"- 全年趋势：{trend}（前半年 {f_half}，后半年 {s_half}）"
+        )
+
+    # Heatmap top hours — pick top 3 cells (weekday + hour), gives AI a
+    # concrete "他/她什么时候最爱聊" line to anchor on.
+    heat = y.get("heatmap_24x7") or []
+    if isinstance(heat, list) and len(heat) == 168:
+        weekday_zh = ["一", "二", "三", "四", "五", "六", "日"]
+        ranked = sorted(
+            ((i, v) for i, v in enumerate(heat) if v > 0),
+            key=lambda x: -x[1],
+        )[:3]
+        if ranked:
+            tops = "、".join(
+                f"周{weekday_zh[i // 24]} {i % 24}:00（{v} 条）"
+                for i, v in ranked
+            )
+            bits.append(f"- 全年最高峰时段：{tops}")
+
+    if y.get("top_words"):
+        toks = "、".join(
+            f"{w['word']}({w['count']})" for w in y["top_words"][:6]
+        )
+        bits.append(f"- 高频词：{toks}")
+    if y.get("calls"):
+        bits.append(f"- 通话：{y['calls']} 次")
+
+    return "\n".join(bits) + "\n"
+
+
 def build_analysis_pack(store: EchoStore, username: str, sample_n: int = 80,
                          include_group_context: bool = True) -> str:
     """Returns a Markdown file (本地分析报告 + 数据样本 + LLM prompt) that any chatbot can ingest.
@@ -1897,6 +2134,20 @@ def build_analysis_pack(store: EchoStore, username: str, sample_n: int = 80,
     name = a["name"] or username
     parts = []
     parts.append(format_report_markdown(a))
+
+    # Hard-evidence metrics block — exposes Yearbook-side numbers (longest
+    # streak, midnight skew, initiative %, per-year decay, top hours from
+    # the 24×7 heatmap) so the AI quotes specific data instead of writing
+    # generic prose. Without this, the AI report tends to hand-wave; with
+    # it, you'll see lines like "你们最长连聊 12 天，深夜里 73% 是他在说话".
+    if not a["is_group"]:
+        try:
+            yb_block = _yearbook_evidence_block(store, username)
+        except Exception:
+            yb_block = ""
+        if yb_block:
+            parts.append(yb_block)
+
     parts.append("\n---\n")
     parts.append("## 抽样对话（按时间分布）\n")
     if a["is_group"]:
@@ -2732,6 +2983,408 @@ _HOME_CACHE: dict = {"ts": 0, "data": None}
 _HOME_CACHE_TTL = 60  # seconds
 
 
+# ---------- Global annual report (year-in-review across ALL friends) ----------
+#
+# WeFlow's `annualReportService.AnnualReportData` taxonomy maps cleanly to
+# Murmur's data — Spotify-Wrapped-style global stats spanning every chat for
+# the picked year. Computed once per (account, year), cached on disk + memory.
+
+_ANNUAL_REPORT_CACHE: dict[str, tuple[float, dict]] = {}
+_ANNUAL_REPORT_TTL = 24 * 3600  # one day
+
+
+def _is_text_or_appmsg(mtype: int) -> bool:
+    """Whether to count this message in 'words I said' phrase aggregation."""
+    return mtype == 1 or mtype == 49 or mtype in _APPMSG_LARGEINT_TYPES
+
+
+def compute_annual_report(store: EchoStore, year: int) -> dict:
+    """One-pass global aggregation: top friends, monthly winners, peak day,
+    streak, heatmap, midnight king, mutual friend, initiative, lost friend.
+
+    Iterates each PRIVATE chat once for the year window. Group chats are
+    excluded from per-friend ranking (group msgs aren't intimate signals)
+    but their daily totals still count for `peak_day` / `total_messages`.
+    """
+    cache_key = f"{store.me or '?'}__{year}"
+    cached = _ANNUAL_REPORT_CACHE.get(cache_key)
+    if cached and (_time.time() - cached[0]) < _ANNUAL_REPORT_TTL:
+        return cached[1]
+    disk = _disk_load(f"annual_report_{cache_key}")
+    if disk and (_time.time() - disk["_ts"]) < _ANNUAL_REPORT_TTL:
+        _ANNUAL_REPORT_CACHE[cache_key] = (disk["_ts"], disk["_payload"])
+        return disk["_payload"]
+
+    year_start = int(datetime(year, 1, 1, tzinfo=CST).timestamp())
+    year_end = int(datetime(year + 1, 1, 1, tzinfo=CST).timestamp())
+
+    me = store.me or "self"
+    contacts = store.contacts()
+    sessions = store.sessions()
+
+    # Per-friend aggregates we'll need to derive top-N lists later
+    per_friend: dict[str, dict] = {}
+    # Global rollups
+    total_msgs = 0
+    monthly_global = [0] * 12
+    daily_global: dict[str, dict] = {}  # date → {count, top_wxid, top_count}
+    days_active_global: set = set()
+    heat_24x7 = [0] * (24 * 7)  # weekday * 24 + hour
+    self_phrases: Counter = Counter()
+    initiative_self_total = 0
+    initiative_other_total = 0
+
+    SESSION_GAP = 6 * 3600
+
+    def init_agg(wxid: str, name: str) -> dict:
+        return {
+            "wxid": wxid, "name": name,
+            "count": 0, "self": 0, "other": 0,
+            "monthly": [0] * 12,
+            "days": set(),
+            "midnight": 0,
+            "first_ts": 0, "last_ts": 0,
+            "reply_lats": [],
+            "session_starts_self": 0, "session_starts_other": 0,
+            "first_half": 0, "second_half": 0,
+        }
+
+    mid_year = year_start + (year_end - year_start) // 2
+
+    for s in sessions:
+        if s.is_group:
+            # Group-chat day-totals still feed the global daily peak — they're
+            # a real signal of "this was a busy day" — but skip per-friend
+            # aggregation since we don't intimate-rank group co-members.
+            try:
+                gmsgs = list(store.messages(s.username, since=year_start, until=year_end, text_only=False))
+            except Exception:
+                continue
+            for m in gmsgs:
+                if m.create_time < year_start or m.create_time >= year_end:
+                    continue
+                total_msgs += 1
+                dt = _ts_to_dt(m.create_time)
+                month_idx = dt.month - 1
+                monthly_global[month_idx] += 1
+                day_iso = dt.date().isoformat()
+                days_active_global.add(day_iso)
+                day_entry = daily_global.setdefault(day_iso, {"count": 0, "top_wxid": "", "top_count": 0})
+                day_entry["count"] += 1
+                heat_24x7[dt.weekday() * 24 + dt.hour] += 1
+            continue
+
+        try:
+            msgs = list(store.messages(s.username, since=year_start, until=year_end, text_only=False))
+        except Exception:
+            continue
+        if not msgs:
+            continue
+        contact = contacts.get(s.username)
+        name = (contact.display() if contact else s.username) or s.username
+        agg = init_agg(s.username, name)
+        per_friend[s.username] = agg
+
+        for i, m in enumerate(msgs):
+            ts = m.create_time
+            if ts < year_start or ts >= year_end:
+                continue
+            agg["count"] += 1
+            total_msgs += 1
+            dt = _ts_to_dt(ts)
+            month_idx = dt.month - 1
+            agg["monthly"][month_idx] += 1
+            monthly_global[month_idx] += 1
+            day_iso = dt.date().isoformat()
+            agg["days"].add(day_iso)
+            days_active_global.add(day_iso)
+            heat_24x7[dt.weekday() * 24 + dt.hour] += 1
+
+            # Daily peak tracking — also remember top-friend on busiest day.
+            day_entry = daily_global.setdefault(day_iso, {"count": 0, "top_wxid": "", "top_count": 0})
+            day_entry["count"] += 1
+
+            # Per-friend / global self vs other
+            if m.sender_wxid == "self" or m.sender_wxid == me:
+                agg["self"] += 1
+                if m.text and _is_text_or_appmsg(m.msg_type):
+                    for w in _word_counts([m.text]).items():
+                        self_phrases[w[0]] += w[1]
+            else:
+                agg["other"] += 1
+
+            # Late-night
+            if dt.hour >= 23 or dt.hour < 4:
+                agg["midnight"] += 1
+
+            # First / last
+            if agg["first_ts"] == 0 or ts < agg["first_ts"]:
+                agg["first_ts"] = ts
+            if ts > agg["last_ts"]:
+                agg["last_ts"] = ts
+
+            # Half-year decay
+            if ts < mid_year:
+                agg["first_half"] += 1
+            else:
+                agg["second_half"] += 1
+
+            # Session starts (chat initiation)
+            if i == 0 or ts - msgs[i - 1].create_time >= SESSION_GAP:
+                if m.sender_wxid == "self" or m.sender_wxid == me:
+                    agg["session_starts_self"] += 1
+                    initiative_self_total += 1
+                else:
+                    agg["session_starts_other"] += 1
+                    initiative_other_total += 1
+
+            # Reply latency within sessions
+            if i > 0:
+                prev = msgs[i - 1]
+                if (ts - prev.create_time) < SESSION_GAP and prev.sender_wxid != m.sender_wxid:
+                    agg["reply_lats"].append(ts - prev.create_time)
+
+        # Daily-top friend rollup: for each date the friend was active, see
+        # if their per-day count beats the prior best.
+        date_counts: Counter = Counter()
+        for m in msgs:
+            if year_start <= m.create_time < year_end:
+                date_counts[_ts_to_dt(m.create_time).date().isoformat()] += 1
+        for date_iso, n in date_counts.items():
+            entry = daily_global.get(date_iso)
+            if entry and n > entry["top_count"]:
+                entry["top_count"] = n
+                entry["top_wxid"] = s.username
+
+    # ---------- Derive ranked outputs ----------
+    if total_msgs == 0:
+        empty = {"year": year, "total_messages": 0, "active_years_count": 0}
+        _ANNUAL_REPORT_CACHE[cache_key] = (_time.time(), empty)
+        _disk_save(f"annual_report_{cache_key}", empty)
+        return empty
+
+    # Top friends by message count
+    ranked = sorted(per_friend.values(), key=lambda a: -a["count"])
+    top_friends = [
+        {
+            "wxid": a["wxid"], "name": a["name"],
+            "count": a["count"], "self": a["self"], "other": a["other"],
+            "first_date": datetime.fromtimestamp(a["first_ts"], CST).strftime("%Y-%m-%d") if a["first_ts"] else None,
+            "last_date": datetime.fromtimestamp(a["last_ts"], CST).strftime("%Y-%m-%d") if a["last_ts"] else None,
+        }
+        for a in ranked[:10]
+    ]
+    total_friends_active = sum(1 for a in per_friend.values() if a["count"] >= 10)
+
+    # Monthly winners — for each of 12 months, which friend talked most
+    monthly_winners = []
+    for month_idx in range(12):
+        best_wxid = ""
+        best_count = 0
+        best_name = ""
+        for wxid, a in per_friend.items():
+            if a["monthly"][month_idx] > best_count:
+                best_count = a["monthly"][month_idx]
+                best_wxid = wxid
+                best_name = a["name"]
+        monthly_winners.append({
+            "month": month_idx + 1,
+            "wxid": best_wxid or None,
+            "name": best_name or None,
+            "count": best_count,
+            "month_total": monthly_global[month_idx],
+        })
+
+    # Peak day
+    peak_day_iso = max(daily_global.keys(), key=lambda d: daily_global[d]["count"]) if daily_global else None
+    peak_day = None
+    if peak_day_iso:
+        e = daily_global[peak_day_iso]
+        peak_friend_name = ""
+        if e["top_wxid"] and e["top_wxid"] in per_friend:
+            peak_friend_name = per_friend[e["top_wxid"]]["name"]
+        peak_day = {
+            "date": peak_day_iso,
+            "count": e["count"],
+            "top_wxid": e["top_wxid"] or None,
+            "top_name": peak_friend_name or None,
+            "top_count": e["top_count"],
+        }
+
+    # Longest streak across everyone — consecutive days with any chat at all
+    days_sorted = sorted(days_active_global)
+    longest_streak = 0
+    streak_end_iso = None
+    if days_sorted:
+        from datetime import date as _date
+        cur_streak = 1
+        cur_end = days_sorted[0]
+        prev = _date.fromisoformat(days_sorted[0])
+        for d_iso in days_sorted[1:]:
+            d = _date.fromisoformat(d_iso)
+            if (d - prev).days == 1:
+                cur_streak += 1
+                cur_end = d_iso
+            else:
+                if cur_streak > longest_streak:
+                    longest_streak = cur_streak
+                    streak_end_iso = cur_end
+                cur_streak = 1
+                cur_end = d_iso
+            prev = d
+        if cur_streak > longest_streak:
+            longest_streak = cur_streak
+            streak_end_iso = cur_end
+    streak_start_iso = None
+    if streak_end_iso and longest_streak > 0:
+        from datetime import date as _date, timedelta as _td
+        streak_start_iso = (_date.fromisoformat(streak_end_iso) - _td(days=longest_streak - 1)).isoformat()
+
+    # Midnight king (top non-self correspondent during 23-5)
+    midnight_king = None
+    if per_friend:
+        m_ranked = sorted(per_friend.values(), key=lambda a: -a["midnight"])
+        top = m_ranked[0]
+        if top["midnight"] >= 5:
+            midnight_king = {
+                "wxid": top["wxid"], "name": top["name"],
+                "count": top["midnight"],
+                "share": round(top["midnight"] / max(1, sum(a["midnight"] for a in per_friend.values())) * 100),
+            }
+
+    # Most-mutual friend — closest sent / received ratio with at least 50 msgs
+    mutual_candidates = [
+        a for a in per_friend.values()
+        if a["count"] >= 50 and a["self"] > 0 and a["other"] > 0
+    ]
+    mutual = None
+    if mutual_candidates:
+        best = min(mutual_candidates, key=lambda a: abs(a["self"] - a["other"]) / a["count"])
+        mutual = {
+            "wxid": best["wxid"], "name": best["name"],
+            "self": best["self"], "other": best["other"],
+            "ratio": round(best["self"] / max(1, best["other"]), 2),
+        }
+
+    # Social initiative
+    total_starts = initiative_self_total + initiative_other_total
+    initiative = None
+    if total_starts > 0:
+        # Find the friend you started conversations with most
+        top_init = max(per_friend.values(), key=lambda a: a["session_starts_self"])
+        initiative = {
+            "self_starts": initiative_self_total,
+            "other_starts": initiative_other_total,
+            "self_rate": round(initiative_self_total / total_starts * 100),
+            "top_initiated_wxid": top_init["wxid"] if top_init["session_starts_self"] > 0 else None,
+            "top_initiated_name": top_init["name"] if top_init["session_starts_self"] > 0 else None,
+            "top_initiated_count": top_init["session_starts_self"],
+        }
+
+    # Top phrases (filter generic ones already handled by _word_counts)
+    top_phrases = [
+        {"phrase": p, "count": c}
+        for p, c in self_phrases.most_common(15)
+        if c >= 5
+    ][:10]
+
+    # Lost friend — biggest first-half → second-half drop, with at least
+    # 100 first-half messages (so we don't surface noise)
+    lost_friend = None
+    if per_friend:
+        candidates = [
+            a for a in per_friend.values()
+            if a["first_half"] >= 100 and a["second_half"] < a["first_half"] * 0.3
+        ]
+        if candidates:
+            worst = max(candidates, key=lambda a: a["first_half"] - a["second_half"])
+            lost_friend = {
+                "wxid": worst["wxid"], "name": worst["name"],
+                "first_half": worst["first_half"],
+                "second_half": worst["second_half"],
+                "drop_pct": round((1 - worst["second_half"] / worst["first_half"]) * 100),
+            }
+
+    # Median reply latency (across all per-friend reply latencies)
+    all_lats: list[int] = []
+    for a in per_friend.values():
+        all_lats.extend(a["reply_lats"])
+    all_lats.sort()
+    median_reply_sec = all_lats[len(all_lats) // 2] if all_lats else 0
+
+    payload = {
+        "year": year,
+        "total_messages": total_msgs,
+        "total_friends_active": total_friends_active,
+        "active_days": len(days_active_global),
+        "first_message_date": min(days_active_global) if days_active_global else None,
+        "last_message_date": max(days_active_global) if days_active_global else None,
+        "monthly_totals": monthly_global,
+        "top_friends": top_friends,
+        "monthly_winners": monthly_winners,
+        "peak_day": peak_day,
+        "longest_streak": {
+            "days": longest_streak,
+            "start": streak_start_iso,
+            "end": streak_end_iso,
+        } if longest_streak > 0 else None,
+        "heatmap_24x7": heat_24x7,
+        "midnight_king": midnight_king,
+        "mutual_friend": mutual,
+        "initiative": initiative,
+        "median_reply_sec": median_reply_sec,
+        "top_phrases": top_phrases,
+        "lost_friend": lost_friend,
+    }
+
+    _ANNUAL_REPORT_CACHE[cache_key] = (_time.time(), payload)
+    _disk_save(f"annual_report_{cache_key}", payload)
+    return payload
+
+
+def list_available_report_years(store: EchoStore) -> list[int]:
+    """Years that have at least 100 messages across all chats — picks the
+    set offered to the AnnualReport page's year switcher.
+    """
+    sessions = store.sessions()
+    counts: Counter = Counter()
+    # Sample-scan: query MIN(create_time)+MAX(create_time) per message db
+    # then assume the DB covers a contiguous range. Cheap.
+    if _is_qq_store(store):
+        # QQ: just go off earliest_ts → now
+        try:
+            earliest = store.earliest_ts()  # type: ignore[attr-defined]
+        except Exception:
+            earliest = 0
+        if earliest:
+            now_year = datetime.now(CST).year
+            start_year = datetime.fromtimestamp(earliest, CST).year
+            return list(range(start_year, now_year + 1))
+        return []
+    for p in sorted(store.dir.glob("message_*.db")):
+        if any(skip in p.name for skip in ("_fts", "_resource", "biz_")):
+            continue
+        try:
+            c = store._conn(p.name)
+            try:
+                for t in _list_msg_tables(c):
+                    try:
+                        r = c.execute(f"SELECT MIN(create_time), MAX(create_time) FROM {t}").fetchone()
+                        if r and r[0] and r[1]:
+                            from_year = datetime.fromtimestamp(r[0], CST).year
+                            to_year = datetime.fromtimestamp(r[1], CST).year
+                            for y in range(from_year, to_year + 1):
+                                counts[y] += 1
+                    except sqlite3.DatabaseError:
+                        continue
+            finally:
+                c.close()
+        except Exception:
+            continue
+    sessions  # silence unused
+    return sorted(counts.keys())
+
+
 def home_summary(store: EchoStore) -> dict:
     if _HOME_CACHE["data"] and (_time.time() - _HOME_CACHE["ts"]) < _HOME_CACHE_TTL:
         return _HOME_CACHE["data"]
@@ -3124,6 +3777,82 @@ def friend_yearbook(store: EchoStore, wxid: str) -> dict:
         late_night = sum(1 for x in ymsgs
                         if 23 <= _ts_to_dt(x.create_time).hour or _ts_to_dt(x.create_time).hour < 4)
 
+        # Midnight skew — among 23-5 messages, what fraction is the friend? Tells
+        # whether "深夜聊天" is mostly you reaching out vs them. Pure 1:1 metric.
+        late_msgs = [x for x in ymsgs
+                     if 23 <= _ts_to_dt(x.create_time).hour or _ts_to_dt(x.create_time).hour < 4]
+        late_friend_msgs = sum(1 for x in late_msgs
+                              if x.sender_wxid != me and x.sender_wxid != "self")
+        midnight_friend_pct = round(late_friend_msgs / len(late_msgs) * 100) if late_msgs else 0
+
+        # Longest streak — longest run of consecutive days with at least one msg.
+        # `days_active` is already a sorted list of unique dates above.
+        longest_streak = 0
+        streak_end = None
+        cur_streak = 1 if days_active else 0
+        cur_end = days_active[0] if days_active else None
+        for i in range(1, len(days_active)):
+            if (days_active[i] - days_active[i - 1]).days == 1:
+                cur_streak += 1
+                cur_end = days_active[i]
+            else:
+                if cur_streak > longest_streak:
+                    longest_streak = cur_streak
+                    streak_end = cur_end
+                cur_streak = 1
+                cur_end = days_active[i]
+        if cur_streak > longest_streak:
+            longest_streak = cur_streak
+            streak_end = cur_end
+        streak_start_iso = (
+            (streak_end - timedelta(days=longest_streak - 1)).isoformat()
+            if streak_end and longest_streak > 0 else None
+        )
+
+        # Social initiative — who started a "session" (gap > 6h since prior msg).
+        # Count session-start messages by sender and report initiation rate.
+        SESSION_GAP = 6 * 3600
+        my_starts = friend_starts = 0
+        for i, x in enumerate(ymsgs):
+            if i == 0 or x.create_time - ymsgs[i - 1].create_time >= SESSION_GAP:
+                if x.sender_wxid == me or x.sender_wxid == "self":
+                    my_starts += 1
+                else:
+                    friend_starts += 1
+        total_starts = my_starts + friend_starts
+        initiative_self_pct = round(my_starts / total_starts * 100) if total_starts else 0
+
+        # 24×7 hour×weekday heatmap (Mon=0). Flat list, frontend reshapes if needed.
+        # Total cells: 24 * 7 = 168, kept compact as plain list of ints.
+        heatmap_24x7 = [0] * (24 * 7)
+        for x in ymsgs:
+            dt = _ts_to_dt(x.create_time)
+            heatmap_24x7[dt.weekday() * 24 + dt.hour] += 1
+
+        # Within-year decay — first-half vs second-half message counts. Surfaces
+        # "fade-out" friendships that started strong and trailed off, the
+        # WeFlow `lostFriend` per-year signal.
+        if days_active and len(days_active) >= 2:
+            mid_day = days_active[len(days_active) // 2]
+            first_half_msgs = sum(1 for x in ymsgs
+                                  if _ts_to_dt(x.create_time).date() < mid_day)
+            second_half_msgs = n - first_half_msgs
+        else:
+            first_half_msgs = n
+            second_half_msgs = 0
+        # Median reply latency within sessions — only counts you-to-them or
+        # them-to-you transitions inside the same session. Skips lone messages.
+        reply_lats: list[int] = []
+        for i in range(1, len(ymsgs)):
+            prev = ymsgs[i - 1]
+            cur = ymsgs[i]
+            if cur.create_time - prev.create_time >= SESSION_GAP:
+                continue  # new session, not a reply
+            if cur.sender_wxid != prev.sender_wxid:
+                reply_lats.append(cur.create_time - prev.create_time)
+        reply_lats.sort()
+        median_reply_sec = reply_lats[len(reply_lats) // 2] if reply_lats else 0
+
         # Calls in year
         calls = sum(1 for x in ymsgs if x.msg_type in (50, 62))
 
@@ -3142,6 +3871,17 @@ def friend_yearbook(store: EchoStore, wxid: str) -> dict:
             "silence_from": silence_from,
             "late_night_msgs": late_night,
             "late_night_pct": round(late_night / n * 100) if n else 0,
+            "midnight_friend_pct": midnight_friend_pct,
+            "longest_streak_days": longest_streak,
+            "streak_start": streak_start_iso,
+            "streak_end": streak_end.isoformat() if streak_end else None,
+            "initiative_self_pct": initiative_self_pct,
+            "session_starts_self": my_starts,
+            "session_starts_other": friend_starts,
+            "first_half_msgs": first_half_msgs,
+            "second_half_msgs": second_half_msgs,
+            "median_reply_sec": median_reply_sec,
+            "heatmap_24x7": heatmap_24x7,
             "calls": calls,
             "vulnerability_quotes": vuln_quotes,
             "offline_quotes": offline_quotes,
@@ -3308,6 +4048,36 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             md5 = path[len("/api/media/"):]
             return self._serve_media(md5)
 
+        if path.startswith("/api/voice-data/"):
+            # Serve extracted voice MP3 bytes from media_root/voice/<rel>.
+            # Strict path-traversal guard: resolve under voice_root and verify
+            # the resolved path stays inside it.
+            rel = urllib.parse.unquote(path[len("/api/voice-data/"):])
+            profs = _paths.discover_wechat_profiles()
+            if not profs:
+                return self._send_json({"error": "no profile"}, 404)
+            voice_root = _paths.media_root_for(profs[0]) / "voice"
+            target = (voice_root / rel).resolve()
+            try:
+                voice_root_resolved = voice_root.resolve()
+            except OSError:
+                return self._send_json({"error": "voice root unavailable"}, 404)
+            try:
+                target.relative_to(voice_root_resolved)
+            except ValueError:
+                return self._send_json({"error": "path traversal"}, 403)
+            if not target.is_file():
+                return self._send_json({"error": "not found"}, 404)
+            data = target.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "audio/mpeg")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self._send_cors_headers()
+            self.end_headers()
+            self.wfile.write(data)
+            return
+
         if path == "/api/info":
             if self.store is None:
                 diagnose_hint = "no decrypted data — run extract-key + refresh to bootstrap"
@@ -3358,6 +4128,71 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             # a GitHub issue. We mask the user's home dir and wxid so they don't
             # leak more than they intend; everything else is structural.
             return self._send_json({"markdown": _build_diag_bundle()})
+
+        if path == "/api/pair-export":
+            a = (qs.get("a", [""])[0]) or ""
+            b = (qs.get("b", [""])[0]) or ""
+            fmt = (qs.get("format", ["json"])[0]).lower()
+            if not a or not b:
+                return self._send_json({"error": "a and b required"}, status=400)
+            if self.store is None:
+                return self._send_json({"error": "no_decrypted_data"}, status=503)
+            try:
+                from exporters import http_pair_export_meta, write_pair_export
+                content_type, ext = http_pair_export_meta(fmt)
+            except (ImportError, ValueError) as e:
+                return self._send_json({"error": str(e)}, status=400)
+            import io as _io
+            buf = _io.StringIO()
+            try:
+                write_pair_export(a, b, fmt, buf)
+            except SystemExit as e:
+                return self._send_json({"error": str(e)}, status=422)
+            except Exception as e:
+                return self._send_json({"error": f"{type(e).__name__}: {e}"}, status=500)
+            body = buf.getvalue().encode("utf-8")
+            safe_a = "".join(ch for ch in a if ch.isalnum() or ch in "._-")[:40] or "A"
+            safe_b = "".join(ch for ch in b if ch.isalnum() or ch in "._-")[:40] or "B"
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Content-Disposition", f'attachment; filename="murmur_pair_{safe_a}__{safe_b}.{ext}"')
+            self._send_cors_headers()
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if path == "/api/export":
+            wxid = (qs.get("wxid", [""])[0]) or ""
+            fmt = (qs.get("format", ["json"])[0]).lower()
+            if not wxid:
+                return self._send_json({"error": "missing wxid"}, status=400)
+            if self.store is None:
+                return self._send_json({"error": "no_decrypted_data"}, status=503)
+            try:
+                from exporters import http_export_meta, write_export
+                content_type, ext = http_export_meta(fmt)
+            except (ImportError, ValueError) as e:
+                return self._send_json({"error": str(e)}, status=400)
+            import io as _io
+            buf = _io.StringIO()
+            try:
+                count = write_export(wxid, fmt, buf)
+            except Exception as e:
+                return self._send_json({"error": f"{type(e).__name__}: {e}"}, status=500)
+            body = buf.getvalue().encode("utf-8")
+            # Sanitize wxid for the Content-Disposition filename — strip any
+            # path or quote chars that could break the header
+            safe = "".join(ch for ch in wxid if ch.isalnum() or ch in "._-")[:60] or "chat"
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Content-Disposition", f'attachment; filename="murmur_{safe}.{ext}"')
+            self.send_header("X-Message-Count", str(count))
+            self._send_cors_headers()
+            self.end_headers()
+            self.wfile.write(body)
+            return
 
         if path == "/api/scan-disks/status":
             # Polling endpoint for the background disk scan started by POST /api/scan-disks.
@@ -3417,7 +4252,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     "message": evidence["message"],
                     "evidence": evidence,
                 }, 422)
-            ck = "pairpack_v3_" + "__".join(sorted([a, b]))
+            ck = "pairpack_v4_" + "__".join(sorted([a, b]))
             cached = _PAIR_PACK_CACHE.get(ck)
             if cached and (_time.time() - cached[0]) < _CACHE_TTL:
                 return self._send_json(cached[1])
@@ -3584,6 +4419,22 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 "murmur_home": str(_paths.murmur_home()),
                 "wechat_search_roots": [str(p) for p in _paths.wechat_search_paths()],
             })
+        if path == "/api/annual-report":
+            try:
+                year = int(qs.get("year", [str(datetime.now(CST).year - 1)])[0])
+            except (TypeError, ValueError):
+                return self._send_json({"error": "year must be int"}, 400)
+            with _PACK_BUILD_LOCK:
+                with _STORE_READ_LOCK:
+                    payload = compute_annual_report(self.store, year)
+            return self._send_json(payload)
+
+        if path == "/api/annual-report/years":
+            return self._send_json({
+                "years": list_available_report_years(self.store),
+                "default": datetime.now(CST).year - 1,
+            })
+
         if path == "/api/home-summary":
             if _HOME_SUMMARY_CACHE["data"] is not None and (_time.time() - _HOME_SUMMARY_CACHE["ts"]) < _CACHE_TTL:
                 return self._send_json(_HOME_SUMMARY_CACHE["data"])
@@ -3629,6 +4480,38 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 return self._send_json(payload)
             if sub == "moments":
                 return self._send_json(friend_moments(self.store, wxid, n=int(qs.get("n", [4])[0])))
+            if sub == "voices":
+                # List extracted voice MP3s for this friend (run voice.py extract first).
+                # Returns [{ts, name, size, url}]; the URL is a /api/voice-data/<rel> link.
+                import hashlib as _hashlib
+                import urllib.parse as _up
+                profs = _paths.discover_wechat_profiles()
+                if not profs:
+                    return self._send_json([])
+                voice_root = _paths.media_root_for(profs[0]) / "voice"
+                if not voice_root.exists():
+                    return self._send_json([])
+                table_prefix = f"Msg_{_hashlib.md5(wxid.encode()).hexdigest()}"[:30]
+                target_dir = voice_root / table_prefix
+                if not target_dir.exists():
+                    return self._send_json([])
+                host = self.headers.get("Host") or "127.0.0.1:9100"
+                items = []
+                for mp3 in sorted(target_dir.glob("*.mp3")):
+                    rel = f"{table_prefix}/{mp3.name}"
+                    try:
+                        ts_str = mp3.stem.split("_", 1)[0]
+                        ts = int(ts_str)
+                    except (ValueError, IndexError):
+                        ts = 0
+                    items.append({
+                        "ts": ts,
+                        "name": mp3.name,
+                        "size": mp3.stat().st_size,
+                        "url": f"http://{host}/api/voice-data/{_up.quote(rel)}",
+                    })
+                items.sort(key=lambda x: x["ts"], reverse=True)
+                return self._send_json(items[:300])
             if sub == "yearbook":
                 cached = _YEARBOOK_CACHE.get(wxid)
                 if cached and (_time.time() - cached[0]) < _CACHE_TTL and _yearbook_has_quote_ids(cached[1]):
@@ -4907,6 +5790,14 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             wprofs = []
         cfg = _paths.load_config()
         saved_wkey = bool(cfg.get("decrypt_key")) or (Path.home() / ".murmur" / "decrypted_keys.json").exists()
+        # Pull nickname + avatar from each xwechat_files/all_users/config/global_config
+        # so the multi-account picker can show real names instead of bare wxids.
+        # Result is cached per xwechat_files root for the duration of this call.
+        try:
+            from global_config import parse_for_xwechat  # noqa: E402
+        except ImportError:
+            parse_for_xwechat = None  # type: ignore[assignment]
+        global_meta_by_xwf: dict[str, dict] = {}
         for p in wprofs:
             dec_dir = _paths.decrypted_root_for(p, must_exist=True)
             ready = bool(dec_dir)
@@ -4921,10 +5812,29 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     pass
             state = "ready" if ready else ("needs_decrypt" if saved_wkey else "needs_key")
             pid = p.wxid
+            # cache_root looks like <xwechat_files>/<wxid>/, so xwechat_files = parent
+            xwf_root = p.cache_root.parent
+            meta = global_meta_by_xwf.get(str(xwf_root))
+            if meta is None and parse_for_xwechat is not None:
+                try:
+                    meta = parse_for_xwechat(xwf_root)
+                except Exception:
+                    meta = {}
+                global_meta_by_xwf[str(xwf_root)] = meta or {}
+            nickname = (meta or {}).get("nick_name") or ""
+            head_img = (meta or {}).get("head_img_url") or ""
+            # global_config only stores ONE active account per xwechat_files; if
+            # the wxid in the file doesn't match this profile's wxid, drop the
+            # name/avatar to avoid mislabeling the wrong account.
+            if (meta or {}).get("wxid") and (meta or {}).get("wxid") != p.wxid:
+                nickname = ""
+                head_img = ""
             out.append({
                 "id": pid,
                 "platform": "wechat",
                 "display_id": cls._mask_id(pid),
+                "nick_name": nickname,
+                "head_img_url": head_img,
                 "qq_number": None,
                 "n_sessions": n_sessions,
                 "last_active_ts": last_ts or None,
@@ -5330,24 +6240,27 @@ def build_pair_inference_pack(store: EchoStore, wxid_a: str, wxid_b: str,
     parts.append(f"- 你和 {name_b} 的私聊里提到「{name_a}」: **{b_chat_mentions}** 次")
     if rec.get("examples"):
         parts.append("- 样例：")
-        for ex in rec["examples"][:8]:
-            parts.append(f"  - `[{ex['date']}]` {ex['from']}: {ex['text'][:160]}")
+        for ex in rec["examples"][:24]:
+            parts.append(f"  - `[{ex['date']}]` {ex['from']}: {ex['text'][:200]}")
     else:
         parts.append("- 未检测到明确名字提及；后续结论需要更多依赖群聊、朋友圈或各自私聊语境。")
     parts.append("")
 
-    # Each side's basic profile (time-spread samples for context)
+    # Each side's basic profile (time-spread samples for context). 28 → 50
+    # gives the AI enough texture to separate "we chat sometimes" from
+    # "we share inside jokes". Non-text events 8 → 20 captures more
+    # voice/image/call signals.
     for wxid, name in [(wxid_a, name_a), (wxid_b, name_b)]:
         msgs = list(store.messages(wxid, text_only=True))
         if not msgs:
             continue
         parts.append(f"## 你 ↔ {name} 对话样本（按时间分布）\n")
         parts.append("> 头部 + 中段 + 尾部抽样，避免只看早期或近期片段。\n")
-        for m in _pick_spread(msgs, 28):
+        for m in _pick_spread(msgs, 50):
             who = "你" if m.sender_wxid == "self" else m.sender_name
             date = datetime.fromtimestamp(m.create_time, CST).strftime("%Y-%m-%d")
-            parts.append(f"- `[{date}]` **{who}**: {m.text[:120]}")
-        non_text_events = sample_non_text_events(store, wxid, limit=8)
+            parts.append(f"- `[{date}]` **{who}**: {m.text[:160]}")
+        non_text_events = sample_non_text_events(store, wxid, limit=20)
         if non_text_events:
             parts.append("\n**非文本互动样本**：")
             for ev in non_text_events:
@@ -5391,7 +6304,9 @@ def build_pair_inference_pack(store: EchoStore, wxid_a: str, wxid_b: str,
 
         # Pull rolling windows around direct A↔B turns first; if none, use spread samples
         # from all A-or-B utterances so the pack still explains co-presence.
-        sample_idxs = _pick_spread_indices(sorted(direct_turn_idxs), 12) if direct_turn_idxs else _pick_spread_indices(idxs, 12)
+        # 12 → 24 windows: more dialogue means stronger evidence of how they
+        # actually talk to each other in groups (banter / formal / ignoring).
+        sample_idxs = _pick_spread_indices(sorted(direct_turn_idxs), 24) if direct_turn_idxs else _pick_spread_indices(idxs, 24)
         used = set()
         windows: list[list[int]] = []
         for k in sample_idxs:
@@ -5416,7 +6331,7 @@ def build_pair_inference_pack(store: EchoStore, wxid_a: str, wxid_b: str,
             "direct_turn_count": direct_turn_count,
             "first_date": datetime.fromtimestamp(ms[idxs[0]].create_time, CST).strftime("%Y-%m-%d"),
             "last_date": datetime.fromtimestamp(ms[idxs[-1]].create_time, CST).strftime("%Y-%m-%d"),
-            "windows": windows[:6],  # up to 6 dialogue windows per group
+            "windows": windows[:14],  # up to 14 dialogue windows per group (was 6)
             "msgs": ms,
         })
     # Sort by interaction density (a_count + b_count, prefer balanced)
@@ -5424,7 +6339,7 @@ def build_pair_inference_pack(store: EchoStore, wxid_a: str, wxid_b: str,
     if group_dialogues:
         parts.append("## 共同群聊概览\n")
         parts.append("> 这里使用完整群聊历史扫描，不再只截前 2000 条；直接接话指 10 分钟内 A/B 互相承接。\n")
-        for gd in group_dialogues[:10]:
+        for gd in group_dialogues[:16]:
             parts.append(
                 f"- 群「{gd['group']}」：{name_a} {gd['a_count']} 条，{name_b} {gd['b_count']} 条；"
                 f"直接接话 {gd['direct_turn_count']} 次；跨度 {gd['first_date']} → {gd['last_date']}"
@@ -5436,7 +6351,10 @@ def build_pair_inference_pack(store: EchoStore, wxid_a: str, wxid_b: str,
             "每条消息都按通讯录里的备注/昵称显示（即使他们改了群昵称）。"
             "看他们之间的语气 / 是否互相 @ / 是否搭话能直接推断关系深度。\n"
         )
-        for gd in group_dialogues[:5]:
+        # Render full dialogue for top 10 groups (was 5) — more groups means
+        # the AI can see whether they only know each other through one shared
+        # context (e.g. one school class) or are tied across multiple circles.
+        for gd in group_dialogues[:10]:
             parts.append(
                 f"\n### 群「{gd['group']}」（{name_a} 发言 {gd['a_count']} 条 · "
                 f"{name_b} 发言 {gd['b_count']} 条 · 直接接话 {gd['direct_turn_count']} 次）"
@@ -5478,8 +6396,10 @@ def build_pair_inference_pack(store: EchoStore, wxid_a: str, wxid_b: str,
                     f"- {name_b} 给 {name_a} 互动 {s['b_liked_a'] + s['b_commented_a'] if key[0] == wxid_a else s['a_liked_b'] + s['a_commented_b']} 次"
                 )
                 if s.get("examples"):
+                    # 4 → 14 examples — moments comments are short and
+                    # carry strong tone signal; cheap to include more.
                     parts.append("- 评论原文样本：")
-                    for ex in s["examples"][:4]:
+                    for ex in s["examples"][:14]:
                         ex_date = datetime.fromtimestamp(ex.get("ts", 0), CST).strftime("%Y-%m-%d") if ex.get("ts") else "?"
                         from_name = name_a if ex.get("from_wxid") == wxid_a else name_b if ex.get("from_wxid") == wxid_b else ex.get("from_name", "对方")
                         to_name = name_a if ex.get("to_wxid") == wxid_a else name_b if ex.get("to_wxid") == wxid_b else "对方"

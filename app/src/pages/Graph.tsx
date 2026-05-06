@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { GraphView } from '../components/extras/GraphView';
 import type { GraphData, GraphNode, GraphEdge, GraphCluster, Spotlight } from '../components/extras/GraphView';
 import { API_BASE, getFriend, getPairPack, findPairReport, getReport, getFriendConnections, invokeAgent, getInvokeStream, getAgents, invokePairAgent, getPairStream } from '../data/api';
+import { PairAnalysisPanel } from './extras/PairAnalysisPanel';
 import type { BatchStatus, LocalAgent } from '../data/api';
 import type { FriendConnection } from '../data/api';
 import type { Friend, FriendStats } from '../data/types';
@@ -1312,21 +1313,28 @@ function EdgePanelInner({ edge, aName, bName, onClose, onOpenFriend, isQQ }: {
                   </div>
                 )}
                 {!packError && analyzing !== 'running' && (
-                  <div style={{ marginTop: 10, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                    {agents.length === 0 ? (
-                      <span className="et-meta" style={{ color: 'var(--et-faint)', fontSize: 11 }}>
-                        没检测到 claude/codex CLI
-                      </span>
-                    ) : (
-                      agents.map(a => (
-                        <button key={a.cli} onClick={() => runPairAnalysis(a.cli)} style={{
-                          all: 'unset', cursor: 'pointer',
-                          padding: '6px 12px', borderRadius: 8,
-                          background: 'var(--et-orange)', color: '#fff',
-                          fontSize: 12, fontWeight: 600,
-                        }}>🤖 让 {a.name} 分析这对</button>
-                      ))
-                    )}
+                  <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                      {agents.length === 0 ? (
+                        <span className="et-meta" style={{ color: 'var(--et-faint)', fontSize: 11 }}>
+                          没检测到 claude/codex CLI
+                        </span>
+                      ) : (
+                        agents.map(a => (
+                          <button key={a.cli} onClick={() => runPairAnalysis(a.cli)} style={{
+                            all: 'unset', cursor: 'pointer',
+                            padding: '6px 12px', borderRadius: 8,
+                            background: 'var(--et-orange)', color: '#fff',
+                            fontSize: 12, fontWeight: 600,
+                          }}>🤖 让 {a.name} 分析这对</button>
+                        ))
+                      )}
+                    </div>
+                    {/* Pair export — issue #10. Productized panel from Round 2.
+                        Hero copy frames it as Murmur's signature feature, three
+                        format cards each with a use-case + body. Old PairExportRow
+                        component is left defined below as fallback. */}
+                    <PairAnalysisPanel a={edge.source} b={edge.target} aName={aName} bName={bName} />
                   </div>
                 )}
               </div>

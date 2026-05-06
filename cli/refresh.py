@@ -31,8 +31,76 @@ from paths import (
     IS_WINDOWS, IS_MAC, native_dir, load_config,
     discover_wechat_profiles, decrypted_root_for, WeChatProfile,
 )
+from decrypt_cache import DecryptCache
 
 SKIP = {'message_fts.db', 'contact_fts.db', 'favorite_fts.db', 'message_resource.db'}
+
+
+def _wechat_is_running() -> bool:
+    """True if a Weixin/WeChat process is alive locally.
+
+    Used as a pre-flight gate: decrypting while WeChat is writing produces
+    half-pages and leaves the user with corrupt session.db. ylytdeng's
+    wechat-decrypt blocks the same way; without this, Murmur surfaces the
+    failure as a cryptic "being used by another process" error well into
+    the decrypt run.
+
+    Returns False on any check failure — don't block the user when our
+    detection itself is broken.
+    """
+    try:
+        if IS_WINDOWS:
+            import subprocess as _sp
+            for exe in ("Weixin.exe", "WeChat.exe"):
+                r = _sp.run(["tasklist", "/fi", f"imagename eq {exe}"],
+                            capture_output=True, text=True, timeout=4)
+                if exe.lower() in (r.stdout or "").lower():
+                    return True
+            return False
+        if IS_MAC:
+            import subprocess as _sp
+            for name in ("WeChat", "Weixin"):
+                r = _sp.run(["pgrep", "-x", name], capture_output=True, timeout=3)
+                if r.returncode == 0:
+                    return True
+            return False
+    except Exception:
+        return False
+    return False
+
+
+# Maps cryptic go_decrypt.dll / decrypt_py messages to a Chinese hint that names
+# the actual root cause + a fix. Without this every error surfaces as raw English
+# and produces near-identical "解不开" support tickets — see WeFlow's
+# formatInitProtectionError for the same pattern.
+_ERROR_HINTS = (
+    ("wrong key", "密钥不属于这个账号 — 多账号情况下可能抓错了号；请回到密钥页重抓（确认抓时微信登录的就是这个号）"),
+    ("hmac", "密钥不属于这个账号 — 多账号情况下可能抓错了号；请回到密钥页重抓"),
+    ("incorrect", "密钥校验失败 — 请重新抓密钥"),
+    ("no such file", "数据库文件不存在 — 请确认微信目录完整，或重启微信再点开几个聊天"),
+    ("permission denied", "没有读取权限 — 请关闭微信后重试，或检查文件夹权限"),
+    ("being used by another process", "文件被微信占用 — 请关闭微信后重试"),
+    ("unexpected eof", "数据库文件损坏或微信正在写入 — 请关闭微信再重试"),
+    ("invalid argument", "数据库格式无法识别 — 可能微信刚升级且更换了 schema；建议重抓密钥并清空 ~/Documents/Murmur/decrypted/"),
+    ("disk i/o error", "磁盘读写错误 — 检查目标盘是否还有空间，或换个盘"),
+    ("encrypted database is malformed", "解密后 schema 异常 — 微信可能升级了；请清掉 ~/Documents/Murmur/decrypted/<wxid_short>/ 后重抓密钥重试"),
+)
+
+
+def friendly_error(raw: str) -> str:
+    """Pretty-print a decrypt error: original message + a Chinese hint when we recognise it.
+
+    Returning the raw text alone is fine for debugging but hostile for end users
+    who'll just see English jargon. Always include the raw so power users still
+    have something to grep against.
+    """
+    if not raw:
+        return ""
+    low = raw.lower()
+    for needle, hint in _ERROR_HINTS:
+        if needle in low:
+            return f"{raw}  →  {hint}"
+    return raw
 
 
 def load_dll():
@@ -225,7 +293,7 @@ def _decrypt_per_db(profile: WeChatProfile, per_db: dict) -> int:
             results.append((src.name, True, None))
         except Exception as e:
             dt = time.time() - t0
-            print(f"  [{i:2d}/{len(src_dbs)}] FAIL ({size_mb:6.1f} MB, {dt:5.2f}s) {rel}: {e}")
+            print(f"  [{i:2d}/{len(src_dbs)}] FAIL ({size_mb:6.1f} MB, {dt:5.2f}s) {rel}: {friendly_error(str(e))}")
             results.append((src.name, False, str(e)))
 
     print(f"\n[INFO] 解密耗时 {time.time() - t_total:.2f}s")
@@ -269,7 +337,25 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--wxid", help="WeChat account (auto-detected if omitted)")
     parser.add_argument("--key", help="64-hex SQLCipher key (omits config lookup)")
+    # WeFlow's `forceReopen` analog: when WeChat upgrades and changes its DB schema,
+    # the previously-swapped session.db becomes unreadable to the new etcli code path.
+    # `--force` nukes the per-account decrypted dir up front so next decrypt is clean.
+    parser.add_argument("--force", action="store_true",
+                        help="清空目标解密目录后再解密（schema 异常 / 微信升级后用）")
+    parser.add_argument("--allow-running", action="store_true",
+                        help="即使微信正在运行也强制解密（默认会阻断；只在你确认 WeChat 没在写时用）")
     args = parser.parse_args()
+
+    # Pre-flight: refuse to decrypt while WeChat is alive locally — half-written
+    # pages give corrupt output. --allow-running overrides for power users who
+    # need to snapshot live data and accept the risk.
+    if _wechat_is_running() and not args.allow_running:
+        raise SystemExit(
+            "[X] 检测到微信/Weixin 正在运行 — 解密期间微信若在写数据，"
+            "会拿到半页损坏的 session.db。\n"
+            "    请先关闭微信再运行 refresh。\n"
+            "    或加 --allow-running 强制（仅在你确认微信不会写时用）。"
+        )
 
     profile = select_profile(args)
     print(f"[INFO] 账号: {profile.wxid}")
@@ -301,56 +387,139 @@ def main():
 
     dst_dir = decrypted_root_for(profile)
     dst_dir.mkdir(parents=True, exist_ok=True)
+    if args.force and dst_dir.exists():
+        print(f"[INFO] --force 清空 {dst_dir}")
+        for entry in dst_dir.iterdir():
+            try:
+                if entry.is_file() or entry.is_symlink():
+                    entry.unlink()
+                elif entry.is_dir():
+                    shutil.rmtree(entry, ignore_errors=True)
+            except OSError as e:
+                print(f"[WARN] 无法删除 {entry}: {e}")
     print(f"[INFO] 解密目标: {dst_dir}")
 
     lib = load_dll()
     src_dbs = sorted(p for p in profile.encrypted_root.rglob("*.db") if p.name not in SKIP)
 
+    # Incremental cache: skip files whose source mtime + size + WAL mtime are
+    # unchanged since the last successful decrypt with the same key. --force
+    # bypasses the cache entirely (and the destination is already nuked above).
+    cache = DecryptCache(dst_dir, key_bytes, src_root=profile.encrypted_root)
+    bypass_cache = bool(args.force)
+
     staging = Path(tempfile.mkdtemp(prefix='murmur_refresh_'))
     print(f"[INFO] 临时目录: {staging}")
-    print(f"[INFO] 共 {len(src_dbs)} 个加密 DB 待处理\n")
+    print(f"[INFO] 共 {len(src_dbs)} 个加密 DB 待处理（缓存命中将跳过）\n")
 
     results = []
     t_total = time.time()
-    for i, src in enumerate(src_dbs, 1):
-        out = staging / src.name
-        size_mb = src.stat().st_size / 1e6
-        t0 = time.time()
-        err = decrypt(lib, src, out, key_bytes)
-        dt = time.time() - t0
-        if err:
-            print(f"  [{i:2d}/{len(src_dbs)}] FAIL ({size_mb:6.1f} MB, {dt:5.2f}s) {src.relative_to(profile.encrypted_root)}: {err}")
-            results.append((src.name, False, err))
-        else:
-            print(f"  [{i:2d}/{len(src_dbs)}] OK   ({size_mb:6.1f} MB, {dt:5.2f}s) {src.name}")
-            results.append((src.name, True, None))
+    swap_failed = 0
+    skipped_cached = 0
+    try:
+        for i, src in enumerate(src_dbs, 1):
+            size_mb = src.stat().st_size / 1e6
+            if not bypass_cache and cache.is_fresh(src):
+                # Output is still valid — don't re-decrypt, don't queue for swap.
+                print(f"  [{i:2d}/{len(src_dbs)}] CACHE ({size_mb:6.1f} MB) {src.name}")
+                skipped_cached += 1
+                continue
+            out = staging / src.name
+            t0 = time.time()
+            err = decrypt(lib, src, out, key_bytes)
+            dt = time.time() - t0
+            if err:
+                print(f"  [{i:2d}/{len(src_dbs)}] FAIL ({size_mb:6.1f} MB, {dt:5.2f}s) {src.relative_to(profile.encrypted_root)}: {friendly_error(err)}")
+                results.append((src.name, False, err, src))
+                # Cache may now be lying about this file — drop it so the next
+                # refresh actually retries instead of marking it as fresh.
+                cache.forget(src)
+            else:
+                print(f"  [{i:2d}/{len(src_dbs)}] OK   ({size_mb:6.1f} MB, {dt:5.2f}s) {src.name}")
+                results.append((src.name, True, None, src))
 
-    print(f"\n[INFO] 解密耗时 {time.time() - t_total:.2f}s")
+        print(f"\n[INFO] 解密耗时 {time.time() - t_total:.2f}s")
 
-    print("\n[INFO] swap 到目标目录...")
-    moved = 0
-    for fname, ok, _ in results:
-        if not ok:
-            continue
-        src_f = staging / fname
-        dst_f = dst_dir / fname
+        # Atomic per-file swap: copy into a sibling .tmp on the destination
+        # filesystem (so os.replace is atomic), then rename. Avoids the brief
+        # window where dst doesn't exist that `unlink → shutil.move` opens, and
+        # eliminates the corrupt-half-decrypted-DB case if Murmur is killed
+        # between unlink and move.
+        print("\n[INFO] swap 到目标目录...")
+        moved = 0
+        for fname, ok, _, src_path in results:
+            if not ok:
+                continue
+            src_f = staging / fname
+            dst_f = dst_dir / fname
+            tmp_f = dst_dir / (fname + ".swap-tmp")
+            try:
+                # Clean up companion files left from the previous decrypt.
+                for ext in ('-wal', '-shm', '-journal'):
+                    sc = dst_dir / (fname + ext)
+                    if sc.exists():
+                        sc.unlink()
+                if tmp_f.exists():
+                    tmp_f.unlink()
+                shutil.copy2(src_f, tmp_f)  # cross-filesystem-safe write
+                os.replace(tmp_f, dst_f)    # atomic same-fs rename
+                src_f.unlink(missing_ok=True)
+                moved += 1
+                # Replay any pending WAL frames into the freshly-swapped DB so
+                # the user sees post-checkpoint messages. WAL is encrypted with
+                # the same key+salt as the main DB; failure to apply is silent
+                # (best-effort) since plain SQLite would just open without WAL.
+                try:
+                    from decrypt_py import decrypt_wal
+                    wal_path = src_path.with_suffix(src_path.suffix + "-wal")
+                    if wal_path.exists():
+                        applied = decrypt_wal(src_path, wal_path, dst_f, key_hex)
+                        if applied:
+                            print(f"      WAL: 合并 {applied} 帧")
+                except Exception as e:
+                    print(f"      WAL: 合并失败 {e}")
+                # Only mark cache after the swap actually landed — otherwise a
+                # crash between decrypt and swap would leave the cache thinking
+                # this file is fresh while the dst is still the old version.
+                cache.mark_done(src_path)
+            except OSError as e:
+                print(f"  [SWAP-FAIL] {fname}: {e}")
+                if tmp_f.exists():
+                    try:
+                        tmp_f.unlink()
+                    except OSError:
+                        pass
+                swap_failed += 1
+    finally:
+        # Always clean staging — even on Ctrl-C — so we don't leak GBs of
+        # decrypted scratch data into TMPDIR.
+        shutil.rmtree(staging, ignore_errors=True)
+        # Persist cache state best-effort — failure here is not fatal.
         try:
-            for ext in ('-wal', '-shm', '-journal'):
-                sc = dst_dir / (fname + ext)
-                if sc.exists():
-                    sc.unlink()
-            if dst_f.exists():
-                dst_f.unlink()
-            shutil.move(src_f, dst_f)
-            moved += 1
-        except OSError as e:
-            print(f"  [SWAP-FAIL] {fname}: {e}")
+            cache.save()
+        except Exception as e:
+            print(f"[WARN] 缓存写入失败: {e}")
 
-    shutil.rmtree(staging, ignore_errors=True)
-    n_ok = sum(1 for _, ok, _ in results if ok)
+    n_ok = sum(1 for _, ok, _, _ in results if ok)
     n_fail = len(results) - n_ok
-    print(f"\n[DONE] 解密 {n_ok} 个，swap {moved} 个，失败 {n_fail} 个")
-    return 0 if n_fail == 0 else 1
+    summary = (
+        f"\n[DONE] 新解密 {n_ok}，缓存命中 {skipped_cached}，swap {moved}，失败 {n_fail}"
+        + (f"，swap 失败 {swap_failed}" if swap_failed else "")
+    )
+    print(summary)
+
+    # Multi-DB schema sentinel — warn (don't fail) when secondary DBs landed
+    # but their sentinel tables are missing. Catches the "schema drift"
+    # category of bugs that a session.db-only check misses.
+    try:
+        from paths import detect_partial_decrypt
+        broken = detect_partial_decrypt(dst_dir)
+        if broken:
+            print(f"[WARN] 这些 DB 缺少预期的表：{', '.join(broken)} —— "
+                  f"微信可能升级了 schema，建议 refresh.py --force 重新解密")
+    except Exception:
+        pass
+    return 0 if (n_fail == 0 and swap_failed == 0) else 1
 
 
 if __name__ == '__main__':

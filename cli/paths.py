@@ -969,6 +969,40 @@ def discover_wechat_profiles() -> list[WeChatProfile]:
     return profiles
 
 
+# (db_filename, sentinel_table) pairs we expect under a healthy decrypted dir.
+# session.db is *required* — without it Murmur cannot list any sessions. The
+# rest are *advisory*: if any of them is present but its sentinel table is
+# missing, that's a strong signal the decrypt produced a half-baked file even
+# though the schema validator on session.db passed. detect_partial_decrypt()
+# returns the list of broken pairs so the UI can surface a "请重新解密" prompt.
+_REQUIRED_DB_SENTINEL = ("session.db", "SessionTable")
+_ADVISORY_DB_SENTINELS = (
+    ("contact.db",  "contact"),
+    ("biz.db",      "BizContactInfo"),
+    ("emoticon.db", "CustomEmotion"),
+    ("sns.db",      "Feed"),
+)
+
+
+def _table_exists(db_path: Path, table: str) -> bool:
+    """Best-effort: True iff `db_path` opens and has `table` in sqlite_master."""
+    if not db_path.exists() or db_path.stat().st_size < 4096:
+        return False
+    import sqlite3 as _sqlite3
+    try:
+        c = _sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        try:
+            row = c.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+                (table,),
+            ).fetchone()
+            return bool(row)
+        finally:
+            c.close()
+    except _sqlite3.Error:
+        return False
+
+
 def _is_real_decrypted_dir(p: Path) -> bool:
     """A decrypted dir is "ready" only if session.db has at least one user table.
 
@@ -977,21 +1011,28 @@ def _is_real_decrypted_dir(p: Path) -> bool:
     and lock EchoStore into a permanently empty state — frontend then shows
     "后端没起来" forever even though etcli is fine.
     """
-    sess = p / "session.db"
-    if not sess.exists() or sess.stat().st_size < 4096:
-        return False
-    import sqlite3 as _sqlite3
-    try:
-        c = _sqlite3.connect(f"file:{sess.as_posix()}?mode=ro", uri=True)
-        try:
-            row = c.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='SessionTable' LIMIT 1"
-            ).fetchone()
-            return bool(row)
-        finally:
-            c.close()
-    except _sqlite3.Error:
-        return False
+    sess_name, sess_table = _REQUIRED_DB_SENTINEL
+    return _table_exists(p / sess_name, sess_table)
+
+
+def detect_partial_decrypt(p: Path) -> list[str]:
+    """Returns the list of advisory DBs that exist but lack their sentinel table.
+
+    A non-empty list means the directory passed `_is_real_decrypted_dir` (so
+    session.db is fine) but at least one secondary DB looks broken — typical
+    when WeChat updated its schema and only some files re-decrypted cleanly.
+    Empty list = everything looks healthy. Use this to drive a "建议重新解密"
+    UI banner instead of waiting for the user to notice missing data.
+    """
+    broken: list[str] = []
+    for db_name, table in _ADVISORY_DB_SENTINELS:
+        db_path = p / db_name
+        if not db_path.exists():
+            # Missing entirely is fine — not every WeChat install has all DBs.
+            continue
+        if not _table_exists(db_path, table):
+            broken.append(db_name)
+    return broken
 
 
 def decrypted_root_for(profile: WeChatProfile, *, must_exist: bool = False) -> Path:

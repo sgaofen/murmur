@@ -147,6 +147,127 @@ def decrypt_db(src_path: Path, dst_path: Path, key_hex: str, *, pre_derived: boo
         raise
 
 
+_WAL_HEADER_SIZE = 32
+_WAL_FRAME_HEADER_SIZE = 24
+_WAL_MAGIC_LE = 0x377F0682
+_WAL_MAGIC_BE = 0x377F0683
+
+
+def decrypt_wal(src_db: Path, src_wal: Path, dst_db: Path, key_hex: str,
+                *, pre_derived: bool = False) -> int:
+    """Decrypt WAL frames sitting next to an encrypted DB and patch them into
+    the already-decrypted output DB.
+
+    SQLCipher encrypts WAL frame data with the same per-page scheme as the main
+    DB. WeChat 4.x consistently leaves WAL files non-empty between checkpoints,
+    holding the most recent messages. Without WAL replay Murmur shows the user
+    a stale snapshot — exactly the gap huohuoer/wechat-cli's crypto.decrypt_wal
+    fills upstream.
+
+    Returns the number of frames successfully patched. Tolerant of partial
+    files: HMAC mismatch on a frame just stops the walk (per SQLite's own WAL
+    recovery semantics — first-failed-frame ends the valid prefix).
+
+    src_db must still exist (we read the 16-byte salt from page 1).
+    src_wal is the SQLCipher-encrypted .db-wal file.
+    dst_db must already be the plain decrypted output of decrypt_db() — we
+    overwrite specific pages in place.
+    """
+    if not src_wal.exists() or src_wal.stat().st_size < _WAL_HEADER_SIZE + _WAL_FRAME_HEADER_SIZE + PAGE_SIZE:
+        return 0
+    if not dst_db.exists():
+        return 0
+    if not src_db.exists():
+        return 0
+
+    with src_db.open("rb") as f:
+        salt = f.read(SALT_SIZE)
+    if len(salt) != SALT_SIZE:
+        return 0
+    if pre_derived:
+        if isinstance(key_hex, str):
+            try:
+                aes_key = bytes.fromhex(key_hex)
+            except ValueError:
+                return 0
+        else:
+            aes_key = key_hex
+        if len(aes_key) != KEY_SIZE:
+            return 0
+        hmac_key = _hmac_key_from_aes(aes_key, salt)
+    else:
+        if len(key_hex) != 64:
+            return 0
+        try:
+            key_bytes = key_hex.encode("utf-8") if isinstance(key_hex, str) else key_hex
+            aes_key, hmac_key = _derive_keys(key_bytes, salt)
+        except Exception:
+            return 0
+
+    with src_wal.open("rb") as wf:
+        wal = wf.read()
+    if len(wal) < _WAL_HEADER_SIZE:
+        return 0
+
+    import struct
+    magic = struct.unpack(">I", wal[0:4])[0]
+    if magic not in (_WAL_MAGIC_LE, _WAL_MAGIC_BE):
+        return 0
+    page_size = struct.unpack(">I", wal[8:12])[0]
+    if page_size != PAGE_SIZE:
+        return 0
+
+    backend = default_backend()
+    frame_total = _WAL_FRAME_HEADER_SIZE + PAGE_SIZE
+    n_frames = (len(wal) - _WAL_HEADER_SIZE) // frame_total
+
+    applied = 0
+    with dst_db.open("r+b") as df:
+        for fi in range(n_frames):
+            offset = _WAL_HEADER_SIZE + fi * frame_total
+            page_no = struct.unpack(">I", wal[offset:offset + 4])[0]
+            if page_no <= 0:
+                break
+            page_data = wal[offset + _WAL_FRAME_HEADER_SIZE: offset + frame_total]
+            if len(page_data) != PAGE_SIZE:
+                break
+
+            # Page 1 in WAL still carries the salt prefix in its body region —
+            # the encrypted-body offset shifts the same way it does in main DB.
+            body_start = SALT_SIZE if page_no == 1 else 0
+            body_end = PAGE_SIZE - RESERVE
+            body = page_data[body_start:body_end]
+            iv = page_data[body_end:body_end + AES_BLOCK]
+            stored_hmac = page_data[body_end + AES_BLOCK:body_end + AES_BLOCK + HMAC_HASH_SIZE]
+
+            page_no_bytes = page_no.to_bytes(4, "little")
+            mac = hmac.new(hmac_key, digestmod=hashlib.sha512)
+            mac.update(body)
+            mac.update(iv)
+            mac.update(page_no_bytes)
+            if not hmac.compare_digest(mac.digest(), stored_hmac):
+                # First HMAC mismatch ends the recoverable WAL prefix — stop here.
+                break
+
+            try:
+                cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv), backend=backend)
+                dec = cipher.decryptor()
+                plain = dec.update(body) + dec.finalize()
+            except Exception:
+                break
+
+            # Patch the page into the dst .db. Layout matches what decrypt_db
+            # writes: page 1 = SQLITE_HEADER + plain + zero-reserve; other pages
+            # = plain + zero-reserve. We seek to the page slot by index.
+            df.seek((page_no - 1) * PAGE_SIZE)
+            if page_no == 1:
+                df.write(SQLITE_HEADER)
+            df.write(plain)
+            df.write(b"\x00" * RESERVE)
+            applied += 1
+    return applied
+
+
 def decrypt_directory(src_root: Path, dst_root: Path, key_hex: str,
                        db_glob: str = "*.db", *, pre_derived: bool = False) -> dict:
     """Decrypt every .db under src_root, mirroring layout into dst_root.
