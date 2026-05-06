@@ -35,38 +35,12 @@ from decrypt_cache import DecryptCache
 
 SKIP = {'message_fts.db', 'contact_fts.db', 'favorite_fts.db', 'message_resource.db'}
 
-
-def _wechat_is_running() -> bool:
-    """True if a Weixin/WeChat process is alive locally.
-
-    Used as a pre-flight gate: decrypting while WeChat is writing produces
-    half-pages and leaves the user with corrupt session.db. ylytdeng's
-    wechat-decrypt blocks the same way; without this, Murmur surfaces the
-    failure as a cryptic "being used by another process" error well into
-    the decrypt run.
-
-    Returns False on any check failure — don't block the user when our
-    detection itself is broken.
-    """
-    try:
-        if IS_WINDOWS:
-            import subprocess as _sp
-            for exe in ("Weixin.exe", "WeChat.exe"):
-                r = _sp.run(["tasklist", "/fi", f"imagename eq {exe}"],
-                            capture_output=True, text=True, timeout=4)
-                if exe.lower() in (r.stdout or "").lower():
-                    return True
-            return False
-        if IS_MAC:
-            import subprocess as _sp
-            for name in ("WeChat", "Weixin"):
-                r = _sp.run(["pgrep", "-x", name], capture_output=True, timeout=3)
-                if r.returncode == 0:
-                    return True
-            return False
-    except Exception:
-        return False
-    return False
+# NOTE: removed the v0.4.0 "WeChat must not be running" pre-flight gate.
+# Decrypting while WeChat is open works fine in practice — peers like
+# PyWxDump and LC044/WeChatMsg do the same, and Murmur's WAL-frame merge
+# (decrypt_py.decrypt_wal) already covers the in-flight write boundary.
+# The gate was causing friction without buying us anything users couldn't
+# already get from atomic swap + WAL replay.
 
 
 # Maps cryptic go_decrypt.dll / decrypt_py messages to a Chinese hint that names
@@ -342,20 +316,13 @@ def main():
     # `--force` nukes the per-account decrypted dir up front so next decrypt is clean.
     parser.add_argument("--force", action="store_true",
                         help="清空目标解密目录后再解密（schema 异常 / 微信升级后用）")
+    # --allow-running kept as a no-op for back-compat with already-shipped
+    # frontend builds that still POST {force_running: true}. The WeChat-running
+    # gate has been removed — decryption while WeChat is open is safe per WAL
+    # frame merge + atomic swap.
     parser.add_argument("--allow-running", action="store_true",
-                        help="即使微信正在运行也强制解密（默认会阻断；只在你确认 WeChat 没在写时用）")
+                        help=argparse.SUPPRESS)
     args = parser.parse_args()
-
-    # Pre-flight: refuse to decrypt while WeChat is alive locally — half-written
-    # pages give corrupt output. --allow-running overrides for power users who
-    # need to snapshot live data and accept the risk.
-    if _wechat_is_running() and not args.allow_running:
-        raise SystemExit(
-            "[X] 检测到微信/Weixin 正在运行 — 解密期间微信若在写数据，"
-            "会拿到半页损坏的 session.db。\n"
-            "    请先关闭微信再运行 refresh。\n"
-            "    或加 --allow-running 强制（仅在你确认微信不会写时用）。"
-        )
 
     profile = select_profile(args)
     print(f"[INFO] 账号: {profile.wxid}")

@@ -338,21 +338,7 @@ export function HomePage({ dark = false, onOpenFriend, onOpenOnboarding }: Props
       taskCenter.updateTask(taskId, { pct: Math.min(90, Math.floor(Math.random() * 8) + 30) });
     }, 600);
     try {
-      let r = await refreshData();
-      // v0.4.0 added a pre-flight check that refuses to decrypt while WeChat
-      // is running. When backend reports that block, ask the user once if
-      // they want to force it anyway (they may have already exited; or they
-      // just want a snapshot of the WAL). Retry with --allow-running.
-      if (!r.ok && r.wechat_running_block) {
-        const ok = window.confirm(
-          '微信仍在运行 — 解密期间它若在写数据可能拿到半页损坏 DB。\n\n' +
-          '请先完全退出微信（右下角小图标 → 退出），然后点「确定」重试。\n' +
-          '若你确认微信不会再写入（或愿意接受风险），点「确定」会强制解密。'
-        );
-        if (ok) {
-          r = await refreshData({ force_running: true });
-        }
-      }
+      const r = await refreshData();
       window.clearInterval(progT);
       const failure = r.ok ? '' : summarizeRefreshFailure(r.details || '');
       const partial = r.ok && (r.details || '').includes('[WARN]');
@@ -510,12 +496,6 @@ function summarizeRefreshFailure(details: string): string {
   }
   if (text.includes('核心数据库未解密')) {
     return '核心数据库未解密：请重新抓密钥后再更新数据。';
-  }
-  // Pre-flight WeChat-running block from refresh.py (v0.4.0). When the user
-  // cancels the override confirm() this still surfaces a clear message
-  // instead of dumping raw stderr.
-  if (text.includes('检测到微信') || text.includes('Weixin 正在运行')) {
-    return '微信仍在运行，已阻断解密。完全退出微信（系统托盘 → 退出），然后重新点更新。';
   }
   const firstUsefulLine = text
     .split(/\r?\n/)

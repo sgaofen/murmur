@@ -2585,11 +2585,6 @@ def main(argv=None):
     sp = sub.add_parser("refresh", help="(PyInstaller) 调用 refresh.py 主函数解密")
     sp.add_argument("--wxid", default=None)
     sp.add_argument("--key", default=None)
-    # v0.4.0: forward refresh.py's pre-flight bypass + force-clean flags so the
-    # HTTP /api/refresh handler can pass them through. Without these, the
-    # frontend's "force decrypt" override silently dropped at this layer.
-    sp.add_argument("--allow-running", action="store_true",
-                    help="跳过微信运行检测（调用方确认微信不会写入时用）")
     sp.add_argument("--force", action="store_true",
                     help="清空目标解密目录后再解密（schema 异常 / 微信升级）")
 
@@ -2617,7 +2612,6 @@ def main(argv=None):
         rest = []
         if args.wxid: rest += ["--wxid", args.wxid]
         if args.key: rest += ["--key", args.key]
-        if getattr(args, "allow_running", False): rest += ["--allow-running"]
         if getattr(args, "force", False): rest += ["--force"]
         sys.argv = ["refresh"] + rest
         return _refresh.main()
@@ -4747,34 +4741,12 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             req_wxid = (opts.get("wxid") or "").strip()
             if req_wxid:
                 extra_args += ["--wxid", req_wxid]
-            # `force_running=true` from frontend → bypass the WeChat-process
-            # pre-flight (added in v0.4.0). Used by the "我已确认微信不会写"
-            # override button on the refresh failure dialog.
-            if opts.get("force_running"):
-                extra_args += ["--allow-running"]
             if opts.get("force"):
                 extra_args += ["--force"]
             r = subprocess.run(_spawn_etcli_args("refresh", *extra_args),
                                capture_output=True, text=True, encoding="utf-8", errors="replace")
             dt = round((_time.time() - t0) * 1000)
             ok = r.returncode == 0
-            # Surface the pre-flight WeChat-running block as a structured
-            # error code so the frontend can render a friendly dialog with
-            # an "I've quit WeChat / force decrypt" override instead of the
-            # generic refresh-failed banner.
-            #
-            # IMPORTANT: refresh.py emits the message via `raise SystemExit(...)`
-            # which writes to STDERR not STDOUT — the previous version only
-            # checked stdout, so the flag never set, the frontend never saw
-            # it, and the user got an endless silent loop of refresh-failed
-            # without the override dialog ever appearing.
-            combined_out = (r.stdout or "") + (r.stderr or "")
-            wechat_running_block = (
-                not ok
-                and ("检测到微信" in combined_out
-                     or "Weixin 正在运行" in combined_out
-                     or "WeChat is running" in combined_out)
-            )
             # Echo a tail of the subprocess output to serve.log so multi-account /
             # encoding / decrypt failures are visible in diag bundles. Without
             # this, the only place the real error lives is the in-memory HTTP
@@ -4829,7 +4801,6 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 # init — this used to silently swallow the error and let the frontend
                 # think everything was fine, then loop back into bootstrap. Surface it.
                 "init_error": init_error,
-                "wechat_running_block": wechat_running_block,
             })
 
         if path == "/api/media/index":

@@ -217,16 +217,9 @@ export interface RefreshResult {
   // Set when the decrypt subprocess returned 0 but the post-decrypt store
   // re-init still threw — caller should treat success+init_error as failure.
   init_error?: string | null;
-  // Set when the decrypt subprocess refused because WeChat/Weixin is running.
-  // Frontend should render a friendly dialog with "I've quit WeChat → retry"
-  // and an explicit "force decrypt anyway" override.
-  wechat_running_block?: boolean;
 }
 
 export interface RefreshOpts {
-  // Pass --allow-running to refresh.py so the v0.4.0 pre-flight WeChat-running
-  // check is bypassed. Use only when the user has confirmed WeChat won't write.
-  force_running?: boolean;
   // Pass --force so the per-account decrypted dir is wiped before decrypt.
   // Used after WeChat schema upgrades; "encrypted database is malformed" etc.
   force?: boolean;

@@ -108,19 +108,7 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
     setProgress('正在解密所有微信数据库…');
     setPhase('win-decrypt');
     try {
-      let r = await refreshData();
-      // v0.4.0 pre-flight blocks decrypt while WeChat is running. Offer the
-      // override here (rare — onboarding flow normally has WeChat at login
-      // page, not fully running, but on Mac the .app may still be open).
-      if (!r.ok && r.wechat_running_block) {
-        const ok = window.confirm(
-          '微信仍在运行 — 解密期间它若在写数据可能拿到半页损坏 DB。\n\n' +
-          '请先完全退出微信，然后点「确定」重试；若你确认微信不会再写入，点「确定」会强制解密。'
-        );
-        if (ok) {
-          r = await refreshData({ force_running: true });
-        }
-      }
+      const r = await refreshData();
       if (!r.ok) {
         setError(r.details || '解密失败');
         setPhase('error');
@@ -203,21 +191,7 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
       }
       setProgress('密钥已就位，开始解密…');
       setPhase('win-decrypt');
-      let r2 = await refreshData();
-      // Same v0.4.0 WeChat-running override path as runDecrypt(). After key
-      // extract on Windows the user might have exited WeChat already, but
-      // detection lags by 1-2s so the first refresh call can still see it
-      // alive — let them click through.
-      if (!r2.ok && r2.wechat_running_block) {
-        const ok = window.confirm(
-          '微信仍在运行 — 解密期间它若在写数据可能拿到半页损坏 DB。\n\n' +
-          '请先完全退出微信（右下角小图标 → 退出），然后点「确定」重试。\n' +
-          '若你确认微信不会再写入，点「确定」会强制解密。'
-        );
-        if (ok) {
-          r2 = await refreshData({ force_running: true });
-        }
-      }
+      const r2 = await refreshData();
       if (!r2.ok) {
         setError(r2.details || '解密失败');
         setPhase('error');
