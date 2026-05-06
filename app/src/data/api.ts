@@ -699,4 +699,4 @@ export async function openFolder(path?: string): Promise<{ ok: boolean; opened?:
   });
 }
 
-export const APP_VERSION = 'v0.4.0 · Murmur 微语';
+export const APP_VERSION = 'v0.4.1 · Murmur 微语';
