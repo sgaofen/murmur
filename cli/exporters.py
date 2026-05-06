@@ -172,18 +172,29 @@ _FORMATS = {
 # either feed it to an LLM or just keep an offline archive of "how A and B
 # know each other from my vantage point".
 
-def _pair_meta(wxid_a: str, wxid_b: str):
-    """Locate stores + names for a pair. Raises if the pair has no direct evidence."""
+def _pair_meta(wxid_a: str, wxid_b: str, store_dir: Path | None = None):
+    """Locate stores + names for a pair. Raises if the pair has no direct evidence.
+
+    `store_dir` lets the HTTP handler hand the already-resolved active-account
+    decrypted dir directly, instead of letting us re-discover (which used to
+    blindly grab profiles[0] and break for users with multi-account or QQ-active
+    sessions — issue #11).
+    """
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from etcli import EchoStore, pair_direct_evidence, build_pair_inference_pack  # noqa: E402
     from paths import discover_wechat_profiles, decrypted_root_for  # noqa: E402
 
-    profs = discover_wechat_profiles()
-    if not profs:
-        raise SystemExit("找不到微信账号数据。")
-    decrypted = decrypted_root_for(profs[0], must_exist=True)
-    if not decrypted:
-        raise SystemExit("没有已解密的数据库 — 请先运行 refresh.py 解密")
+    if store_dir is not None:
+        decrypted = Path(store_dir)
+        if not decrypted.exists():
+            raise SystemExit(f"指定的解密目录不存在：{decrypted}")
+    else:
+        profs = discover_wechat_profiles()
+        if not profs:
+            raise SystemExit("找不到微信账号数据。")
+        decrypted = decrypted_root_for(profs[0], must_exist=True)
+        if not decrypted:
+            raise SystemExit("没有已解密的数据库 — 请先运行 refresh.py 解密")
     store = EchoStore(decrypted)
     evidence = pair_direct_evidence(store, wxid_a, wxid_b)
     contact_a = store.contact(wxid_a)
@@ -204,14 +215,14 @@ def _pair_meta(wxid_a: str, wxid_b: str):
     }
 
 
-def export_pair_json(wxid_a: str, wxid_b: str, out: IO) -> int:
+def export_pair_json(wxid_a: str, wxid_b: str, out: IO, store_dir: Path | None = None) -> int:
     """Pair export as a structured JSON document.
 
     Carries the markdown pack under `markdown` so AI clients can directly
     forward it; structured fields (`evidence.direct_edges` etc.) let scripts
     filter without parsing markdown.
     """
-    meta = _pair_meta(wxid_a, wxid_b)
+    meta = _pair_meta(wxid_a, wxid_b, store_dir=store_dir)
     payload = {
         "format_version": 1,
         "kind": "pair-relationship",
@@ -228,9 +239,9 @@ def export_pair_json(wxid_a: str, wxid_b: str, out: IO) -> int:
     return 1
 
 
-def export_pair_txt(wxid_a: str, wxid_b: str, out: IO) -> int:
+def export_pair_txt(wxid_a: str, wxid_b: str, out: IO, store_dir: Path | None = None) -> int:
     """Pair export as plain markdown — same content the AI agents see."""
-    meta = _pair_meta(wxid_a, wxid_b)
+    meta = _pair_meta(wxid_a, wxid_b, store_dir=store_dir)
     out.write(meta["pack_md"])
     return 1
 
@@ -321,9 +332,9 @@ _PAIR_HTML_FOOT = """<footer>本文件由 Murmur 离线生成。所有内容仅�
 </div></body></html>"""
 
 
-def export_pair_html(wxid_a: str, wxid_b: str, out: IO) -> int:
+def export_pair_html(wxid_a: str, wxid_b: str, out: IO, store_dir: Path | None = None) -> int:
     """Pair export as a self-contained styled HTML report."""
-    meta = _pair_meta(wxid_a, wxid_b)
+    meta = _pair_meta(wxid_a, wxid_b, store_dir=store_dir)
     title = f"{meta['name_a']} ↔ {meta['name_b']}"
     out.write(_PAIR_HTML_HEAD.format(
         title=_html.escape(title),
@@ -341,11 +352,12 @@ _PAIR_FORMATS = {
 }
 
 
-def write_pair_export(a: str, b: str, fmt: str, out: IO) -> int:
+def write_pair_export(a: str, b: str, fmt: str, out: IO,
+                       store_dir: Path | None = None) -> int:
     if fmt not in _PAIR_FORMATS:
         raise ValueError(f"未知格式: {fmt} (支持 json / txt / html)")
     fn, _, _ = _PAIR_FORMATS[fmt]
-    return fn(a, b, out)
+    return fn(a, b, out, store_dir=store_dir)
 
 
 def http_pair_export_meta(fmt: str) -> tuple[str, str]:
