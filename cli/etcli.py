@@ -1975,14 +1975,13 @@ def extract_mentions_of_friend(store: EchoStore, target_wxid: str,
 def extract_pair_mentions_direct(store: EchoStore, wxid_a: str, wxid_b: str) -> dict:
     """Direct, pair-specific mention scan; avoids the top-50 global cache missing long-tail pairs.
 
-    Per-side example budget bumped 5→12 (and final merge cap 10→24) so the
-    AI sees far more concrete instances of "you talked about A in your chat
-    with B" — that's the primary disambiguator between a real social link
-    and a coincidental name-mention.
+    Full mode: per-side and total example caps are removed. Every detected
+    name-mention sample is returned. Callers (build_pair_inference_pack) emit
+    everything; output may be tens of MB on long-running friendships.
     """
     canonical = tuple(sorted([wxid_a, wxid_b]))
-    b_in_a_chat = _scan_mentions_in_chat(store, wxid_a, wxid_b, max_examples=12)
-    a_in_b_chat = _scan_mentions_in_chat(store, wxid_b, wxid_a, max_examples=12)
+    b_in_a_chat = _scan_mentions_in_chat(store, wxid_a, wxid_b, max_examples=10000)
+    a_in_b_chat = _scan_mentions_in_chat(store, wxid_b, wxid_a, max_examples=10000)
     merged = b_in_a_chat["examples"] + a_in_b_chat["examples"]
     merged.sort(key=lambda x: x.get("ts", 0), reverse=True)
     return {
@@ -1991,7 +1990,7 @@ def extract_pair_mentions_direct(store: EchoStore, wxid_a: str, wxid_b: str) -> 
         f"mentions_in_chat_with_{wxid_a}": b_in_a_chat["count"],
         f"mentions_in_chat_with_{wxid_b}": a_in_b_chat["count"],
         "total_mentions": b_in_a_chat["count"] + a_in_b_chat["count"],
-        "examples": merged[:24],
+        "examples": merged,
         "names_a": a_in_b_chat["names"],
         "names_b": b_in_a_chat["names"],
     }
@@ -4214,8 +4213,12 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 return self._send_json({"error": str(e)}, status=400)
             import io as _io
             buf = _io.StringIO()
+            # Pass the active store's decrypted dir directly so _pair_meta
+            # doesn't redo discovery (and pick the wrong account when the
+            # user has multi-WeChat or QQ-active sessions — issue #11).
+            store_dir = self.store.dir if self.store is not None else None
             try:
-                write_pair_export(a, b, fmt, buf)
+                write_pair_export(a, b, fmt, buf, store_dir=store_dir)
             except SystemExit as e:
                 return self._send_json({"error": str(e)}, status=422)
             except Exception as e:
@@ -6353,31 +6356,33 @@ def build_pair_inference_pack(store: EchoStore, wxid_a: str, wxid_b: str,
     b_chat_mentions = rec.get(f"mentions_in_chat_with_{wxid_b}", 0)
     parts.append(f"- 你和 {name_a} 的私聊里提到「{name_b}」: **{a_chat_mentions}** 次")
     parts.append(f"- 你和 {name_b} 的私聊里提到「{name_a}」: **{b_chat_mentions}** 次")
+    # Full-mode: emit ALL mention examples (no cap). The pack is meant for
+    # offline archive + AI consumption alike; consumers cap themselves.
     if rec.get("examples"):
         parts.append("- 样例：")
-        for ex in rec["examples"][:24]:
-            parts.append(f"  - `[{ex['date']}]` {ex['from']}: {ex['text'][:200]}")
+        for ex in rec["examples"]:
+            parts.append(f"  - `[{ex['date']}]` {ex['from']}: {ex['text']}")
     else:
         parts.append("- 未检测到明确名字提及；后续结论需要更多依赖群聊、朋友圈或各自私聊语境。")
     parts.append("")
 
-    # Each side's basic profile (time-spread samples for context). 28 → 50
-    # gives the AI enough texture to separate "we chat sometimes" from
-    # "we share inside jokes". Non-text events 8 → 20 captures more
-    # voice/image/call signals.
+    # Each side's profile — emit FULL chat history, not a head/mid/tail sample.
+    # Files can be tens of MB on long friendships; trade-off accepted because
+    # the user explicitly asked for "完整模式" (no caps).
     for wxid, name in [(wxid_a, name_a), (wxid_b, name_b)]:
         msgs = list(store.messages(wxid, text_only=True))
         if not msgs:
             continue
-        parts.append(f"## 你 ↔ {name} 对话样本（按时间分布）\n")
-        parts.append("> 头部 + 中段 + 尾部抽样，避免只看早期或近期片段。\n")
-        for m in _pick_spread(msgs, 50):
+        parts.append(f"## 你 ↔ {name} 对话样本\n")
+        parts.append(f"> 完整模式：全部 {len(msgs)} 条文本消息，时间升序。\n")
+        for m in msgs:
             who = "你" if m.sender_wxid == "self" else m.sender_name
-            date = datetime.fromtimestamp(m.create_time, CST).strftime("%Y-%m-%d")
-            parts.append(f"- `[{date}]` **{who}**: {m.text[:160]}")
-        non_text_events = sample_non_text_events(store, wxid, limit=20)
+            date = datetime.fromtimestamp(m.create_time, CST).strftime("%Y-%m-%d %H:%M")
+            parts.append(f"- `[{date}]` **{who}**: {m.text}")
+        # Non-text events also uncapped (was 20).
+        non_text_events = sample_non_text_events(store, wxid, limit=10000)
         if non_text_events:
-            parts.append("\n**非文本互动样本**：")
+            parts.append(f"\n**非文本互动样本**（{len(non_text_events)} 条）：")
             for ev in non_text_events:
                 parts.append(f"- `[{ev['date']}]` **{ev['from']}**: {ev['text'] or '[' + ev['type'] + ']'}")
         parts.append("")
@@ -6417,11 +6422,10 @@ def build_pair_inference_pack(store: EchoStore, wxid_a: str, wxid_b: str,
                 direct_turn_idxs.update([prev, i])
             recent_ab.append((i, m))
 
-        # Pull rolling windows around direct A↔B turns first; if none, use spread samples
-        # from all A-or-B utterances so the pack still explains co-presence.
-        # 12 → 24 windows: more dialogue means stronger evidence of how they
-        # actually talk to each other in groups (banter / formal / ignoring).
-        sample_idxs = _pick_spread_indices(sorted(direct_turn_idxs), 24) if direct_turn_idxs else _pick_spread_indices(idxs, 24)
+        # Full mode: every direct turn becomes a window. Each window is the
+        # turn line itself ± 2 lines of context (5 total). De-dup overlapping
+        # windows so we don't repeat the same context twice.
+        sample_idxs = sorted(direct_turn_idxs) if direct_turn_idxs else idxs
         used = set()
         windows: list[list[int]] = []
         for k in sample_idxs:
@@ -6446,15 +6450,17 @@ def build_pair_inference_pack(store: EchoStore, wxid_a: str, wxid_b: str,
             "direct_turn_count": direct_turn_count,
             "first_date": datetime.fromtimestamp(ms[idxs[0]].create_time, CST).strftime("%Y-%m-%d"),
             "last_date": datetime.fromtimestamp(ms[idxs[-1]].create_time, CST).strftime("%Y-%m-%d"),
-            "windows": windows[:14],  # up to 14 dialogue windows per group (was 6)
+            "windows": windows,  # full mode: no per-group window cap
             "msgs": ms,
         })
     # Sort by interaction density (a_count + b_count, prefer balanced)
     group_dialogues.sort(key=lambda gd: -(gd["a_count"] + gd["b_count"]))
     if group_dialogues:
         parts.append("## 共同群聊概览\n")
-        parts.append("> 这里使用完整群聊历史扫描，不再只截前 2000 条；直接接话指 10 分钟内 A/B 互相承接。\n")
-        for gd in group_dialogues[:16]:
+        parts.append(
+            "> 完整模式：所有共群都列。直接接话 = A 或 B 的某条消息出现，且前 10 分钟内对方刚说过任何东西（不分析内容，所以可能高估互动 —— 用样本对话窗自查）。\n"
+        )
+        for gd in group_dialogues:
             parts.append(
                 f"- 群「{gd['group']}」：{name_a} {gd['a_count']} 条，{name_b} {gd['b_count']} 条；"
                 f"直接接话 {gd['direct_turn_count']} 次；跨度 {gd['first_date']} → {gd['last_date']}"
@@ -6463,13 +6469,10 @@ def build_pair_inference_pack(store: EchoStore, wxid_a: str, wxid_b: str,
         parts.append(f"## 群里 A↔B 真实对话（不经过你）\n")
         parts.append(
             "> **关键证据**：A 和 B 在你都在的群聊里**互相说话**的样本。"
-            "每条消息都按通讯录里的备注/昵称显示（即使他们改了群昵称）。"
-            "看他们之间的语气 / 是否互相 @ / 是否搭话能直接推断关系深度。\n"
+            "每条消息都按通讯录里的备注/昵称显示（即使他们改了群昵称）。\n"
         )
-        # Render full dialogue for top 10 groups (was 5) — more groups means
-        # the AI can see whether they only know each other through one shared
-        # context (e.g. one school class) or are tied across multiple circles.
-        for gd in group_dialogues[:10]:
+        # Full mode: every group with a windowed dialogue gets rendered.
+        for gd in group_dialogues:
             parts.append(
                 f"\n### 群「{gd['group']}」（{name_a} 发言 {gd['a_count']} 条 · "
                 f"{name_b} 发言 {gd['b_count']} 条 · 直接接话 {gd['direct_turn_count']} 次）"
@@ -6511,10 +6514,9 @@ def build_pair_inference_pack(store: EchoStore, wxid_a: str, wxid_b: str,
                     f"- {name_b} 给 {name_a} 互动 {s['b_liked_a'] + s['b_commented_a'] if key[0] == wxid_a else s['a_liked_b'] + s['a_commented_b']} 次"
                 )
                 if s.get("examples"):
-                    # 4 → 14 examples — moments comments are short and
-                    # carry strong tone signal; cheap to include more.
-                    parts.append("- 评论原文样本：")
-                    for ex in s["examples"][:14]:
+                    # Full mode: emit every moments interaction example.
+                    parts.append(f"- 评论/点赞原文样本（{len(s['examples'])} 条）：")
+                    for ex in s["examples"]:
                         ex_date = datetime.fromtimestamp(ex.get("ts", 0), CST).strftime("%Y-%m-%d") if ex.get("ts") else "?"
                         from_name = name_a if ex.get("from_wxid") == wxid_a else name_b if ex.get("from_wxid") == wxid_b else ex.get("from_name", "对方")
                         to_name = name_a if ex.get("to_wxid") == wxid_a else name_b if ex.get("to_wxid") == wxid_b else "对方"
