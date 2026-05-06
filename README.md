@@ -8,27 +8,7 @@ Murmur 默认只在本机读取和分析数据。只有你主动点击 AI 分析
 
 当前推荐版本：`v0.3.17`
 
-## 界面预览
-
-首页会先把所有朋友整理成时间线、活跃度和关系入口。
-
 ![Murmur 年代记](docs/screenshots/readme-home.png)
-
-关系网络支持暗色模式和隐私模式，可以直接拿来公开截图或录屏。
-
-![关系网络](docs/screenshots/readme-graph.png)
-
-新的「核心圈」会把一组经常共同出现的人圈出来，适合快速看清你的核心群体。
-
-![核心群体](docs/screenshots/readme-core-circle.png)
-
-报告页集中管理 Claude Code / Codex CLI 生成的 AI 关系分析。
-
-![AI 关系档案](docs/screenshots/readme-reports.png)
-
-点开单个朋友，可以看聊天节奏、跨场景证据和完整人物档案。
-
-![单人档案](docs/screenshots/readme-friend.png)
 
 ## 视频教程
 
@@ -44,6 +24,12 @@ Murmur 默认只在本机读取和分析数据。只有你主动点击 AI 分析
 - 用 Claude Code 或 Codex CLI 批量生成 AI 关系分析报告。
 - Windows 版支持导入 QQ NT 聊天；Mac 版目前继续专注微信数据。
 - 一键开启隐私模式，公开截图和录屏时自动隐藏姓名、wxid、本机路径和敏感片段。
+
+![关系网络](docs/screenshots/readme-graph.png)
+
+![AI 关系档案](docs/screenshots/readme-reports.png)
+
+![单人档案](docs/screenshots/readme-friend.png)
 
 ## 下载哪个文件
 

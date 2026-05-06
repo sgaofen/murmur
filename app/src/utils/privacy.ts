@@ -106,12 +106,7 @@ function shouldMaskName(name: string): boolean {
   if (/^(wxid_|gh_|openim_|group_)/i.test(n) || n.endsWith('@chatroom')) return false;
   const ascii = isAsciiText(n);
   const meaningfulChars = n.replace(/[^A-Za-z0-9\u4e00-\u9fff]/g, '');
-  // Privacy mode is mainly for public screenshots/recordings. Report filenames
-  // often contain real short nicknames ("Om", "ØL", emoji-only names, one-char
-  // Chinese names), so be deliberately more aggressive for registered identity
-  // tokens while still avoiding single ASCII letters that would damage prose.
-  const visibleChars = Array.from(n.replace(/\s+/g, '')).length;
-  return ascii ? meaningfulChars.length >= 2 : visibleChars >= 1;
+  return ascii ? meaningfulChars.length >= 3 : Array.from(meaningfulChars).length >= 2;
 }
 
 function nameVariants(name: string): string[] {
