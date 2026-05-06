@@ -400,8 +400,21 @@ def _mac_xwechat_search_paths() -> list[Path]:
     paths = []
     # Mac WeChat 4.x ("Weixin") container ID
     for cid in ["com.tencent.xinWeChat", "com.tencent.WeChat", "com.tencent.Weixin"]:
+        app_support = container / cid / "Data" / "Library" / "Application Support" / cid
+        paths.append(app_support)
+        # WeChat 4.0.5+ often stores accounts under a version directory like
+        # .../Application Support/com.tencent.xinWeChat/2.0b4.0.9/<account>/.
+        try:
+            if app_support.is_dir():
+                for entry in app_support.iterdir():
+                    if not entry.is_dir():
+                        continue
+                    name = entry.name
+                    if re.match(r"^\d+\.\d+b\d+\.\d+", name) or re.match(r"^\d+\.\d+\.\d+", name):
+                        paths.append(entry)
+        except (PermissionError, OSError):
+            pass
         for subroot in [
-            container / cid / "Data" / "Library" / "Application Support" / cid,
             container / cid / "Data" / "Documents" / "xwechat_files",
         ]:
             paths.append(subroot)
@@ -410,8 +423,50 @@ def _mac_xwechat_search_paths() -> list[Path]:
     return paths
 
 
+_IGNORED_WECHAT_ACCOUNT_DIRS = {
+    "xwechat_files",
+    "wechat files",
+    "all_users",
+    "backup",
+    "old_backup",
+    "app_data",
+    "applet",
+    "wmpf",
+}
+
+
+def _looks_like_account_dir(p: Path) -> bool:
+    try:
+        if not p.is_dir():
+            return False
+    except (PermissionError, OSError):
+        return False
+    name = p.name.lower()
+    if name in _IGNORED_WECHAT_ACCOUNT_DIRS or name.startswith("all"):
+        return False
+    try:
+        return (p / "db_storage").is_dir()
+    except (PermissionError, OSError):
+        return False
+
+
 def _is_wxid_dir(p: Path) -> bool:
-    return p.is_dir() and p.name.startswith("wxid_") and (p / "db_storage").exists()
+    return _looks_like_account_dir(p)
+
+
+def _wechat_account_short(name: str) -> str:
+    """Normalize account directory names while preserving real wxid values."""
+    raw = str(name or "").strip()
+    if not raw:
+        return raw
+    if raw.lower().startswith("wxid_"):
+        # wxid_xxx_abcd stores media under a suffixed account directory, but the
+        # stable account id is the first wxid_* segment.
+        m = re.match(r"^(wxid_[^_]+)", raw, flags=re.IGNORECASE)
+        return m.group(1) if m else raw
+    # Non-wxid Mac account dirs have also been observed with a 4-char suffix.
+    m = re.match(r"^(.+)_([0-9a-zA-Z]{4})$", raw)
+    return m.group(1) if m else raw
 
 
 def _normalize_user_root(p: Path) -> Path:
@@ -454,13 +509,11 @@ def _normalize_user_root(p: Path) -> Path:
     #    `…/wxid_xxx/db_storage/session/session.db`, etc.
     cur = p
     for _ in range(8):  # depth budget — don't ascend past 8 levels
-        if cur.name.startswith("wxid_"):
-            # Verify it actually has db_storage; if not, keep going.
-            try:
-                if (cur / "db_storage").exists():
-                    return cur
-            except (OSError, PermissionError):
-                pass
+        try:
+            if _looks_like_account_dir(cur):
+                return cur
+        except (OSError, PermissionError):
+            pass
         if cur.parent == cur:  # filesystem root
             break
         cur = cur.parent
@@ -591,9 +644,9 @@ def cancel_scan() -> None:
 # otherwise burn lots of time. Exact match (case-insensitive). Note that we
 # DON'T blindly skip "AppData" — WeChat 4.x has shipped builds that store data
 # in `%LOCALAPPDATA%\Tencent\xwechat`, so we keep that branch alive.
-def _xwechat_has_wxid(xwf: Path) -> bool:
+def _xwechat_has_account(xwf: Path) -> bool:
     """Quick test: does this `xwechat_files` candidate actually contain a
-    wxid_*/db_storage somewhere in the next 1-2 levels?
+    usable account/db_storage somewhere in the next 1-2 levels?
 
     Without this, the scan reports any directory that happens to be NAMED
     `xwechat_files` — including empty leftover dirs from earlier moves /
@@ -607,25 +660,29 @@ def _xwechat_has_wxid(xwf: Path) -> bool:
                 try:
                     if not entry.is_dir(follow_symlinks=False):
                         continue
-                    if entry.name.startswith("wxid_"):
-                        if (Path(entry.path) / "db_storage").exists():
-                            return True
-                        continue
+                    entry_path = Path(entry.path)
+                    if _looks_like_account_dir(entry_path):
+                        return True
                     # Handle the WeChat 4.x double-nested layout
-                    # (xwechat_files/xwechat_files/wxid_*/...).
+                    # (xwechat_files/xwechat_files/<account>/...).
                     if entry.name.lower() in {"xwechat_files", "wechat files"}:
                         try:
                             with os.scandir(entry.path) as inner:
                                 for sub in inner:
                                     try:
                                         if (sub.is_dir(follow_symlinks=False)
-                                                and sub.name.startswith("wxid_")
-                                                and (Path(sub.path) / "db_storage").exists()):
+                                                and _looks_like_account_dir(Path(sub.path))):
                                             return True
                                     except OSError:
                                         continue
                         except (PermissionError, OSError):
                             continue
+                    # Older Windows layouts can still use strict wxid_* names
+                    # without passing the broader account-dir heuristics yet.
+                    if entry.name.startswith("wxid_"):
+                        if (entry_path / "db_storage").exists():
+                            return True
+                        continue
                 except OSError:
                     continue
     except (PermissionError, OSError, FileNotFoundError):
@@ -741,9 +798,9 @@ def scan_for_wechat_data_async(
             # Match before pruning so xwechat_files isn't accidentally skipped.
             if name_l in {"xwechat_files", "wechat files"}:
                 # Only report this candidate if it actually has a usable
-                # wxid_*/db_storage somewhere inside (1–2 levels deep).
+                # account/db_storage somewhere inside (1–2 levels deep).
                 # Filters out empty shells from old moves / uninstalls.
-                if _xwechat_has_wxid(Path(entry.path)):
+                if _xwechat_has_account(Path(entry.path)):
                     _SCAN_STATE["found"].append({
                         "path": entry.path,
                         "kind": "xwechat_files",
@@ -752,14 +809,14 @@ def scan_for_wechat_data_async(
                 # Continue WITHOUT descending — wxid_* live one level below
                 # but discover_wechat_profiles will pick them up from this candidate.
                 continue
-            if name.startswith("wxid_"):
+            if name.startswith("wxid_") or _looks_like_account_dir(Path(entry.path)):
                 # Cheap check: does it have db_storage? Avoid descending to
                 # confirm — discover_wechat_profiles validates anyway.
                 try:
                     if (Path(entry.path) / "db_storage").exists():
                         _SCAN_STATE["found"].append({
                             "path": entry.path,
-                            "kind": "wxid",
+                            "kind": "wxid" if name.startswith("wxid_") else "account",
                         })
                 except (OSError, PermissionError):
                     pass
@@ -857,7 +914,6 @@ def discover_wechat_profiles() -> list[WeChatProfile]:
     profiles: list[WeChatProfile] = []
     seen_profiles: set[str] = set()
     plat = "windows" if IS_WINDOWS else "macos" if IS_MAC else "linux"
-    import re as _re
     for root in candidates:
         try:
             if not root.exists():
@@ -909,12 +965,13 @@ def discover_wechat_profiles() -> list[WeChatProfile]:
                 except (PermissionError, OSError):
                     continue
 
-        # When the same wxid_* name appears at multiple depths, prefer the
-        # one with larger total db_storage size — that's the real data dir.
+        # When the same account appears at multiple depths or with a short
+        # suffix (wxid_xxx and wxid_xxx_abcd), prefer the one with larger total
+        # db_storage size — that's the real data dir.
         if wxid_subs:
             by_name: dict[str, list[Path]] = {}
             for s in wxid_subs:
-                by_name.setdefault(s.name, []).append(s)
+                by_name.setdefault(_wechat_account_short(s.name), []).append(s)
 
             def _db_storage_size(d: Path) -> int:
                 ds = d / "db_storage"
@@ -958,7 +1015,7 @@ def discover_wechat_profiles() -> list[WeChatProfile]:
             except (PermissionError, OSError):
                 continue
             seen_profiles.add(profile_key)
-            wxid_short = _re.sub(r"_[0-9a-f]+$", "", wxid_full)
+            wxid_short = _wechat_account_short(wxid_full)
             profiles.append(WeChatProfile(
                 wxid=wxid_full,
                 wxid_short=wxid_short,
@@ -1402,10 +1459,12 @@ def detect_capabilities() -> Capabilities:
         can_extract = bool(weixin_running) and (hardened is False or sip is False)
     else:
         can_extract = False
-    can_extract_img = IS_WINDOWS
+    can_extract_img = IS_WINDOWS or (IS_MAC and has_data)
 
     if IS_MAC:
         notes.append("macOS 能直接解密微信数据库（纯 Python 实现）。")
+        if has_data:
+            notes.append("macOS 图片 V4-V2 key 可从 kvcomm 缓存推导；如果还没有缓存，请先在微信里点开几张图片再重试。")
         if _LAST_TCC_BLOCKED:
             notes.append("Murmur 没有「完全磁盘访问」权限 —— 系统已阻止读取微信数据。请在「系统设置 → 隐私与安全性 → 完全磁盘访问」给 Murmur 打勾后重启 Murmur。")
         if hardened is False:

@@ -17,6 +17,13 @@ export interface ActiveProfile {
   id: string;
 }
 
+export function supportsQQOnboarding(): boolean {
+  if (typeof navigator === 'undefined') return true;
+  const ua = navigator.userAgent || '';
+  const platform = navigator.platform || '';
+  return !/Macintosh|Mac OS|MacIntel/i.test(`${ua} ${platform}`);
+}
+
 export function readStoredActive(): ActiveProfile | null {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -45,6 +52,10 @@ export function writeStoredActive(p: ActiveProfile | null): void {
 export async function syncActiveToBackend(retries = 40, delayMs = 500): Promise<boolean> {
   const stored = readStoredActive();
   if (!stored) return true;
+  if (stored.platform === 'qq' && !supportsQQOnboarding()) {
+    writeStoredActive(null);
+    return true;
+  }
   for (let i = 0; i < retries; i++) {
     try {
       const r = await setActiveProfile(stored.platform, stored.id);
@@ -125,12 +136,16 @@ export function useProfiles(): {
     return () => window.removeEventListener(CHANGE_EVENT, onChange);
   }, []);
 
-  const active: ActiveProfile | null = data && data.active_id
-    ? { platform: data.active_platform, id: data.active_id }
+  const visibleProfiles = data?.profiles
+    ? (supportsQQOnboarding() ? data.profiles : data.profiles.filter(p => p.platform !== 'qq'))
+    : null;
+  const activeProfile = visibleProfiles?.find(p => p.is_active) ?? visibleProfiles?.[0] ?? null;
+  const active: ActiveProfile | null = activeProfile
+    ? { platform: activeProfile.platform, id: activeProfile.id }
     : null;
 
   return {
-    profiles: data?.profiles ?? null,
+    profiles: visibleProfiles,
     active,
     refresh,
     loading,

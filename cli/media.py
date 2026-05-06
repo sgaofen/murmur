@@ -1,7 +1,7 @@
 """media.py — Murmur 媒体提取（视频 / 图片 / 表情包）
 
 视频：微信 4.x 的 .mp4 未加密，直接索引。
-图片：.dat 文件 V3 (纯 XOR) / V4-V1 (默认 AES key) / V4-V2 (需要 image AES key — TODO)
+图片：.dat 文件 V3 (纯 XOR) / V4-V1 (默认 AES key) / V4-V2 (Mac 可从 kvcomm 推导 image AES key)
 表情包：缓存里和图片同算法。
 
 用法：
@@ -29,7 +29,7 @@ from typing import Iterator
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from paths import (  # noqa: E402
     discover_wechat_profiles, decrypted_root_for, media_root_for,
-    media_index_path, IS_WINDOWS,
+    media_index_path, IS_WINDOWS, IS_MAC, load_config, save_config,
 )
 
 
@@ -98,6 +98,8 @@ def _detect_format(plain_bytes: bytes) -> str | None:
         return "webp"
     if plain_bytes.startswith(b"BM"):
         return "bmp"
+    if plain_bytes.startswith(b"wxgf"):
+        return "wxgf"
     return None
 
 
@@ -122,14 +124,20 @@ def unwrap_wxgf(data: bytes) -> tuple[bytes, str | None]:
         return b"", None
     scan_end = min(len(data) - 12, 4096)
     for i in range(4, scan_end):
-        b0 = data[i]
-        # JPEG
-        if b0 == 0xFF and data[i + 1] == 0xD8 and data[i + 2] == 0xFF:
-            return data[i:], "jpg"
-        # PNG
-        if (b0 == 0x89 and data[i + 1:i + 8] == b"PNG\r\n\x1a\n"):
-            return data[i:], "png"
+        nested_fmt = _detect_format(data[i:])
+        if nested_fmt and nested_fmt != "wxgf":
+            return data[i:], nested_fmt
     return b"", None
+
+
+def _unwrap_wxgf_if_embedded_image(plain: bytes, fmt: str | None) -> tuple[bytes, str | None]:
+    """Some WeChat wxgf payloads contain a normal image after a short wrapper."""
+    if fmt != "wxgf" or not plain.startswith(WXGF_MAGIC):
+        return plain, fmt
+    nested, nested_fmt = unwrap_wxgf(plain)
+    if nested_fmt:
+        return nested, nested_fmt
+    return plain, fmt
 
 
 def decrypt_v3(data: bytes) -> tuple[bytes, str | None]:
@@ -142,12 +150,13 @@ def decrypt_v3(data: bytes) -> tuple[bytes, str | None]:
         (0x89, "png", b"\x89PNG\r\n\x1a\n"),
         (0x47, "gif", b"GIF"),
         (0x52, "webp", b"RIFF"),
+        (0x77, "wxgf", b"wxgf"),
         (0x42, "bmp", b"BM"),
     ]:
         xk = first ^ sig_byte
         head = bytes(b ^ xk for b in data[: len(magic)])
         if head == magic:
-            return bytes(b ^ xk for b in data), fmt
+            return _unwrap_wxgf_if_embedded_image(bytes(b ^ xk for b in data), fmt)
     return b"", None
 
 
@@ -158,7 +167,9 @@ def aes_ecb_decrypt(key: bytes, data: bytes) -> bytes:
     return decryptor.update(data) + decryptor.finalize()
 
 
-def decrypt_v4_v1(data: bytes, aes_key: bytes = V4_DEFAULT_AES_KEY) -> tuple[bytes, str | None]:
+def decrypt_v4_v1(data: bytes,
+                  aes_key: bytes = V4_DEFAULT_AES_KEY,
+                  xor_key: int | None = None) -> tuple[bytes, str | None]:
     """V4-V1: 0xF-byte header + AES portion + raw + XOR portion."""
     if len(data) < 0xF:
         return b"", None
@@ -183,13 +194,16 @@ def decrypt_v4_v1(data: bytes, aes_key: bytes = V4_DEFAULT_AES_KEY) -> tuple[byt
 
     rem = body[aligned:]
     if xor_size == 0:
-        return plain + rem, fmt
+        return _unwrap_wxgf_if_embedded_image(plain + rem, fmt)
 
     raw_len = max(0, len(rem) - xor_size)
     raw = rem[:raw_len]
     xored = rem[raw_len:]
-    # Auto-derive XOR key from known image trailer (jpg=FFD9, png=...IEND...)
-    if fmt == "jpg" and len(xored) >= 2:
+    # Prefer the explicit image XOR key when we have one (V4-V2). Fall back to
+    # trailer inference for older V4-V1 files where only the fixed AES key is known.
+    if isinstance(xor_key, int) and 0 <= xor_key <= 0xFF:
+        xk = xor_key
+    elif fmt == "jpg" and len(xored) >= 2:
         xk = xored[-1] ^ 0xD9
     elif fmt == "png" and len(xored) >= 1:
         xk = xored[-1] ^ 0x82  # PNG ends with ...IEND<82>
@@ -198,7 +212,7 @@ def decrypt_v4_v1(data: bytes, aes_key: bytes = V4_DEFAULT_AES_KEY) -> tuple[byt
     else:
         xk = 0
     decoded_xor = bytes(b ^ xk for b in xored) if xk else xored
-    return plain + raw + decoded_xor, fmt
+    return _unwrap_wxgf_if_embedded_image(plain + raw + decoded_xor, fmt)
 
 
 def _try_v4_aes_only(data: bytes, aes_key: bytes) -> bytes:
@@ -228,7 +242,9 @@ def _try_v4_aes_only(data: bytes, aes_key: bytes) -> bytes:
     return decrypted[:-pad]
 
 
-def decrypt_dat(data: bytes, image_aes_key: bytes | None = None) -> tuple[bytes, str | None, str]:
+def decrypt_dat(data: bytes,
+                image_aes_key: bytes | None = None,
+                image_xor_key: int | None = None) -> tuple[bytes, str | None, str]:
     """
     Returns (plain_bytes, format_or_None, version_label).
 
@@ -258,7 +274,7 @@ def decrypt_dat(data: bytes, image_aes_key: bytes | None = None) -> tuple[bytes,
         return b"", None, "V4-V1"
     if v == "V4-V2":
         if image_aes_key:
-            plain, fmt = decrypt_v4_v1(data, aes_key=image_aes_key)
+            plain, fmt = decrypt_v4_v1(data, aes_key=image_aes_key, xor_key=image_xor_key)
             if fmt:
                 return plain, fmt, "V4-V2"
             aes_only = _try_v4_aes_only(data, image_aes_key)
@@ -361,14 +377,16 @@ def find_dat_files(scope: str = "all") -> Iterator[Path]:
                     yield p
 
 
-def decrypt_one(src: Path, out_dir: Path, image_aes_key: bytes | None = None) -> dict:
+def decrypt_one(src: Path, out_dir: Path,
+                image_aes_key: bytes | None = None,
+                image_xor_key: int | None = None) -> dict:
     try:
         data = src.read_bytes()
     except OSError as e:
         return {"src": str(src), "ok": False, "error": str(e)}
     if not data:
         return {"src": str(src), "ok": False, "error": "empty"}
-    plain, fmt, ver = decrypt_dat(data, image_aes_key=image_aes_key)
+    plain, fmt, ver = decrypt_dat(data, image_aes_key=image_aes_key, image_xor_key=image_xor_key)
     if not fmt or not plain:
         return {"src": str(src), "ok": False, "version": ver, "error": "no-magic"}
     # Stable output filename: keep original base + use detected extension
@@ -381,8 +399,14 @@ def decrypt_one(src: Path, out_dir: Path, image_aes_key: bytes | None = None) ->
 
 
 def bulk_decrypt(scope: str = "all", *, image_aes_key: bytes | None = None,
+                 image_xor_key: int | None = None,
                  max_files: int | None = None, log_every: int = 200) -> dict:
     """Multi-threaded bulk decryption."""
+    if image_aes_key is None or image_xor_key is None:
+        resolved_aes, resolved_xor = resolve_image_keys(auto=True, save=True)
+        image_aes_key = image_aes_key or resolved_aes
+        if image_xor_key is None:
+            image_xor_key = resolved_xor
     out_root = media_out() / scope
     out_root.mkdir(parents=True, exist_ok=True)
     all_dats = list(find_dat_files(scope))
@@ -394,7 +418,7 @@ def bulk_decrypt(scope: str = "all", *, image_aes_key: bytes | None = None,
     by_version = Counter()
     t0 = time.time()
     with ThreadPoolExecutor(max_workers=8) as ex:
-        futures = {ex.submit(decrypt_one, p, out_root, image_aes_key): p for p in all_dats}
+        futures = {ex.submit(decrypt_one, p, out_root, image_aes_key, image_xor_key): p for p in all_dats}
         for i, fut in enumerate(as_completed(futures), 1):
             r = fut.result()
             if r.get("ok"):
@@ -448,16 +472,31 @@ def _is_utf16_ascii_alnum_32(data: bytes, start: int) -> bool:
 
 
 def _verify_image_aes_key(ciphertext_first_block: bytes, key: bytes) -> bool:
-    """Decrypt the first AES block of an encrypted image and check for JPG magic."""
+    """Decrypt the first AES block of an encrypted image and check for image magic."""
     if len(ciphertext_first_block) < 16 or len(key) != 16:
         return False
-    plain = aes_ecb_decrypt(key, ciphertext_first_block[:16])
-    return plain[0] == 0xFF and plain[1] == 0xD8
+    try:
+        plain = aes_ecb_decrypt(key, ciphertext_first_block[:16])
+    except Exception:
+        return False
+    return _detect_format(plain) is not None
 
 
-def find_v4v2_sample_ciphertext() -> bytes | None:
-    """Find a V4-V2 .dat file and return its first encrypted AES block (16 bytes)."""
-    for p in (src_root() / "msg" / "attach").rglob("*.dat"):
+def find_v4v2_sample_ciphertexts(profile=None, *, limit: int = 32) -> list[bytes]:
+    """Find V4-V2 .dat samples and return encrypted first AES blocks."""
+    root = (profile.cache_root if profile is not None else src_root()) / "msg" / "attach"
+    if not root.exists():
+        return []
+    samples: list[bytes] = []
+    try:
+        paths = sorted(
+            root.rglob("*.dat"),
+            key=lambda p: p.stat().st_mtime if p.exists() else 0,
+            reverse=True,
+        )
+    except (OSError, PermissionError):
+        paths = list(root.rglob("*.dat"))
+    for p in paths:
         try:
             data = p.read_bytes()
         except OSError:
@@ -467,8 +506,229 @@ def find_v4v2_sample_ciphertext() -> bytes | None:
         if data[:6] != V4_V2_SIG:
             continue
         # AES portion starts at offset 0xF
-        return data[0xF: 0xF + 16]
+        block = data[0xF: 0xF + 16]
+        if block not in samples:
+            samples.append(block)
+        if len(samples) >= max(1, limit):
+            break
+    return samples
+
+
+def find_v4v2_sample_ciphertext(profile=None) -> bytes | None:
+    samples = find_v4v2_sample_ciphertexts(profile, limit=1)
+    return samples[0] if samples else None
+
+
+def _clean_account_id(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if raw.lower().startswith("wxid_"):
+        m = re.match(r"^(wxid_[^_]+)", raw, flags=re.IGNORECASE)
+        return m.group(1) if m else raw
+    m = re.match(r"^(.+)_([0-9a-zA-Z]{4})$", raw)
+    return m.group(1) if m else raw
+
+
+def _push_unique(out: list[str], value: str | None) -> None:
+    raw = str(value or "").strip()
+    if not raw:
+        return
+    for item in (raw, _clean_account_id(raw)):
+        if item and item not in out:
+            out.append(item)
+
+
+def _is_account_like_dir(path: Path) -> bool:
+    name = path.name.lower()
+    if name in {"all_users", "backup", "old_backup", "app_data", "applet", "wmpf"}:
+        return False
+    try:
+        return path.is_dir() and (
+            (path / "db_storage").is_dir()
+            or (path / "msg").is_dir()
+            or (path / "FileStorage" / "Image").is_dir()
+            or (path / "FileStorage" / "Image2").is_dir()
+        )
+    except (OSError, PermissionError):
+        return False
+
+
+def _account_id_candidates(profile=None) -> list[str]:
+    prof = profile or _ensure_profile()
+    out: list[str] = []
+    _push_unique(out, getattr(prof, "wxid", ""))
+    _push_unique(out, getattr(prof, "wxid_short", ""))
+    _push_unique(out, getattr(prof, "cache_root", Path()).name)
+    root = getattr(prof, "cache_root", Path()).parent
+    try:
+        if root.is_dir():
+            for entry in root.iterdir():
+                if _is_account_like_dir(entry):
+                    _push_unique(out, entry.name)
+    except (OSError, PermissionError):
+        pass
+    return out
+
+
+def _kvcomm_candidate_dirs(profile=None) -> list[Path]:
+    prof = profile or _ensure_profile()
+    home = Path.home()
+    out: list[Path] = [
+        home / "Library" / "Containers" / "com.tencent.xinWeChat" / "Data" / "Documents" / "app_data" / "net" / "kvcomm",
+        home / "Library" / "Containers" / "com.tencent.xinWeChat" / "Data" / "Library" / "Application Support" / "com.tencent.xinWeChat" / "xwechat" / "net" / "kvcomm",
+        home / "Library" / "Containers" / "com.tencent.xinWeChat" / "Data" / "Library" / "Application Support" / "com.tencent.xinWeChat" / "net" / "kvcomm",
+        home / "Library" / "Containers" / "com.tencent.xinWeChat" / "Data" / "Documents" / "xwechat" / "net" / "kvcomm",
+    ]
+    account_path = getattr(prof, "cache_root", None)
+    if account_path:
+        normalized = str(account_path).replace("\\", "/").rstrip("/")
+        marker = "/xwechat_files"
+        idx = normalized.find(marker)
+        if idx >= 0:
+            out.append(Path(normalized[:idx]) / "app_data" / "net" / "kvcomm")
+        m = re.match(r"^(.*?/com\.tencent\.xinWeChat/(?:\d+\.\d+b\d+\.\d+|\d+\.\d+\.\d+))(/|$)", normalized)
+        if m:
+            version_base = Path(m.group(1))
+            out.append(version_base / "net" / "kvcomm")
+            out.append(version_base.parent / "net" / "kvcomm")
+        cursor = Path(account_path)
+        for _ in range(6):
+            out.append(cursor / "net" / "kvcomm")
+            if cursor.parent == cursor:
+                break
+            cursor = cursor.parent
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for p in out:
+        key = str(p)
+        if key not in seen:
+            seen.add(key)
+            deduped.append(p)
+    return deduped
+
+
+def _collect_kvcomm_codes(profile=None) -> list[int]:
+    codes: set[int] = set()
+    pattern = re.compile(r"^key_(\d+)_.+\.statistic$", re.IGNORECASE)
+    for kvdir in _kvcomm_candidate_dirs(profile):
+        try:
+            if not kvdir.is_dir():
+                continue
+            for item in kvdir.iterdir():
+                m = pattern.match(item.name)
+                if not m:
+                    continue
+                code = int(m.group(1))
+                if 0 < code <= 0xFFFFFFFF:
+                    codes.add(code)
+        except (OSError, PermissionError, ValueError):
+            continue
+    return sorted(codes)
+
+
+def _derive_mac_image_key(code: int, account_id: str) -> tuple[int, bytes]:
+    cleaned = _clean_account_id(account_id)
+    xor_key = code & 0xFF
+    aes_key = hashlib.md5((str(code) + cleaned).encode("utf-8")).hexdigest()[:16].encode("ascii")
+    return xor_key, aes_key
+
+
+def extract_image_aes_key_from_kvcomm(profile=None, *, save: bool = False, log=print) -> tuple[bytes, dict] | None:
+    """Derive Mac V4-V2 image AES key from kvcomm key_<code> cache and verify it."""
+    if not IS_MAC:
+        return None
+    prof = profile or _ensure_profile()
+    samples = find_v4v2_sample_ciphertexts(prof, limit=32)
+    if not samples:
+        log("[image-key] No V4-V2 .dat sample found; open a few images in WeChat first.")
+        return None
+    codes = _collect_kvcomm_codes(prof)
+    if not codes:
+        log("[image-key] No kvcomm key_<code> statistic files found.")
+        return None
+    accounts = _account_id_candidates(prof)
+    if not accounts:
+        log("[image-key] No account id candidates found.")
+        return None
+
+    for account_id in accounts:
+        for code in codes:
+            xor_key, aes_key = _derive_mac_image_key(code, account_id)
+            if not any(_verify_image_aes_key(sample, aes_key) for sample in samples):
+                continue
+            meta = {
+                "source": "mac-kvcomm",
+                "account_id": account_id,
+                "code": code,
+                "xor_key": xor_key,
+                "verified": True,
+            }
+            if save:
+                cfg = load_config()
+                cfg["image_aes_key"] = aes_key.decode("ascii")
+                cfg["image_xor_key"] = xor_key
+                cfg["image_key_source"] = "mac-kvcomm"
+                cfg["image_key_account"] = account_id
+                save_config(cfg)
+            log(f"[image-key] Derived verified V4-V2 key from kvcomm (account={account_id}, code={code}).")
+            return aes_key, meta
+    log(f"[image-key] Tried {len(accounts)} account ids × {len(codes)} kvcomm codes against {len(samples)} samples; no verified key.")
     return None
+
+
+def _configured_image_aes_key() -> bytes | None:
+    raw = load_config().get("image_aes_key")
+    if not isinstance(raw, str):
+        return None
+    value = raw.strip()
+    if len(value) == 16:
+        return value.encode("utf-8")
+    if re.fullmatch(r"[0-9a-fA-F]{32}", value):
+        try:
+            return bytes.fromhex(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _configured_image_xor_key() -> int | None:
+    raw = load_config().get("image_xor_key")
+    if isinstance(raw, int) and 0 <= raw <= 0xFF:
+        return raw
+    if isinstance(raw, str):
+        value = raw.strip().lower()
+        if value.startswith("0x"):
+            value = value[2:]
+            base = 16
+        else:
+            base = 10
+        try:
+            parsed = int(value, base)
+        except ValueError:
+            return None
+        if 0 <= parsed <= 0xFF:
+            return parsed
+    return None
+
+
+def resolve_image_keys(profile=None, *, auto: bool = True, save: bool = True, log=print) -> tuple[bytes | None, int | None]:
+    configured_aes = _configured_image_aes_key()
+    configured_xor = _configured_image_xor_key()
+    if configured_aes and configured_xor is not None:
+        return configured_aes, configured_xor
+    if auto and IS_MAC:
+        result = extract_image_aes_key_from_kvcomm(profile, save=save, log=log)
+        if result:
+            key, meta = result
+            xor = meta.get("xor_key")
+            return key, int(xor) if isinstance(xor, int) else configured_xor
+    return configured_aes, configured_xor
+
+
+def resolve_image_aes_key(*, auto: bool = True, save: bool = True, log=print) -> bytes | None:
+    key, _xor = resolve_image_keys(auto=auto, save=save, log=log)
+    return key
 
 
 def extract_image_aes_key(pid: int | None = None,
@@ -632,10 +892,35 @@ def cmd_index(args):
 
 
 def cmd_decrypt_images(args):
-    bulk_decrypt(scope=args.scope, max_files=args.limit)
+    image_aes_key, image_xor_key = resolve_image_keys(auto=True, save=True)
+    bulk_decrypt(
+        scope=args.scope,
+        max_files=args.limit,
+        image_aes_key=image_aes_key,
+        image_xor_key=image_xor_key,
+    )
 
 
 def cmd_extract_image_key(args):
+    if IS_MAC:
+        print("[*] Deriving Mac image AES key from kvcomm cache...")
+        result = extract_image_aes_key_from_kvcomm(save=not args.save_to)
+        if result is None:
+            sys.exit(1)
+        key, meta = result
+        print(f"\n[KEY] {key.decode()}  (source={meta.get('source')}, account={meta.get('account_id')})")
+        if args.save_to:
+            Path(args.save_to).write_text(json.dumps({
+                "image_aes_key": key.decode(),
+                "image_xor_key": meta.get("xor_key"),
+                "source": meta.get("source"),
+                "account_id": meta.get("account_id"),
+                "code": meta.get("code"),
+                "verified": True,
+                "extracted_at": datetime.datetime.now().isoformat(),
+            }, indent=2), encoding="utf-8")
+            print(f"  saved → {args.save_to}")
+        return
     print("[*] Extracting image AES key from Weixin.exe (no restart needed)...")
     result = extract_image_aes_key()
     if result is None:
@@ -683,12 +968,12 @@ def main():
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
     sp = sub.add_parser("index", help="Build hardlink index (md5 → file path)")
-    sp = sub.add_parser("decrypt-images", help="Bulk-decrypt all .dat files (V3 + V4-V1)")
+    sp = sub.add_parser("decrypt-images", help="Bulk-decrypt all .dat files (V3 + V4-V1 + V4-V2 when image key is available)")
     sp.add_argument("--scope", choices=["all", "images", "emojis"], default="all")
     sp.add_argument("--limit", type=int, help="Max files to process (debug)")
     sp = sub.add_parser("info", help="Show current media coverage")
-    sp = sub.add_parser("extract-image-key", help="Scan WeChat memory for the image AES key (no restart)")
-    sp.add_argument("--save-to", help="Save key to JSON file (default: just print)")
+    sp = sub.add_parser("extract-image-key", help="Extract image AES key (Mac kvcomm derivation; Windows memory scan)")
+    sp.add_argument("--save-to", help="Also save key details to a JSON file")
     args = p.parse_args()
     funcs = {
         "index": cmd_index, "decrypt-images": cmd_decrypt_images,

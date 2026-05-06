@@ -9,7 +9,7 @@
  * the reload reads QQ data through the same `EchoStore`-shape interface.
  */
 import { useEffect, useRef, useState } from 'react';
-import { switchActiveProfile, useProfiles } from '../utils/activeProfile';
+import { supportsQQOnboarding, switchActiveProfile, useProfiles } from '../utils/activeProfile';
 import { usePrivacy } from '../utils/usePrivacy';
 import type { ProfileEntry } from '../data/api';
 
@@ -132,6 +132,7 @@ function Popover({ profiles, activeId, onClose, anchorRef }: {
   const [hoverId, setHoverId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const privacyOn = usePrivacy();
+  const qqSupported = supportsQQOnboarding();
 
   useEffect(() => {
     const onDoc = (e: MouseEvent) => {
@@ -201,15 +202,17 @@ function Popover({ profiles, activeId, onClose, anchorRef }: {
         ) : (
           <div style={{ padding: '10px 14px' }}>
             <div className="et-eyebrow" style={{ marginBottom: 8, fontSize: 9 }}>选择平台</div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: qqSupported ? '1fr 1fr' : '1fr', gap: 8 }}>
               <PlatformPickButton
                 glyph="💬" label="微信"
                 onClick={() => { onClose(); requestOnboarding('wechat'); }}
               />
-              <PlatformPickButton
-                glyph="🐧" label="QQ"
-                onClick={() => { onClose(); requestOnboarding('qq'); }}
-              />
+              {qqSupported && (
+                <PlatformPickButton
+                  glyph="🐧" label="QQ"
+                  onClick={() => { onClose(); requestOnboarding('qq'); }}
+                />
+              )}
             </div>
             <button type="button" onClick={() => setAdding(false)}
               style={{ all: 'unset', cursor: 'pointer', color: 'var(--et-faint)',

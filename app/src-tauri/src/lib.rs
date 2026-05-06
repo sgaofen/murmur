@@ -368,6 +368,14 @@ fn spawn_etcli_serve(app: &AppHandle, evict_stale: bool) -> Option<Child> {
         return None;
     }
 
+    // Dev mode: prefer source Python over the copied PyInstaller binary under
+    // target/debug. On macOS, running a frozen binary out of ~/Documents can
+    // trip TCC/cwd protections and fail before Python even boots.
+    #[cfg(debug_assertions)]
+    if let Some(child) = spawn_dev_etcli_serve() {
+        return Some(child);
+    }
+
     // Path A: bundled PyInstaller binary
     if let Some(etcli) = locate_etcli_exe(app) {
         log_line(&format!("etcli located: {:?}", etcli));
@@ -397,14 +405,22 @@ fn spawn_etcli_serve(app: &AppHandle, evict_stale: bool) -> Option<Child> {
     }
 
     // Path B: dev fallback — python3 cli/etcli.py serve
+    spawn_dev_etcli_serve()
+}
+
+fn spawn_dev_etcli_serve() -> Option<Child> {
     let etcli_py = locate_dev_etcli_py()?;
-    let cli_dir = etcli_py.parent()?;
     log_line(&format!("dev fallback: python3 {:?}", etcli_py));
     let py = if cfg!(target_os = "windows") { "python" } else { "python3" };
     let (stdout, stderr) = open_log_for_serve();
 
     let mut cmd = Command::new(py);
-    cmd.current_dir(cli_dir);
+    // Keep cwd out of ~/Documents when possible. Some macOS child processes
+    // invoked during onboarding run through shell/osascript and can fail with
+    // `getcwd: Operation not permitted` when cwd is a protected Documents path.
+    if let Some(home) = std::env::var_os("HOME") {
+        cmd.current_dir(PathBuf::from(home));
+    }
     cmd.arg(&etcli_py).arg("serve").arg("--port").arg("9100");
     cmd.env("PYTHONIOENCODING", "utf-8");
     cmd.stdin(Stdio::null()).stdout(stdout).stderr(stderr);

@@ -56,6 +56,10 @@ DECRYPTED_QQ_ROOT = MURMUR_HOME / "decrypted_qq"
 DECRYPTED_BACKUP = MURMUR_HOME / "decrypted__sim_real_backup__"
 DECRYPTED_QQ_BACKUP = MURMUR_HOME / "decrypted_qq__sim_real_backup__"
 MURMUR_EXE = Path.home() / "AppData" / "Local" / "Murmur" / "Murmur.exe"
+MURMUR_MAC_APPS = [
+    Path("/Applications/Murmur.app"),
+    Path.home() / "Applications" / "Murmur.app",
+]
 
 
 # ---------- SQLCipher v4 page encryption (mirror of decrypt_py.py reversed) ----------
@@ -591,8 +595,12 @@ def _run_refresh(scenario: str, info: dict, etcli: Path) -> tuple[bool, str]:
 def _kill_murmur() -> None:
     """Kill any running Murmur + etcli so the next launch picks up new env."""
     import subprocess
-    for image in ("Murmur.exe", "etcli.exe"):
-        subprocess.run(["taskkill", "/F", "/IM", image], capture_output=True, text=True)
+    if sys.platform.startswith("win"):
+        for image in ("Murmur.exe", "etcli.exe"):
+            subprocess.run(["taskkill", "/F", "/IM", image], capture_output=True, text=True)
+        return
+    for pattern in ("Murmur.app/Contents/MacOS/Murmur", "etcli serve"):
+        subprocess.run(["pkill", "-f", pattern], capture_output=True, text=True)
 
 
 def _launch_murmur(env_overrides: dict | None = None) -> bool:
@@ -600,8 +608,15 @@ def _launch_murmur(env_overrides: dict | None = None) -> bool:
     Uses CREATE_NEW_PROCESS_GROUP only (NOT DETACHED_PROCESS — combining with
     close_fds was silently failing on this Windows install)."""
     import subprocess
-    if not MURMUR_EXE.exists():
-        print(f"  [警告] 找不到 {MURMUR_EXE}，请你手动打开 Murmur")
+    if sys.platform.startswith("win"):
+        target = MURMUR_EXE
+    elif sys.platform == "darwin":
+        target = next((p / "Contents" / "MacOS" / "Murmur" for p in MURMUR_MAC_APPS
+                       if (p / "Contents" / "MacOS" / "Murmur").exists()), None)
+    else:
+        target = None
+    if not target or not target.exists():
+        print(f"  [警告] 找不到已安装的 Murmur，请你手动打开 Murmur")
         return False
     env = os.environ.copy()
     if env_overrides:
@@ -609,7 +624,7 @@ def _launch_murmur(env_overrides: dict | None = None) -> bool:
     try:
         flags = (subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
                  if sys.platform.startswith("win") else 0)
-        subprocess.Popen([str(MURMUR_EXE)], env=env, creationflags=flags)
+        subprocess.Popen([str(target)], env=env, creationflags=flags)
         return True
     except OSError as e:
         print(f"  [警告] spawn failed: {e}")
