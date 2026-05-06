@@ -236,25 +236,6 @@ interface Props {
 }
 
 const TOPN_KEY = 'murmur.graph.topN';
-const GRAPH_DARK_KEY = 'murmur.graph.dark';
-
-function initialGraphDark(): boolean {
-  try {
-    const params = new URLSearchParams(window.location.search);
-    const requested = params.get('graphDark') ?? params.get('darkGraph');
-    if (requested === '1' || requested === 'true') {
-      localStorage.setItem(GRAPH_DARK_KEY, '1');
-      return true;
-    }
-    if (requested === '0' || requested === 'false') {
-      localStorage.setItem(GRAPH_DARK_KEY, '0');
-      return false;
-    }
-    return localStorage.getItem(GRAPH_DARK_KEY) === '1';
-  } catch {
-    return false;
-  }
-}
 
 export function GraphPage({ onBack, onOpenFriend }: Props) {
   void usePrivacy();  // re-render when privacy toggle flips
@@ -273,14 +254,7 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
     if (s) { setSelected(null); setSelectedEdge(null); }
     setSpotlight(s);
   }, []);
-  const [dark, setDarkState] = useState(initialGraphDark);
-  const setDark = useCallback((next: boolean | ((prev: boolean) => boolean)) => {
-    setDarkState(prev => {
-      const value = typeof next === 'function' ? next(prev) : next;
-      try { localStorage.setItem(GRAPH_DARK_KEY, value ? '1' : '0'); } catch { /* ignore */ }
-      return value;
-    });
-  }, []);
+  const [dark, setDark] = useState(false);
   const [autoRotate, setAutoRotate] = useState(true);
   const [autoRotateResumeSignal, setAutoRotateResumeSignal] = useState(0);
   const [topN, setTopN] = useState<number>(() => {
