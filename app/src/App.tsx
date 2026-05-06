@@ -7,6 +7,7 @@ import { GraphPage } from './pages/Graph';
 import { OfflineSignalsTable } from './pages/OfflineSignalsTable';
 import { ReportsPage } from './pages/Reports';
 import { YearbookPage } from './pages/Yearbook';
+import { AnnualReportPage } from './pages/AnnualReport';
 import { getDiagnose, getInfo } from './data/api';
 import { TaskCenterProvider } from './components/extras/TaskCenter';
 import { BatchStatusPill, BatchTrackerProvider } from './components/extras/BatchTracker';
@@ -22,7 +23,8 @@ type Route =
   | { name: 'yearbook'; id: string }
   | { name: 'graph' }
   | { name: 'table' }
-  | { name: 'reports' };
+  | { name: 'reports' }
+  | { name: 'annual' };
 
 function parseHash(h: string): Route {
   const s = h.replace(/^#\/?/, '');
@@ -31,6 +33,7 @@ function parseHash(h: string): Route {
   if (s === 'graph') return { name: 'graph' };
   if (s === 'table') return { name: 'table' };
   if (s === 'reports') return { name: 'reports' };
+  if (s === 'annual') return { name: 'annual' };
   if (s.startsWith('yearbook/')) return { name: 'yearbook', id: s.slice('yearbook/'.length) };
   if (s.startsWith('friend/')) return { name: 'friend', id: s.slice('friend/'.length) };
   return { name: 'home' };
@@ -192,6 +195,9 @@ export default function App() {
       break;
     case 'yearbook':
       body = <YearbookPage friendId={route.id} onBack={() => go(`friend/${route.id}`)} />;
+      break;
+    case 'annual':
+      body = <AnnualReportPage onBack={() => go('')} onOpenFriend={(id) => go(`friend/${id}`)} />;
       break;
     default:
       body = <HomePage

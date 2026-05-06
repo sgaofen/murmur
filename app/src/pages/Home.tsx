@@ -45,6 +45,11 @@ function HomeChromeBar({ onRefresh, refreshing, refreshMsg, onExtractKey, onTogg
         {refreshMsg && (
           <span className="et-meta" style={{ color: 'var(--et-orange)', fontSize: 11 }}>{maskText(refreshMsg)}</span>
         )}
+        <a href="#annual" title="年度总览 — 所有朋友 + 所有聊天" style={{
+          padding: '5px 10px', borderRadius: 999, fontSize: 11, fontWeight: 500,
+          color: 'var(--et-orange-2)', background: 'var(--et-orange-soft)',
+          textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 4,
+        }}>📅 年度</a>
         <a href="#graph" title="3D 关系网络" style={{
           padding: '5px 10px', borderRadius: 999, fontSize: 11, fontWeight: 500,
           color: 'var(--et-orange-2)', background: 'var(--et-orange-soft)',

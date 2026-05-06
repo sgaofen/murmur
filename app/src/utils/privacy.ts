@@ -105,8 +105,16 @@ function shouldMaskName(name: string): boolean {
   if (n === '你' || n === '我' || n === '自己') return false;
   if (/^(wxid_|gh_|openim_|group_)/i.test(n) || n.endsWith('@chatroom')) return false;
   const ascii = isAsciiText(n);
-  const meaningfulChars = n.replace(/[^A-Za-z0-9\u4e00-\u9fff]/g, '');
-  return ascii ? meaningfulChars.length >= 3 : Array.from(meaningfulChars).length >= 2;
+  // \p{L} = any letter (Latin / \u6c49\u5b57 / \u5e73\u5047 / \u7247\u5047 / \u97e9\u6587 / \u897f\u91cc\u5c14 / \u963f\u62c9\u4f2f\u2026)
+  // \p{N} = any number. Previous regex hard-coded `\u4e00-\u9fff` (\u6c49\u5b57 BMP)
+  // only, so \u592a\u306e \u8fd9\u79cd hiragana/\u6c49\u5b57\u6df7\u5408\u540d\u53ea\u5269\u300c\u592a\u300d\u4e00\u5b57\uff0cshouldMaskName
+  // \u5224\u5b9a\u4e3a\u592a\u77ed\uff0ctoken \u4e0d\u8fdb\u8868\uff0c\u5bfc\u81f4\u6838\u5fc3\u5708\u805a\u7126 banner \u6f0f mask \u771f\u540d\u3002
+  const meaningfulChars = n.replace(/[^\p{L}\p{N}]/gu, '');
+  // ASCII threshold lowered 3 \u2192 2 so short pinyin / English names like
+  // "Om", "Li", "Tu", "Yi" can register and get masked. False positives are
+  // bounded by the maskKnownNames `(^|[^A-Za-z0-9])X(?=$|[^A-Za-z0-9])`
+  // word-boundary regex \u2014 "Om" inside "Compute" still won't be replaced.
+  return ascii ? meaningfulChars.length >= 2 : Array.from(meaningfulChars).length >= 2;
 }
 
 function nameVariants(name: string): string[] {
@@ -123,10 +131,16 @@ function nameVariants(name: string): string[] {
   return [...variants].map(normalizeName).filter(shouldMaskName);
 }
 
-function rememberIdentity(wxid: string | undefined | null, realName: string | undefined | null): boolean {
+function rememberIdentity(
+  wxid: string | undefined | null,
+  realName: string | undefined | null,
+  explicitIsGroup?: boolean,
+): boolean {
   const id = wxid || realName || '?';
   const name = realName || '';
-  const isGroup = id.endsWith('@chatroom') || name.includes('群');
+  // explicit flag (from Friend.isGroup) wins; fallback heuristic catches the
+  // legacy callers that don't pass it.
+  const isGroup = explicitIsGroup ?? (id.endsWith('@chatroom') || name.includes('群'));
   const alias = aliasFor(id, isGroup);
   let changed = false;
 
@@ -155,11 +169,15 @@ export function registerIdentity(
 }
 
 export function registerIdentities(
-  identities: Array<{ wxid?: string | null; id?: string | null; name?: string | null; realName?: string | null }>,
+  identities: Array<{ wxid?: string | null; id?: string | null; name?: string | null; realName?: string | null; isGroup?: boolean }>,
 ) {
   let changed = false;
   for (const item of identities) {
-    changed = rememberIdentity(item.wxid ?? item.id, item.realName ?? item.name) || changed;
+    changed = rememberIdentity(
+      item.wxid ?? item.id,
+      item.realName ?? item.name,
+      item.isGroup,
+    ) || changed;
   }
   if (changed && _enabled) notifyPrivacySubscribers();
 }
@@ -212,12 +230,30 @@ function maskLocalPaths(text: string): string {
 /** Mask any user-visible text: messages, reports, logs, paths, and exports. */
 export function maskText(text: string): string {
   if (!_enabled || !text) return text;
-  const masked = maskKnownNames(maskLocalPaths(String(text)))
+  let masked = maskKnownNames(maskLocalPaths(String(text)))
     .replace(/wxid_[a-z0-9]+/g, m => `wxid_${(shortHash(m) % 9999).toString().padStart(4, '0')}`)
     .replace(/(?:gh_|openim_)[a-z0-9_-]+/gi, m => `id_${shortHash(m) % 9999}`)
     .replace(/[a-z0-9_-]+@chatroom/gi, m => `group_${shortHash(m) % 999}`)
     .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, m => `email_${shortHash(m) % 999}`)
     .replace(/\b[a-f0-9]{64}\b/gi, 'key_已隐藏')
+    // Chinese ID card (18-digit, last char may be X)
+    .replace(/\b\d{17}[\dXx]\b/g, m => `id卡_${shortHash(m) % 999}`)
+    // Bank card / long digit string (15-19 digits, common credit/debit lengths)
+    .replace(/\b\d{15,19}\b/g, m => `卡号_${shortHash(m) % 999}`)
     .replace(/(^|[^\d])(\+?\d[\d -]{6,}\d)(?!\d)/g, (_m, prefix, num) => `${prefix}num_${shortHash(num) % 9999}`);
+
+  // AI 报告里经常引用「未注册的人名」 — 朋友的家人、朋友的朋友、对话里
+  // 提到的第三方等。这些名字不在你的 WeChat 好友列表，所以 maskKnownNames
+  // 找不到。下面两条规则用「引号 + 短长度」做启发式 mask：
+  //   - 「2-4 个汉字」→ 人名_NN（hash 稳定，相同名同 alias）
+  //   - 「短英文/拼音名」→ 同样
+  // 只针对引号包裹的短串，避免把 "「我有一句话很长很长…」" 这种长引文也炸掉。
+  masked = masked.replace(/「([^」]{2,4})」/g, (m, inner) => {
+    // 仅当 inner 看起来是名字（纯汉字 OR 首字母大写英文）且不含标点
+    if (/[。？！，、；：…]/.test(inner)) return m;
+    if (/^[一-鿿]{2,4}$/.test(inner)) return `「人名_${shortHash(inner) % 99}」`;
+    if (/^[A-Z][a-zA-Z]{1,3}(?:\s[A-Z][a-zA-Z]+)?$/.test(inner)) return `「人名_${shortHash(inner) % 99}」`;
+    return m;
+  });
   return masked;
 }

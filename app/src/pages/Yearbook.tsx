@@ -5,6 +5,7 @@ import { displayName, maskedWxid, maskText } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
 import { ProfileSwitcher } from '../components/ProfileSwitcher';
 import { useActivePlatform } from '../utils/activeProfile';
+import { YearbookCover } from './extras/YearbookCover';
 
 interface Props {
   friendId: string;
@@ -89,6 +90,18 @@ export function YearbookPage({ friendId, onBack }: Props) {
         </div>
       </div>
 
+      {/* Shareable year cover (Round 2) — fits in a phone screenshot,
+          stacks 5 viral data points. Sits above the existing year-by-year
+          cards which stay untouched. */}
+      <div style={{ padding: '12px 28px 28px', maxWidth: 1080, margin: '0 auto' }}>
+        <YearbookCover
+          friendId={data.wxid}
+          friendName={data.name}
+          year={data.years[data.years.length - 1]}
+          firstWordsDate={data.first_date}
+        />
+      </div>
+
       {/* Year-by-year cards */}
       <div style={{ padding: '12px 28px 60px', maxWidth: 1080, margin: '0 auto',
         display: 'flex', flexDirection: 'column', gap: 22 }}>
@@ -167,6 +180,12 @@ function YearCard({ y, maxMsgs, friendName }: { y: YearData; maxMsgs: number; fr
           sub={y.silence_from ? `${y.silence_from} 起` : ''} />
         <Cell label="深夜聊天" value={`${y.late_night_pct}%`} sub={`${y.late_night_msgs} 条 23-4 点`} />
       </div>
+
+      <ExtraMetricsRow y={y} friendName={friendName} />
+
+      {y.heatmap_24x7 && y.heatmap_24x7.length === 168 && (
+        <HeatmapStrip data={y.heatmap_24x7} accent={accent} />
+      )}
 
       <YearInsightModule year={y} />
 
@@ -304,6 +323,97 @@ function Cell({ label, value, sub }: { label: string; value: string; sub?: strin
       <div className="et-eyebrow" style={{ fontSize: 9 }}>{label}</div>
       <div className="et-num" style={{ fontSize: 16, fontWeight: 600, color: 'var(--et-ink)', marginTop: 2 }}>{value}</div>
       {sub && <div style={{ fontSize: 10, color: 'var(--et-mute)', marginTop: 2 }}>{sub}</div>}
+    </div>
+  );
+}
+
+function ExtraMetricsRow({ y, friendName }: { y: YearData; friendName: string }) {
+  const hasStreak = (y.longest_streak_days || 0) > 0;
+  const hasInitiative = (y.session_starts_self || 0) + (y.session_starts_other || 0) > 0;
+  const hasMidnightSplit = (y.late_night_msgs || 0) >= 6 && y.midnight_friend_pct != null;
+  const hasReply = (y.median_reply_sec || 0) > 0;
+  const hasDecay = (y.first_half_msgs || 0) + (y.second_half_msgs || 0) > 0;
+  if (!hasStreak && !hasInitiative && !hasMidnightSplit && !hasReply && !hasDecay) return null;
+
+  const streakSub = hasStreak && y.streak_start && y.streak_end
+    ? `${y.streak_start} → ${y.streak_end}` : '';
+  const initiativeValue = hasInitiative
+    ? `你 ${y.initiative_self_pct ?? 0}%`
+    : '—';
+  const initiativeSub = hasInitiative
+    ? `你 ${y.session_starts_self} 次 · ${friendName} ${y.session_starts_other} 次` : '';
+  const midnightValue = hasMidnightSplit
+    ? `${friendName.slice(0, 8)} ${y.midnight_friend_pct}%` : '—';
+  const midnightSub = hasMidnightSplit
+    ? `深夜里他/她说话占比` : '';
+
+  // reply latency is folded into the AI report's data fingerprint section;
+  // we don't render it here to keep the row width balanced with 4 cells.
+  void hasReply;
+
+  let decayValue = '—';
+  let decaySub = '';
+  if (hasDecay) {
+    const f = y.first_half_msgs || 0;
+    const s = y.second_half_msgs || 0;
+    const total = f + s;
+    const trend = s > f * 1.2 ? '↑ 增长' : f > s * 1.2 ? '↓ 减弱' : '→ 平稳';
+    decayValue = trend;
+    decaySub = `前段 ${Math.round(f / total * 100)}% · 后段 ${Math.round(s / total * 100)}%`;
+  }
+
+  return (
+    <div style={{ marginTop: 10, display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 }}>
+      <Cell
+        label="最长连聊"
+        value={hasStreak ? `${y.longest_streak_days} 天` : '—'}
+        sub={streakSub}
+      />
+      <Cell label="谁先开聊" value={initiativeValue} sub={initiativeSub} />
+      <Cell label="深夜偏向" value={midnightValue} sub={midnightSub} />
+      <Cell label="全年趋势" value={decayValue} sub={decaySub} />
+    </div>
+  );
+}
+
+function HeatmapStrip({ data, accent }: { data: number[]; accent: string }) {
+  // 168 cells = 7 weekdays × 24 hours. Render as 7 rows of 24 dots, intensity by max-normalized count.
+  const max = Math.max(1, ...data);
+  const days = ['一', '二', '三', '四', '五', '六', '日'];
+  return (
+    <div style={{
+      marginTop: 16, padding: '12px 14px',
+      background: 'var(--et-paper-2)', border: '0.5px solid var(--et-line-2)', borderRadius: 8,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 6 }}>
+        <div className="et-eyebrow" style={{ fontSize: 9 }}>168 格热力图 · 周×小时</div>
+        <div style={{ fontSize: 10, color: 'var(--et-faint)', fontFamily: 'var(--et-mono)' }}>
+          0 → 24 时
+        </div>
+      </div>
+      <div style={{ display: 'grid', gridTemplateRows: 'repeat(7, 10px)', gap: 2 }}>
+        {days.map((d, w) => (
+          <div key={w} style={{ display: 'grid', gridTemplateColumns: '14px repeat(24, 1fr)', gap: 2, alignItems: 'center' }}>
+            <span style={{ fontSize: 9, color: 'var(--et-faint)', textAlign: 'right', paddingRight: 2 }}>{d}</span>
+            {Array.from({ length: 24 }, (_, h) => {
+              const v = data[w * 24 + h] || 0;
+              const a = v / max;
+              return (
+                <div
+                  key={h}
+                  title={`周${d} ${h}:00 · ${v} 条`}
+                  style={{
+                    height: 10, borderRadius: 2,
+                    background: a > 0
+                      ? `color-mix(in srgb, ${accent} ${10 + a * 80}%, var(--et-paper))`
+                      : 'rgba(26,43,74,0.04)',
+                  }}
+                />
+              );
+            })}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

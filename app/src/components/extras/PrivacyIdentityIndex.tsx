@@ -17,7 +17,12 @@ export function PrivacyIdentityIndex() {
     getAllFriends({ kind: 'all' })
       .then(friends => {
         if (!cancelled) {
-          registerIdentities(friends.map(f => ({ wxid: f.id, name: f.name })));
+          // Pass isGroup explicitly so groups always alias to "群 N" instead
+          // of falling through to "朋友 XX" when the wxid doesn't end
+          // @chatroom and the name doesn't contain 群.
+          registerIdentities(friends.map(f => ({
+            wxid: f.id, name: f.name, isGroup: f.isGroup,
+          })));
         }
       })
       .catch(() => { /* Best-effort privacy index; pages still mask ids/patterns. */ });

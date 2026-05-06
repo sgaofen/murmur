@@ -38,6 +38,11 @@ export interface ProfileEntry {
   id: string;                 // 'wxid_xxx' for WeChat, 'qq:939919010' for QQ
   platform: 'wechat' | 'qq';
   display_id: string;         // already masked: 'wxid_n…97a5' / 'QQ 939…010'
+  // Surfaced from xwechat_files/all_users/config/global_config — raw nickname
+  // and avatar URL pulled by cli/global_config.py. Empty string when the file
+  // doesn't exist or this profile isn't the active account in that file.
+  nick_name?: string;
+  head_img_url?: string;
   qq_number: string | null;
   n_sessions: number;
   last_active_ts: number | null;
@@ -392,6 +397,18 @@ export interface YearData {
   silence_from: string | null;
   late_night_msgs: number;
   late_night_pct: number;
+  // New WeFlow-inspired metrics — see cli/etcli.py friend_yearbook.
+  midnight_friend_pct?: number;        // among 23-5 messages, % from friend
+  longest_streak_days?: number;        // longest run of consecutive active days
+  streak_start?: string | null;
+  streak_end?: string | null;
+  initiative_self_pct?: number;        // who restarts dialogue after >6h gap
+  session_starts_self?: number;
+  session_starts_other?: number;
+  first_half_msgs?: number;            // within-year decay signal
+  second_half_msgs?: number;
+  median_reply_sec?: number;
+  heatmap_24x7?: number[];             // length 168, weekday*24+hour layout
   calls: number;
   vulnerability_quotes: Array<{ date: string; from: string; from_id?: string; text: string }>;
   offline_quotes: Array<{ date: string; from: string; from_id?: string; text: string }>;
@@ -417,6 +434,152 @@ export interface Yearbook {
 
 export async function getYearbook(wxid: string): Promise<Yearbook> {
   return j(`/api/friend/${encodeURIComponent(wxid)}/yearbook`);
+}
+
+// ----- Global annual report (year-in-review across ALL friends) -----
+
+export interface AnnualReportTopFriend {
+  wxid: string;
+  name: string;
+  count: number;
+  self: number;
+  other: number;
+  first_date: string | null;
+  last_date: string | null;
+}
+
+export interface AnnualReportMonthlyWinner {
+  month: number;            // 1..12
+  wxid: string | null;
+  name: string | null;
+  count: number;
+  month_total: number;
+}
+
+export interface AnnualReport {
+  year: number;
+  total_messages: number;
+  total_friends_active?: number;
+  active_days?: number;
+  first_message_date?: string | null;
+  last_message_date?: string | null;
+  monthly_totals?: number[];                  // length 12
+  top_friends?: AnnualReportTopFriend[];
+  monthly_winners?: AnnualReportMonthlyWinner[];
+  peak_day?: {
+    date: string;
+    count: number;
+    top_wxid: string | null;
+    top_name: string | null;
+    top_count: number;
+  } | null;
+  longest_streak?: {
+    days: number;
+    start: string | null;
+    end: string | null;
+  } | null;
+  heatmap_24x7?: number[];                     // length 168, weekday*24+hour
+  midnight_king?: {
+    wxid: string;
+    name: string;
+    count: number;
+    share: number;
+  } | null;
+  mutual_friend?: {
+    wxid: string;
+    name: string;
+    self: number;
+    other: number;
+    ratio: number;
+  } | null;
+  initiative?: {
+    self_starts: number;
+    other_starts: number;
+    self_rate: number;
+    top_initiated_wxid: string | null;
+    top_initiated_name: string | null;
+    top_initiated_count: number;
+  } | null;
+  median_reply_sec?: number;
+  top_phrases?: { phrase: string; count: number }[];
+  lost_friend?: {
+    wxid: string;
+    name: string;
+    first_half: number;
+    second_half: number;
+    drop_pct: number;
+  } | null;
+}
+
+export async function getAnnualReport(year: number): Promise<AnnualReport> {
+  return j(`/api/annual-report?year=${year}`);
+}
+
+export async function getAvailableReportYears(): Promise<{
+  years: number[];
+  default: number;
+}> {
+  return j('/api/annual-report/years');
+}
+
+export type ExportFormat = 'json' | 'html' | 'txt';
+
+/** Trigger a download of the chat with `wxid` in the requested format.
+ *  Drives the export buttons in Friend.tsx — no JSON parsing here, this is
+ *  a binary file the browser saves directly via the Content-Disposition header. */
+export async function exportFriendChat(wxid: string, format: ExportFormat): Promise<void> {
+  const url = `${API_BASE}/api/export?wxid=${encodeURIComponent(wxid)}&format=${format}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`导出失败：${res.status} ${text.slice(0, 200)}`);
+  }
+  const blob = await res.blob();
+  const dispo = res.headers.get('Content-Disposition') || '';
+  const m = /filename="([^"]+)"/.exec(dispo);
+  const filename = m ? m[1] : `murmur_${wxid}.${format}`;
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+}
+
+export interface VoiceItem {
+  ts: number;
+  name: string;
+  size: number;
+  url: string;
+}
+
+export async function getFriendVoices(wxid: string): Promise<VoiceItem[]> {
+  return j(`/api/friend/${encodeURIComponent(wxid)}/voices`);
+}
+
+/** Murmur's signature feature (issue #10): export how friend A and friend B
+ *  know each other from your vantage point. Bundles direct evidence (mentions
+ *  / mutual replies / sns cross-likes) + group co-presence + chat samples.
+ *  txt yields markdown the user can paste straight into ChatGPT/Claude. */
+export async function exportPairChat(a: string, b: string, format: ExportFormat): Promise<void> {
+  const url = `${API_BASE}/api/pair-export?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}&format=${format}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`双人导出失败：${res.status} ${text.slice(0, 200)}`);
+  }
+  const blob = await res.blob();
+  const dispo = res.headers.get('Content-Disposition') || '';
+  const m = /filename="([^"]+)"/.exec(dispo);
+  const filename = m ? m[1] : `murmur_pair_${a}__${b}.${format}`;
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
 }
 
 export interface BatchStartReq {
@@ -522,4 +685,4 @@ export async function openFolder(path?: string): Promise<{ ok: boolean; opened?:
   });
 }
 
-export const APP_VERSION = 'v0.3.17 · Murmur 微语';
+export const APP_VERSION = 'v0.4.0 · Murmur 微语';

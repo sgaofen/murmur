@@ -59,3 +59,17 @@ cli/__pycache__/
 
 # ===== Editor / agent caches =====
 .claude/
+
+# ===== Design hand-off scratch (Claude Design exports + zips) =====
+# Hand-off bundles to Claude Design web (large + ephemeral); briefs (.md) stay tracked.
+design/ai-redesign-handoff/
+design/ai-redesign-handoff.zip
+design/claude-design-output/
+design/claude-design-output-r2/
+design/v2/
+design/v3/
+design/project/
+
+# ===== Repro / one-off scripts not part of the product =====
+docs/screenshots/_make_cover.py
+docs/screenshots/bilibili-cover-*.png

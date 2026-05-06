@@ -326,6 +326,9 @@ function PlatformPickButton({ glyph, label, onClick }:
 // ---------- helpers ----------
 
 function displayPlain(p: ProfileEntry): string {
+  // Prefer the nickname pulled from xwechat_files/all_users/config/global_config
+  // (decoded by cli/global_config.py) — friendlier than the bare wxid.
+  if (p.nick_name && p.nick_name.trim()) return p.nick_name.trim();
   if (p.platform === 'qq' && p.qq_number) return `QQ ${p.qq_number}`;
   return p.id;
 }

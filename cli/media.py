@@ -101,6 +101,37 @@ def _detect_format(plain_bytes: bytes) -> str | None:
     return None
 
 
+WXGF_MAGIC = b"wxgf"  # WeChat 4.x's animated emoji / screenshot wrapper format
+
+
+def unwrap_wxgf(data: bytes) -> tuple[bytes, str | None]:
+    """If `data` is a wxgf wrapper, scan the first 4 KB for an embedded JPEG/PNG
+    cover and return (slice, format).
+
+    Many WeChat 4.x emoji + screenshot wrappers carry their static cover image
+    as the second segment of the file, after a small header. WeFlow does the
+    same (`unwrapWxgf` in their imageDecryptService) before falling through to
+    HEVC decoding via ffmpeg. We don't bundle ffmpeg; the JPEG-passthrough still
+    catches a meaningful fraction (~30%+ of wxgf in their measurements) without
+    any extra dependency.
+
+    Returns (b"", None) when nothing usable is found — the caller can leave the
+    file unhandled or surface it as "动图（暂不支持）" in the UI.
+    """
+    if len(data) < 16 or data[:4] != WXGF_MAGIC:
+        return b"", None
+    scan_end = min(len(data) - 12, 4096)
+    for i in range(4, scan_end):
+        b0 = data[i]
+        # JPEG
+        if b0 == 0xFF and data[i + 1] == 0xD8 and data[i + 2] == 0xFF:
+            return data[i:], "jpg"
+        # PNG
+        if (b0 == 0x89 and data[i + 1:i + 8] == b"PNG\r\n\x1a\n"):
+            return data[i:], "png"
+    return b"", None
+
+
 def decrypt_v3(data: bytes) -> tuple[bytes, str | None]:
     """Pure XOR. Auto-derive XOR key from common image magic numbers."""
     if not data:
@@ -170,21 +201,71 @@ def decrypt_v4_v1(data: bytes, aes_key: bytes = V4_DEFAULT_AES_KEY) -> tuple[byt
     return plain + raw + decoded_xor, fmt
 
 
+def _try_v4_aes_only(data: bytes, aes_key: bytes) -> bytes:
+    """Decrypt only the V4 AES portion (no XOR-tail handling) and return plain bytes.
+
+    Used when decrypt_v4_v1 bails because _detect_format saw no JPG/PNG/etc magic
+    in the leading plain — but the payload might be wxgf, which decrypt_v4_v1
+    doesn't recognise. Returns b"" on any failure; caller should treat as "no
+    plain available."
+    """
+    if len(data) < 0xF:
+        return b""
+    aes_size = struct.unpack("<I", data[6:10])[0]
+    aligned = aes_size + (16 - aes_size % 16) if aes_size else 0
+    body = data[0xF:]
+    if aligned <= 0 or aligned > len(body):
+        return b""
+    try:
+        decrypted = aes_ecb_decrypt(aes_key, body[:aligned])
+    except Exception:
+        return b""
+    if not decrypted:
+        return b""
+    pad = decrypted[-1]
+    if not (0 < pad <= 16):
+        return b""
+    return decrypted[:-pad]
+
+
 def decrypt_dat(data: bytes, image_aes_key: bytes | None = None) -> tuple[bytes, str | None, str]:
     """
     Returns (plain_bytes, format_or_None, version_label).
+
+    wxgf handling: WeChat 4.x animated stickers / emoji are AES+XOR-encrypted
+    just like images, but the *decrypted* payload starts with the magic
+    `77 78 67 66`. _detect_format doesn't recognise that magic, so
+    decrypt_v4_v1 bails. We re-decrypt JUST the AES portion (no XOR tail),
+    look for embedded JPEG/PNG cover in the first 4 KB, and surface that as
+    a static thumbnail — same approach WeFlow uses without ffmpeg.
     """
     v = detect_dat_version(data)
     if v == "V3":
         plain, fmt = decrypt_v3(data)
-        return plain, fmt, "V3"
+        if fmt:
+            return plain, fmt, "V3"
+        return b"", None, "V3"
     if v == "V4-V1":
         plain, fmt = decrypt_v4_v1(data)
-        return plain, fmt, "V4-V1"
+        if fmt:
+            return plain, fmt, "V4-V1"
+        # Plain didn't have a recognised image magic — try wxgf on the AES portion.
+        aes_only = _try_v4_aes_only(data, V4_DEFAULT_AES_KEY)
+        if aes_only:
+            wx_plain, wx_fmt = unwrap_wxgf(aes_only)
+            if wx_fmt:
+                return wx_plain, wx_fmt, "wxgf"
+        return b"", None, "V4-V1"
     if v == "V4-V2":
         if image_aes_key:
             plain, fmt = decrypt_v4_v1(data, aes_key=image_aes_key)
-            return plain, fmt, "V4-V2"
+            if fmt:
+                return plain, fmt, "V4-V2"
+            aes_only = _try_v4_aes_only(data, image_aes_key)
+            if aes_only:
+                wx_plain, wx_fmt = unwrap_wxgf(aes_only)
+                if wx_fmt:
+                    return wx_plain, wx_fmt, "wxgf"
         return b"", None, "V4-V2-no-key"
     return b"", None, "unknown"
 
