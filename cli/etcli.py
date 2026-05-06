@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sqlite3
 import sys
 
@@ -175,6 +176,31 @@ def _spawn_etcli_args(subcmd: str, *args: str) -> list:
     if subcmd == "batch":
         return [sys.executable, str(cli_dir / "batch_analyze.py"), *args]
     raise ValueError(f"unknown subcmd: {subcmd}")
+
+
+def _spawn_mac_extract_key_args(tmp_dir: Path, *args: str) -> list[str]:
+    """Build the elevated macOS key-extraction command.
+
+    In a packaged app, the frozen `etcli extract-key-mac` binary lives under
+    the app bundle and is safe to execute as root. In local dev, however, the
+    repo often sits under ~/Documents/Codex; macOS TCC can deny the elevated
+    Python process access to that source path before the script even starts.
+    Copy the tiny runner scripts to /tmp and execute them from there.
+    """
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "extract-key-mac", *args]
+
+    cli_dir = Path(__file__).resolve().parent
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("extract_key_mac.py", "paths.py"):
+        src = cli_dir / name
+        dst = tmp_dir / name
+        shutil.copy2(src, dst)
+        try:
+            dst.chmod(0o644)
+        except OSError:
+            pass
+    return [sys.executable, "-u", str(tmp_dir / "extract_key_mac.py"), *args]
 
 
 def discover_data_dir() -> Optional[Path]:
@@ -383,7 +409,7 @@ class EchoStore:
         # store loads "successfully" with zero contacts and Home stays stuck
         # on an "after-init but no data" state.
         try:
-            c = sqlite3.connect(f"file:{sess.as_posix()}?mode=ro", uri=True)
+            c = self._open_readonly(sess)
             try:
                 has_table = c.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name='SessionTable' LIMIT 1"
@@ -402,8 +428,36 @@ class EchoStore:
 
     # --- connection helpers ---
 
+    @staticmethod
+    def _open_readonly(path: Path, *, attempts: int = 6, delay: float = 0.15) -> sqlite3.Connection:
+        """Open a decrypted DB read-only, tolerating macOS swap/TCC timing.
+
+        Right after refresh atomically replaces the decrypted directory, SQLite
+        on macOS can briefly raise "unable to open database file" even though
+        the file exists and becomes readable moments later. Use a short retry
+        and prefer immutable read-only URIs so SQLite does not try to create
+        sidecar journal/shm files in protected folders.
+        """
+        p = Path(path).resolve()
+        last: Exception | None = None
+        for i in range(max(attempts, 1)):
+            try:
+                return sqlite3.connect(p.as_uri() + "?mode=ro&immutable=1", uri=True)
+            except sqlite3.Error as e:
+                last = e
+                if i < attempts - 1:
+                    _time.sleep(delay)
+        # Fallback: plain path open is useful on a few macOS/TCC edge cases
+        # where URI parsing/open fails but the file can be read normally.
+        try:
+            c = sqlite3.connect(str(p))
+            c.execute("PRAGMA query_only=ON")
+            return c
+        except sqlite3.Error as e:
+            raise last or e
+
     def _conn(self, fname: str) -> sqlite3.Connection:
-        c = sqlite3.connect(f"file:{(self.dir / fname).as_posix()}?mode=ro", uri=True)
+        c = self._open_readonly(self.dir / fname)
         c.text_factory = lambda b: b.decode("utf-8", errors="replace") if isinstance(b, bytes) else b
         return c
 
@@ -2895,10 +2949,18 @@ def build_msg_index(store: EchoStore) -> tuple[dict[str, int], dict[str, list[st
     counts: dict[str, int] = {}
     locations: dict[str, list[str]] = {}
     last_ts: dict[str, int] = {}
+    opened = 0
+    failures = 0
     for p in sorted(store.dir.glob("message_*.db")):
         if any(skip in p.name for skip in ("_fts", "_resource", "biz_")):
             continue
-        c = store._conn(p.name)
+        try:
+            c = store._conn(p.name)
+            opened += 1
+        except (sqlite3.DatabaseError, OSError) as e:
+            failures += 1
+            sys.stderr.write(f"[msg-index] skip {p.name}: {e}\n")
+            continue
         try:
             for t in _list_msg_tables(c):
                 try:
@@ -2912,9 +2974,14 @@ def build_msg_index(store: EchoStore) -> tuple[dict[str, int], dict[str, list[st
                     continue
         finally:
             c.close()
-    _MSG_INDEX_CACHE["counts"] = counts
-    _MSG_INDEX_CACHE["locations"] = locations
-    _MSG_INDEX_CACHE["last_ts"] = last_ts
+    # If all message DB opens failed during a refresh race, fail this request
+    # instead of fossilizing/saving an empty index for the rest of the session.
+    if failures and opened == 0:
+        raise sqlite3.OperationalError("all message databases are temporarily unreadable")
+    if opened or not failures:
+        _MSG_INDEX_CACHE["counts"] = counts
+        _MSG_INDEX_CACHE["locations"] = locations
+        _MSG_INDEX_CACHE["last_ts"] = last_ts
     return counts, locations, last_ts
 
 
@@ -4433,9 +4500,10 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             return self._send_json(payload)
 
         if path == "/api/annual-report/years":
+            years = list_available_report_years(self.store)
             return self._send_json({
-                "years": list_available_report_years(self.store),
-                "default": datetime.now(CST).year - 1,
+                "years": years,
+                "default": years[0] if years else datetime.now(CST).year,
             })
 
         if path == "/api/home-summary":
@@ -4776,8 +4844,24 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                         else:
                             set_active = (_MurmurAPIHandler._active_platform == "wechat"
                                            or _MurmurAPIHandler.store is None)
-                            _MurmurAPIHandler._set_wechat_store(EchoStore(new_dir),
-                                                                  set_active=set_active)
+                            last_store_err: Exception | None = None
+                            for attempt in range(10):
+                                try:
+                                    _MurmurAPIHandler._set_wechat_store(EchoStore(new_dir),
+                                                                          set_active=set_active)
+                                    last_store_err = None
+                                    break
+                                except Exception as e:
+                                    last_store_err = e
+                                    # Right after refresh swaps the decrypted
+                                    # staging dir into place, macOS/SQLite can
+                                    # briefly report "unable to open database
+                                    # file" even though the file is valid a
+                                    # moment later. Avoid surfacing a scary
+                                    # false failure during onboarding.
+                                    _time.sleep(0.25)
+                            if last_store_err is not None:
+                                raise last_store_err
                             _MurmurAPIHandler._init_error = None
                     except Exception as e:
                         init_error = f"{type(e).__name__}: {e}"
@@ -4838,11 +4922,28 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 merged = {**existing, **idx}
                 out_path.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
                 existing_count = sum(1 for r in merged.values() if isinstance(r, dict) and r.get("exists"))
+                image_key = None
+                try:
+                    image_key_result = _media.extract_image_aes_key_from_kvcomm(
+                        selected_profile,
+                        save=True,
+                        log=lambda msg: sys.stderr.write(f"[media-index] {msg}\n"),
+                    )
+                    if image_key_result:
+                        _key, meta = image_key_result
+                        image_key = {
+                            "ok": True,
+                            "source": meta.get("source"),
+                            "verified": bool(meta.get("verified")),
+                        }
+                except Exception as key_err:
+                    image_key = {"ok": False, "error": str(key_err)}
                 return self._send_json({
                     "ok": True,
                     "total": len(merged),
                     "indexed": len(idx),
                     "existing": existing_count,
+                    "image_key": image_key,
                     "ms": round((_time.time() - t0) * 1000),
                     "path": str(out_path),
                 })
@@ -5423,43 +5524,47 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     encoding="utf-8",
                 )
 
-                # Build the elevated command. _spawn_etcli_args handles both
-                # frozen mode (etcli extract-key-mac ...) and dev mode (python
-                # extract_key_mac.py ...). Quote each arg for shell + AppleScript.
-                inner_argv = _spawn_etcli_args(
-                    "extract-key-mac",
-                    "--timeout", str(timeout),
-                    "--salts", salts_path,
-                    "--out-keys", keys_path,
-                )
-                inner = " ".join(shlex.quote(a) for a in inner_argv)
-                inner_as = inner.replace("\\", "\\\\").replace('"', '\\"')
-                applescript = f'do shell script "{inner_as}" with administrator privileges'
-                r = subprocess.run(["osascript", "-e", applescript],
-                                   capture_output=True, text=True, encoding="utf-8",
-                                   timeout=max(timeout + 30, 90))
-                stdout = (r.stdout or "") + (r.stderr or "")
-
-                # Copy keys file from /tmp to user's ~/.murmur (so refresh.py finds it)
-                dst = Path.home() / ".murmur" / "decrypted_keys.json"
+                # Build the elevated command. Packaged builds use the frozen
+                # etcli; dev builds copy the Mac extractor to /tmp first so
+                # root Python never has to open files under ~/Documents/Codex.
+                tmp_extract_dir = Path(tempfile.mkdtemp(prefix="murmur_extract_mac_"))
                 try:
-                    if Path(keys_path).exists() and Path(keys_path).stat().st_size > 0:
-                        dst.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy(keys_path, dst)
-                        # Fix ownership (root → user) so the user can read it
-                        try:
-                            uid = int(os.environ.get("SUDO_UID", os.getuid()))
-                            gid = int(os.environ.get("SUDO_GID", os.getgid()))
-                            os.chown(dst, uid, gid)
-                        except Exception:
-                            pass
-                except Exception as e:
-                    stdout += f"\n[orchestrator] copy {keys_path} → {dst} failed: {e}"
-                # Clean up tmp salts (always) and tmp keys (only if we copied)
-                try: os.unlink(salts_path)
-                except OSError: pass
-                try: os.unlink(keys_path)
-                except OSError: pass
+                    inner_argv = _spawn_mac_extract_key_args(
+                        tmp_extract_dir,
+                        "--timeout", str(timeout),
+                        "--salts", salts_path,
+                        "--out-keys", keys_path,
+                    )
+                    inner = " ".join(shlex.quote(a) for a in inner_argv)
+                    inner_as = inner.replace("\\", "\\\\").replace('"', '\\"')
+                    applescript = f'do shell script "{inner_as}" with administrator privileges'
+                    r = subprocess.run(["osascript", "-e", applescript],
+                                       capture_output=True, text=True, encoding="utf-8",
+                                       timeout=max(timeout + 30, 90))
+                    stdout = (r.stdout or "") + (r.stderr or "")
+
+                    # Copy keys file from /tmp to user's ~/.murmur (so refresh.py finds it)
+                    dst = Path.home() / ".murmur" / "decrypted_keys.json"
+                    try:
+                        if Path(keys_path).exists() and Path(keys_path).stat().st_size > 0:
+                            dst.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy(keys_path, dst)
+                            # Fix ownership (root → user) so the user can read it
+                            try:
+                                uid = int(os.environ.get("SUDO_UID", os.getuid()))
+                                gid = int(os.environ.get("SUDO_GID", os.getgid()))
+                                os.chown(dst, uid, gid)
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        stdout += f"\n[orchestrator] copy {keys_path} → {dst} failed: {e}"
+                finally:
+                    # Clean up temp files even if osascript times out or is cancelled.
+                    try: os.unlink(salts_path)
+                    except OSError: pass
+                    try: os.unlink(keys_path)
+                    except OSError: pass
+                    shutil.rmtree(tmp_extract_dir, ignore_errors=True)
             else:
                 # Windows path: spawn extract_key_dll via _spawn_etcli_args
                 # (handles dev vs PyInstaller frozen).
@@ -6039,13 +6144,18 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         # On-the-fly decrypt for .dat files
         if ext == ".dat" and data:
             try:
-                # Read image AES key from config if available
-                cfg = _paths.load_config()
-                img_key_str = cfg.get("image_aes_key")
-                img_key = img_key_str.encode("utf-8") if img_key_str else None
                 # Lazy import (avoid circular)
                 import media as _media
-                plain, fmt, ver = _media.decrypt_dat(data, image_aes_key=img_key)
+                img_key, img_xor_key = _media.resolve_image_keys(
+                    auto=True,
+                    save=True,
+                    log=lambda msg: sys.stderr.write(f"[serve_media] {msg}\n"),
+                )
+                plain, fmt, ver = _media.decrypt_dat(
+                    data,
+                    image_aes_key=img_key,
+                    image_xor_key=img_xor_key,
+                )
                 if fmt and plain:
                     data = plain
                     ext = "." + fmt

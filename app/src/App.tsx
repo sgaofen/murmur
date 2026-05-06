@@ -14,7 +14,7 @@ import { BatchStatusPill, BatchTrackerProvider } from './components/extras/Batch
 import { PrivacyToggle } from './components/PrivacyToggle';
 import { PrivacyIdentityIndex } from './components/extras/PrivacyIdentityIndex';
 import { QQOnboardingDialog } from './pages/QQOnboardingDialog';
-import { syncActiveToBackend } from './utils/activeProfile';
+import { supportsQQOnboarding, syncActiveToBackend } from './utils/activeProfile';
 
 type Route =
   | { name: 'loading' }
@@ -53,6 +53,7 @@ export default function App() {
   // WHY they're back at onboarding instead of silently re-looping.
   const [bootstrapInitError, setBootstrapInitError] = useState<string | null>(null);
   const showDevControls = import.meta.env.VITE_SHOW_DEV_CONTROLS === '1';
+  const qqSupported = supportsQQOnboarding();
 
   useEffect(() => {
     const onHash = () => setRoute(parseHash(window.location.hash));
@@ -66,12 +67,12 @@ export default function App() {
   useEffect(() => {
     const onReq = (e: Event) => {
       const platform = (e as CustomEvent<{ platform: 'wechat' | 'qq' }>).detail?.platform;
-      if (platform === 'qq') setQQOnboarding(true);
+      if (platform === 'qq' && qqSupported) setQQOnboarding(true);
       else setOnboarding(true);
     };
     window.addEventListener('murmur:requestOnboarding', onReq);
     return () => window.removeEventListener('murmur:requestOnboarding', onReq);
-  }, []);
+  }, [qqSupported]);
 
   function go(path: string) {
     window.location.hash = path;
@@ -204,7 +205,7 @@ export default function App() {
         dark={dark}
         onOpenFriend={(id) => go(`friend/${id}`)}
         onOpenOnboarding={() => setOnboarding(true)}
-        onOpenQQ={() => setQQOnboarding(true)}
+        onOpenQQ={qqSupported ? () => setQQOnboarding(true) : undefined}
       />;
   }
 
@@ -220,14 +221,16 @@ export default function App() {
           open={onboarding}
           onClose={() => { localStorage.setItem(ONBOARDING_SEEN_KEY, '1'); setOnboarding(false); setBootstrapInitError(null); }}
           onDone={() => window.location.reload()}
-          onPickQQ={() => { setOnboarding(false); setQQOnboarding(true); }}
+          onPickQQ={qqSupported ? () => { setOnboarding(false); setQQOnboarding(true); } : undefined}
           initError={bootstrapInitError}
         />
-        <QQOnboardingDialog
-          open={qqOnboarding}
-          onClose={() => setQQOnboarding(false)}
-          onDone={() => { setQQOnboarding(false); /* dialog reloads the page itself */ }}
-        />
+        {qqSupported && (
+          <QQOnboardingDialog
+            open={qqOnboarding}
+            onClose={() => setQQOnboarding(false)}
+            onDone={() => { setQQOnboarding(false); /* dialog reloads the page itself */ }}
+          />
+        )}
       </BatchTrackerProvider>
     </TaskCenterProvider>
   );
