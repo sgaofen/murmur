@@ -103,7 +103,6 @@ export interface Diagnose {
     sip_enabled?: boolean | null;
     weixin_running?: boolean | null;
     wechat_hardened?: boolean | null;
-    wechat_app_store?: boolean | null;
     tcc_blocked?: boolean | null;
   };
   profiles: Array<{

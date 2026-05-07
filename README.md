@@ -6,7 +6,7 @@
 
 [下载最新版](https://github.com/sgaofen/murmur/releases/latest)
 
-当前推荐版本：`v0.4.0`
+当前推荐版本：`v0.4.1`
 
 ![Murmur 关系网总览](docs/screenshots/readme-graph-overview.png)
 
@@ -66,24 +66,26 @@ Murmur 把每个朋友的样本消息 + 离线证据 + 数据指纹（最长连�
 
 Windows 用户：
 
-- 推荐：`Murmur_0.4.0_x64-setup.exe`
-- 备用：`Murmur_0.4.0_x64_en-US.msi`
+- 推荐：`Murmur_0.4.1_x64-setup.exe`
+- 备用：`Murmur_0.4.1_x64_en-US.msi`
 
 Mac 用户：
 
-- v0.4.0 的 macOS 安装包正在打包中，预计稍后补齐。**临时方案**：装 v0.3.17 的 mac 包用主要功能，等 v0.4.0 mac 出来再升级；或者从源码运行（克隆仓库 + `pnpm install` + `pnpm tauri dev`）。
+- Apple Silicon：`Murmur_macOS_AppleSilicon.dmg`
+- 备用：`Murmur_macOS_AppleSilicon.app.zip`
+- **只支持腾讯官网版 WeChat for Mac**。Mac App Store 版 WeChat 目前不支持自动抓密钥；请先换成腾讯官网版再走 Murmur 引导。
 
 Intel Mac 暂时没有安装包，需要从源码运行。
 
 ## 视频教程
 
-- [Windows 微信安装视频](https://github.com/sgaofen/murmur/releases/download/v0.4.0/Murmur_Windows_install_tutorial.mp4)
-- [Windows QQ 安装视频](https://github.com/sgaofen/murmur/releases/download/v0.3.17/Murmur_QQ_install_tutorial.mp4)
-- [Mac 安装视频（v0.3.17，v0.4.0 更新后会同步）](https://github.com/sgaofen/murmur/releases/download/v0.3.17/Murmur_macOS_install_tutorial.mp4)
+- [Windows 微信安装视频](https://github.com/sgaofen/murmur/releases/download/v0.4.1/Murmur_Windows_install_tutorial.mp4)
+- [Windows QQ 安装视频](https://github.com/sgaofen/murmur/releases/download/v0.4.1/Murmur_QQ_install_tutorial.mp4)
+- [Mac 安装视频](https://github.com/sgaofen/murmur/releases/download/v0.4.1/Murmur_macOS_install_tutorial.mp4)
 
 ## Windows 安装（微信）
 
-1. 双击 `Murmur_0.4.0_x64-setup.exe`，按引导装。
+1. 双击 `Murmur_0.4.1_x64-setup.exe`，按引导装。
 2. 打开微信，**退出登录回到登录页，但不要关闭微信进程**。
 3. 打开 Murmur，点「开始抓密钥」。
 4. 看到等待提示后，回微信扫码登录一次。
@@ -97,12 +99,12 @@ Intel Mac 暂时没有安装包，需要从源码运行。
 
 ## Mac 安装
 
-v0.4.0 的 macOS 安装包正在打包，请暂时使用 v0.3.17：
-
 1. 双击 `Murmur_macOS_AppleSilicon.dmg`。
 2. 把 `Murmur.app` 拖到「应用程序」。
 3. **不要直接在 dmg 窗口里运行**，要从「应用程序」打开。
 4. 第一次打开如果被 Gatekeeper 拦：「系统设置 → 隐私与安全性」滚到底部点「仍要打开」。
+
+Mac 微信要求：请使用 **腾讯官网版 WeChat for Mac**。App Store 版 WeChat 的程序结构和权限保护不同，Murmur 当前不支持它的自动重签名 / 自动抓密钥流程。
 
 如果完全没有「仍要打开」按钮，开 Terminal：
 
