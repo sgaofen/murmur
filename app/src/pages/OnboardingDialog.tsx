@@ -85,7 +85,7 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
           await runDecrypt();
         } else if (d.capabilities.can_extract_key) {
           setPhase('mac-auto-extract');
-        } else if (d.capabilities.wechat_hardened === true) {
+        } else if (d.capabilities.has_wechat_installed && d.capabilities.wechat_hardened !== false) {
           setPhase('mac-resign-prompt');
         } else {
           setPhase('mac-paste-key');
@@ -275,7 +275,7 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
             {phase === 'mac-auto-extract' && '一切就绪 — 一键抓密钥'}
             {phase === 'mac-resign-prompt' && '一次性给 WeChat 重签名（不需要关 SIP）'}
             {phase === 'mac-resigning' && '正在重签名…'}
-            {phase === 'mac-wait-login' && '微信已重启，请登录 → 然后回来抓密钥'}
+            {phase === 'mac-wait-login' && '微信已打开，请在微信里准备数据'}
             {phase === 'mac-fda-needed' && '第一步：给 Murmur 完全磁盘访问权限'}
             {phase === 'win-no-data' && '没找到微信数据目录'}
             {phase === 'win-need-key' && '只需要 30 秒，读取一次密钥'}
@@ -875,7 +875,7 @@ function MacPasteKey({ diag, onSubmit }: { diag: Diagnose; onSubmit: (key: strin
     <>
       <div className="et-serif" style={{ fontSize: 15, lineHeight: 1.7, color: 'var(--et-ink-soft)', marginBottom: 14 }}>
         {sipOn
-          ? <>Mac 默认开着 <strong>SIP（系统完整性保护）</strong>，导致无法自动从微信进程内存抓密钥。<br/>三种办法可以拿到 64 位 SQLCipher 密钥，任选一个：</>
+          ? <>Murmur 暂时没法在这台 Mac 上自动抓到密钥。<br/>不建议普通用户为了这个去关 SIP；优先用重签名流程，实在不行再手动粘贴 64 位 SQLCipher 密钥。</>
           : <>把 64 位 SQLCipher 密钥粘进来，解密在你这台 Mac 上跑。</>}
       </div>
       <div style={{
@@ -887,7 +887,7 @@ function MacPasteKey({ diag, onSubmit }: { diag: Diagnose; onSubmit: (key: strin
         <div style={{ paddingLeft: 14, marginBottom: 10 }}>
           在 Win 上 <code>git clone</code> 这个仓库 → 运行 <code>start-windows.bat</code>。引导跑完后，密钥就在 <code>~/.murmur/config.json</code> 里 <code>decrypt_key</code> 字段，拷过来粘到下面。
         </div>
-        <div style={{ marginBottom: 6 }}><strong style={{ color: 'var(--et-orange-2)' }}>② 关掉 Mac 的 SIP（一次性）</strong></div>
+        <div style={{ marginBottom: 6 }}><strong style={{ color: 'var(--et-orange-2)' }}>② 高级方案：关掉 Mac 的 SIP（不推荐小白）</strong></div>
         <div style={{ paddingLeft: 14, marginBottom: 10 }}>
           重启进恢复模式（开机长按电源键）→ 终端运行 <code>csrutil disable</code> → 重启 → 在这个仓库根目录运行：
           <pre style={{ background: 'var(--et-paper-2)', padding: '6px 10px', borderRadius: 4, marginTop: 4, fontSize: 11, fontFamily: 'var(--et-mono)' }}>sudo python3 cli/extract_key_mac.py</pre>
@@ -969,6 +969,7 @@ function MacFDANeeded({ onOpenSettings, onRetry }: { onOpenSettings: () => void;
 }
 
 function MacResignPrompt({ diag, onConsent, onPaste }: { diag: Diagnose; onConsent: () => void; onPaste: () => void }) {
+  const wechatRunning = diag.capabilities.weixin_running === true;
   return (
     <>
       <div className="et-serif" style={{ fontSize: 15, lineHeight: 1.7, color: 'var(--et-ink-soft)', marginBottom: 14 }}>
@@ -981,19 +982,28 @@ function MacResignPrompt({ diag, onConsent, onPaste }: { diag: Diagnose; onConse
         border: '0.5px solid var(--et-line-2)', borderRadius: 8,
         fontSize: 13, color: 'var(--et-ink)', lineHeight: 1.85, marginBottom: 12,
       }}>
-        <div style={{ marginBottom: 8, fontWeight: 600 }}>请先手动退出 WeChat，然后点确认。我会做这几件事：</div>
+        <div style={{ marginBottom: 8, fontWeight: 600 }}>这里只需要先手动退出 WeChat 一次，用来改签名。之后会重新打开微信，让你慢慢点聊天：</div>
         <ol style={{ margin: 0, paddingLeft: 20 }}>
           <li style={{ marginBottom: 4 }}>确认 WeChat 已经完全退出；如果还在运行，会停下来提醒你，不会自动关闭</li>
           <li style={{ marginBottom: 4 }}>弹 macOS 系统认证窗 — <strong>输入开机密码</strong></li>
           <li style={{ marginBottom: 4 }}>对 WeChat 主可执行文件做 <code>codesign --remove-signature</code> + 重新 ad-hoc 签名</li>
-          <li>重启 WeChat → <strong>停在你这里等你下一步</strong>，不会自动跑抓 key</li>
+          <li>重新打开 WeChat → <strong>停在你这里等你下一步</strong>，不会自动跑抓 key</li>
         </ol>
         <div style={{ marginTop: 8, padding: '8px 10px', background: 'rgba(72,167,107,0.10)',
           borderRadius: 6, fontSize: 12, color: '#3a7a4f' }}>
-          重签名完成后会重新打开 WeChat，并到下一页「请扫码登录 + 点开几个对话」，<strong>那一步没有时间限制</strong>，
+          重签名完成后会重新打开 WeChat，并到下一页「在微信里登录 + 点开几个对话」，<strong>那一步没有时间限制</strong>，
           慢慢操作 — 你点完按钮我才开始抓密钥。
         </div>
       </div>
+      {wechatRunning && (
+        <div style={{
+          padding: '10px 14px', background: 'rgba(255,107,71,0.08)',
+          border: '0.5px solid rgba(224,83,46,0.28)', borderRadius: 8,
+          fontSize: 12, color: 'var(--et-orange-2)', lineHeight: 1.6, marginBottom: 12,
+        }}>
+          现在还检测到 WeChat 正在运行。请先在微信菜单里选择「退出微信」，确认 Dock 上微信小点消失后，再点下面按钮。
+        </div>
+      )}
       <div style={{
         padding: '10px 14px', background: 'rgba(232,181,122,0.18)',
         border: '0.5px solid rgba(138,90,28,0.3)', borderRadius: 8,
@@ -1017,7 +1027,7 @@ function MacWaitLogin({ onContinue }: { onContinue: () => void }) {
   return (
     <>
       <div className="et-serif" style={{ fontSize: 15, lineHeight: 1.7, color: 'var(--et-ink-soft)', marginBottom: 14 }}>
-        ✓ 重签名成功 — 微信已经重新启动。
+        ✓ 重签名成功 — 微信已经打开。
       </div>
       <div style={{
         padding: '12px 14px', background: 'var(--et-paper-2)',
@@ -1026,8 +1036,8 @@ function MacWaitLogin({ onContinue }: { onContinue: () => void }) {
       }}>
         <div style={{ fontWeight: 600, marginBottom: 8, fontSize: 14 }}>下一步要做的（不急，慢慢来）：</div>
         <ol style={{ margin: 0, paddingLeft: 20 }}>
-          <li style={{ marginBottom: 6 }}>到微信窗口，<strong>用手机扫码登录</strong></li>
-          <li style={{ marginBottom: 6 }}>等左边联系人列表加载完，<strong>点开 3-5 个对话</strong>，每个滑两下</li>
+          <li style={{ marginBottom: 6 }}>停在微信窗口，<strong>登录到能看到消息列表</strong></li>
+          <li style={{ marginBottom: 6 }}>点开 3-5 个重要对话，每个滑两下</li>
           <li style={{ marginBottom: 6 }}>顺手翻一下朋友圈 / 收藏 / 联系人页</li>
           <li>都做完了再回来点下面按钮 — <strong>不需要赶时间</strong></li>
         </ol>

@@ -1280,11 +1280,15 @@ def find_weixin_exe() -> Path | None:
 
 
 def _mac_app_bundle_for_executable(exe: Path) -> Path | None:
-    """Return the enclosing .app bundle for a macOS executable path."""
-    for parent in [exe, *exe.parents]:
-        if parent.name.endswith(".app"):
-            return parent
-    return None
+    """Return the outer enclosing .app bundle for a macOS executable path.
+
+    Mac App Store WeChat nests the real executable inside
+    `WeChat.app/Contents/MacOS/WeChatAppEx.app/...`. For launching and data
+    ownership we want the outer `WeChat.app`, while the inner executable is
+    handled by `wechat_main_exec()`.
+    """
+    apps = [parent for parent in [exe, *exe.parents] if parent.name.endswith(".app")]
+    return apps[-1] if apps else None
 
 
 def _mac_running_wechat_apps() -> list[Path]:
@@ -1294,7 +1298,7 @@ def _mac_running_wechat_apps() -> list[Path]:
     out: list[Path] = []
     try:
         import subprocess as _sp
-        for name in ("WeChat", "Weixin"):
+        for name in ("WeChat", "Weixin", "微信", "WeChatAppEx"):
             r = _sp.run(["pgrep", "-x", name], capture_output=True, text=True, timeout=3)
             if r.returncode != 0:
                 continue
@@ -1312,6 +1316,20 @@ def _mac_running_wechat_apps() -> list[Path]:
     return _dedupe_paths(out)
 
 
+def _mac_bundle_executable_name(app: Path) -> str | None:
+    """Read CFBundleExecutable without shelling out."""
+    try:
+        import plistlib
+        info = app / "Contents" / "Info.plist"
+        if not info.exists():
+            return None
+        with info.open("rb") as f:
+            val = plistlib.load(f).get("CFBundleExecutable")
+        return str(val) if val else None
+    except Exception:
+        return None
+
+
 def wechat_main_exec(app: Path | None = None) -> Path | None:
     """Return the main macOS WeChat executable inside a .app bundle."""
     if not IS_MAC:
@@ -1322,9 +1340,28 @@ def wechat_main_exec(app: Path | None = None) -> Path | None:
     if app.is_file():
         return app
     macos_dir = app / "Contents" / "MacOS"
-    for name in ("WeChat", "Weixin"):
-        cand = macos_dir / name
-        if cand.exists():
+    candidates: list[Path] = []
+
+    bundle_exe = _mac_bundle_executable_name(app)
+    if bundle_exe:
+        candidates.append(macos_dir / bundle_exe)
+    for name in ("WeChat", "Weixin", "微信", "WeChatAppEx"):
+        candidates.append(macos_dir / name)
+
+    # App Store WeChat 4.x can place the real app at:
+    # WeChat.app/Contents/MacOS/WeChatAppEx.app/Contents/MacOS/WeChatAppEx
+    try:
+        for nested_app in macos_dir.glob("*.app"):
+            nested_name = _mac_bundle_executable_name(nested_app)
+            if nested_name:
+                candidates.append(nested_app / "Contents" / "MacOS" / nested_name)
+            for name in ("WeChatAppEx", "WeChat", "Weixin", "微信"):
+                candidates.append(nested_app / "Contents" / "MacOS" / name)
+    except OSError:
+        pass
+
+    for cand in _dedupe_paths(candidates):
+        if cand.is_file() and os.access(cand, os.X_OK):
             return cand
     try:
         for cand in macos_dir.iterdir():
