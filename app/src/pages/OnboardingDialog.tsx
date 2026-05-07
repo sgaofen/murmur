@@ -17,7 +17,7 @@ interface Props {
   initError?: string | null;
 }
 
-type Phase = 'welcome' | 'diagnose' | 'mac-no-data' | 'mac-paste-key' | 'mac-auto-extract' | 'mac-resign-prompt' | 'mac-resigning' | 'mac-wait-login' | 'mac-fda-needed' | 'win-no-data' | 'win-need-key' | 'win-decrypt' | 'extract-key' | 'done' | 'error';
+type Phase = 'welcome' | 'diagnose' | 'mac-no-data' | 'mac-paste-key' | 'mac-auto-extract' | 'mac-appstore-wechat' | 'mac-resign-prompt' | 'mac-resigning' | 'mac-wait-login' | 'mac-fda-needed' | 'win-no-data' | 'win-need-key' | 'win-decrypt' | 'extract-key' | 'done' | 'error';
 
 export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }: Props) {
   void usePrivacy();
@@ -85,6 +85,8 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
           await runDecrypt();
         } else if (d.capabilities.can_extract_key) {
           setPhase('mac-auto-extract');
+        } else if (d.capabilities.wechat_app_store === true) {
+          setPhase('mac-appstore-wechat');
         } else if (d.capabilities.has_wechat_installed && d.capabilities.wechat_hardened !== false) {
           setPhase('mac-resign-prompt');
         } else {
@@ -273,6 +275,7 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
             {phase === 'diagnose' && '正在检测你的电脑…'}
             {phase === 'mac-no-data' && 'Mac 上还没找到微信数据'}
             {phase === 'mac-auto-extract' && '一切就绪 — 一键抓密钥'}
+            {phase === 'mac-appstore-wechat' && 'App Store 版 WeChat 暂不自动重签名'}
             {phase === 'mac-resign-prompt' && '一次性给 WeChat 重签名（不需要关 SIP）'}
             {phase === 'mac-resigning' && '正在重签名…'}
             {phase === 'mac-wait-login' && '微信已打开，请在微信里准备数据'}
@@ -296,6 +299,7 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
           {phase === 'mac-no-data' && diag && <MacNoData diag={diag} onSaved={startDiagnose} onRetry={startDiagnose} onOpenSettings={openFDAAndWait} />}
           {phase === 'mac-paste-key' && diag && <MacPasteKey diag={diag} onSubmit={submitMacKey} />}
           {phase === 'mac-auto-extract' && diag && <MacAutoExtract diag={diag} onStart={startKeyExtract} onPaste={() => setPhase('mac-paste-key')} />}
+          {phase === 'mac-appstore-wechat' && diag && <MacAppStoreWeChat diag={diag} onRetry={startDiagnose} onPaste={() => setPhase('mac-paste-key')} />}
           {phase === 'mac-resign-prompt' && diag && <MacResignPrompt diag={diag} onConsent={startResign} onPaste={() => setPhase('mac-paste-key')} />}
           {phase === 'mac-resigning' && <Working text={progress || '正在重签名…'} />}
           {phase === 'mac-wait-login' && <MacWaitLogin onContinue={startKeyExtract} />}
@@ -401,6 +405,9 @@ function CapabilityList({ diag }: { diag: Diagnose }) {
   }
   if (diag.capabilities.weixin_running !== null && diag.capabilities.weixin_running !== undefined) {
     rows.push(['微信进程', diag.capabilities.weixin_running ? '运行中 ✓' : '未运行', !!diag.capabilities.weixin_running]);
+  }
+  if (diag.platform === 'macos' && diag.capabilities.wechat_app_store === true) {
+    rows.push(['微信来源', 'App Store 版 ⚠', false]);
   }
   if (diag.wechat_search_roots?.length) {
     rows.push(['扫描路径', `${diag.wechat_search_roots.length} 个`, true]);
@@ -862,6 +869,44 @@ function WinNoDataManual({ diag, onSaved, onBack }: { diag: Diagnose; onSaved: (
           opacity: saving ? 0.65 : 1, cursor: saving ? 'wait' : 'pointer',
         }}>{saving ? '正在检查…' : '保存路径'}</button>
       </div>
+    </>
+  );
+}
+
+function MacAppStoreWeChat({ diag, onRetry, onPaste }: { diag: Diagnose; onRetry: () => void; onPaste: () => void }) {
+  return (
+    <>
+      <div className="et-serif" style={{ fontSize: 15, lineHeight: 1.7, color: 'var(--et-ink-soft)', marginBottom: 14 }}>
+        你现在装的是 <strong>Mac App Store 版 WeChat</strong>。这个版本的主程序藏在 <code>WeChatAppEx.app</code> 里，
+        macOS 会拦截 Murmur 把已签好的可执行文件写回去；继续自动重签名有概率把微信本体改坏。
+      </div>
+      <div style={{
+        padding: '12px 14px', background: 'rgba(255,107,71,0.08)',
+        border: '0.5px solid rgba(224,83,46,0.30)', borderRadius: 8,
+        fontSize: 12.5, color: 'var(--et-ink-soft)', lineHeight: 1.75, marginBottom: 14,
+      }}>
+        <div style={{ fontWeight: 700, color: 'var(--et-orange-2)', marginBottom: 8 }}>推荐做法</div>
+        <ol style={{ margin: 0, paddingLeft: 20 }}>
+          <li style={{ marginBottom: 6 }}>退出 WeChat 和 Murmur。</li>
+          <li style={{ marginBottom: 6 }}>从腾讯官网安装 Mac 版 WeChat（不是 App Store 版）。</li>
+          <li style={{ marginBottom: 6 }}>打开官网版 WeChat 登录一次，回 Murmur 点“重新检测”。</li>
+          <li>之后 Murmur 会走普通重签名流程：重签名完成后停在微信里点聊天，再回来抓密钥。</li>
+        </ol>
+      </div>
+      <div style={{
+        padding: '10px 14px', background: 'rgba(232,181,122,0.16)',
+        border: '0.5px solid rgba(138,90,28,0.28)', borderRadius: 8,
+        fontSize: 12, color: '#8a5a1c', lineHeight: 1.65, marginBottom: 14,
+      }}>
+        如果你刚才已经看到 WeChatAppEx 缺失或微信打不开，请先重新安装 WeChat。聊天数据在用户目录里，不在 App 本体里。
+      </div>
+      <CapabilityList diag={diag} />
+      <button onClick={onRetry} style={primaryBtn}>我已换成官网版 WeChat，重新检测</button>
+      <button onClick={onPaste} style={{
+        ...primaryBtn, marginTop: 8, background: 'transparent',
+        color: 'var(--et-ink)', boxShadow: 'none',
+        border: '1px solid var(--et-line-2)',
+      }}>我有密钥，手动粘贴</button>
     </>
   );
 }
