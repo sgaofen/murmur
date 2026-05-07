@@ -1406,16 +1406,54 @@ def codesign_has_runtime_flag(blob: str) -> bool:
     return False
 
 
+def mac_running_weixin_processes() -> list[str]:
+    """Return visible macOS WeChat/Weixin process hints.
+
+    `pgrep -x WeChat` catches the normal case, but App Store / localized builds
+    can also leave helper processes whose exact executable names differ. The
+    ps fallback avoids silently signing while a WeChat binary is still mapped.
+    """
+    if not IS_MAC:
+        return []
+    found: dict[str, str] = {}
+    try:
+        import subprocess as _sp
+        for name in ("WeChat", "Weixin", "微信", "WeChatAppEx"):
+            r = _sp.run(["pgrep", "-x", name], capture_output=True, text=True, timeout=5)
+            for pid in (r.stdout or "").splitlines():
+                pid = pid.strip()
+                if pid:
+                    found[pid] = name
+        ps = _sp.run(["ps", "-axo", "pid=,comm=,args="], capture_output=True, text=True, timeout=5)
+        needles = (
+            ".app/Contents/MacOS/WeChat",
+            ".app/Contents/MacOS/Weixin",
+            ".app/Contents/MacOS/微信",
+            "com.tencent.xinWeChat",
+            "com.tencent.xinweixin",
+            "/WeChat.app/",
+            "/Weixin.app/",
+            "/微信.app/",
+        )
+        for line in (ps.stdout or "").splitlines():
+            if not any(n in line for n in needles):
+                continue
+            parts = line.strip().split(None, 1)
+            if not parts:
+                continue
+            pid = parts[0]
+            found.setdefault(pid, line.strip())
+    except Exception:
+        pass
+    return [f"{label} (pid {pid})" for pid, label in sorted(found.items(), key=lambda kv: int(kv[0]) if kv[0].isdigit() else 0)]
+
+
 def _check_weixin_running() -> Optional[bool]:
     """True if the WeChat/Weixin GUI process is alive."""
     try:
         import subprocess as _sp
         if IS_MAC:
-            for name in ("WeChat", "Weixin"):
-                r = _sp.run(["pgrep", "-x", name], capture_output=True, text=True)
-                if r.returncode == 0 and r.stdout.strip():
-                    return True
-            return False
+            return bool(mac_running_weixin_processes())
         if IS_WINDOWS:
             if _windows_running_weixin_paths():
                 return True
