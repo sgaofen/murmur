@@ -4473,7 +4473,6 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     "sip_enabled": caps.sip_enabled,
                     "weixin_running": caps.weixin_running,
                     "wechat_hardened": caps.wechat_hardened,
-                    "wechat_app_store": caps.wechat_app_store,
                     "tcc_blocked": caps.tcc_blocked,
                 },
                 "profiles": [
@@ -5655,27 +5654,11 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             try:
                 import shlex
                 wechat_app = _paths.find_weixin_exe()
-                if not wechat_app:
+                main_exec = _paths.wechat_main_exec(wechat_app)
+                if not wechat_app or not main_exec:
                     return self._send_json({
                         "ok": False,
                         "error": "没找到 WeChat.app / Weixin.app；请先安装并打开微信，或设置 MURMUR_WECHAT_APP",
-                        "log": steps_log,
-                    })
-                if _paths.is_mac_app_store_wechat(wechat_app):
-                    return self._send_json({
-                        "ok": False,
-                        "error": (
-                            "检测到 Mac App Store 版 WeChat。这个版本会拦截对内部可执行文件的写回，"
-                            "Murmur 已停止自动重签名它，避免把微信改坏。请改用腾讯官网版 WeChat，"
-                            "或使用手动粘贴密钥。"
-                        ),
-                        "log": steps_log,
-                    })
-                main_exec = _paths.wechat_main_exec(wechat_app)
-                if not main_exec:
-                    return self._send_json({
-                        "ok": False,
-                        "error": "没找到 WeChat 主程序；请重新安装腾讯官网版 WeChat 后再试。",
                         "log": steps_log,
                     })
 
@@ -5705,26 +5688,13 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 # flags. Use a chained shell command — osascript runs them as one
                 # admin-elevated subshell so the password prompt only appears once.
                 main_exec_q = shlex.quote(str(main_exec))
-                # App Store WeChat often stores the main executable as an APFS
-                # compressed root-owned file. Direct in-place remove-signature
-                # can then fail with "internal error in Code Signing subsystem".
-                # Fallback: sign an uncompressed temp copy first, then install
-                # the signed bytes back over the original with admin privileges.
-                shell_cmd = f"""
-set -e
-target={main_exec_q}
-if ! (/usr/bin/codesign --remove-signature "$target" && /usr/bin/codesign --force --sign - --preserve-metadata=identifier,entitlements,requirements "$target"); then
-  tmp=$(/usr/bin/mktemp -t murmur-wechat-main)
-  trap '/bin/rm -f "$tmp"' EXIT
-  /usr/bin/ditto "$target" "$tmp"
-  /bin/chmod 755 "$tmp"
-  /usr/bin/codesign --remove-signature "$tmp" >/dev/null 2>&1 || true
-  /usr/bin/codesign --force --sign - --preserve-metadata=identifier,entitlements,requirements "$tmp"
-  /usr/bin/install -m 755 "$tmp" "$target"
-fi
-"""
-                apple_shell_cmd = shell_cmd.replace("\\", "\\\\").replace('"', '\\"')
-                cmd = (f'do shell script "{apple_shell_cmd}" with administrator privileges')
+                shell_cmd = (
+                    f"codesign --remove-signature {main_exec_q} && "
+                    "codesign --force --sign - "
+                    "--preserve-metadata=identifier,entitlements,requirements "
+                    f"{main_exec_q}"
+                )
+                cmd = (f'do shell script "{shell_cmd}" with administrator privileges')
                 t0 = _time.time()
                 r = subprocess.run(["osascript", "-e", cmd],
                                    capture_output=True, text=True, timeout=120)

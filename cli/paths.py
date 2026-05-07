@@ -1280,15 +1280,11 @@ def find_weixin_exe() -> Path | None:
 
 
 def _mac_app_bundle_for_executable(exe: Path) -> Path | None:
-    """Return the outer enclosing .app bundle for a macOS executable path.
-
-    Mac App Store WeChat nests the real executable inside
-    `WeChat.app/Contents/MacOS/WeChatAppEx.app/...`. For launching and data
-    ownership we want the outer `WeChat.app`, while the inner executable is
-    handled by `wechat_main_exec()`.
-    """
-    apps = [parent for parent in [exe, *exe.parents] if parent.name.endswith(".app")]
-    return apps[-1] if apps else None
+    """Return the enclosing .app bundle for a macOS executable path."""
+    for parent in [exe, *exe.parents]:
+        if parent.name.endswith(".app"):
+            return parent
+    return None
 
 
 def _mac_running_wechat_apps() -> list[Path]:
@@ -1298,7 +1294,7 @@ def _mac_running_wechat_apps() -> list[Path]:
     out: list[Path] = []
     try:
         import subprocess as _sp
-        for name in ("WeChat", "Weixin", "微信", "WeChatAppEx"):
+        for name in ("WeChat", "Weixin"):
             r = _sp.run(["pgrep", "-x", name], capture_output=True, text=True, timeout=3)
             if r.returncode != 0:
                 continue
@@ -1316,20 +1312,6 @@ def _mac_running_wechat_apps() -> list[Path]:
     return _dedupe_paths(out)
 
 
-def _mac_bundle_executable_name(app: Path) -> str | None:
-    """Read CFBundleExecutable without shelling out."""
-    try:
-        import plistlib
-        info = app / "Contents" / "Info.plist"
-        if not info.exists():
-            return None
-        with info.open("rb") as f:
-            val = plistlib.load(f).get("CFBundleExecutable")
-        return str(val) if val else None
-    except Exception:
-        return None
-
-
 def wechat_main_exec(app: Path | None = None) -> Path | None:
     """Return the main macOS WeChat executable inside a .app bundle."""
     if not IS_MAC:
@@ -1340,28 +1322,9 @@ def wechat_main_exec(app: Path | None = None) -> Path | None:
     if app.is_file():
         return app
     macos_dir = app / "Contents" / "MacOS"
-    candidates: list[Path] = []
-
-    bundle_exe = _mac_bundle_executable_name(app)
-    if bundle_exe:
-        candidates.append(macos_dir / bundle_exe)
-    for name in ("WeChat", "Weixin", "微信", "WeChatAppEx"):
-        candidates.append(macos_dir / name)
-
-    # App Store WeChat 4.x can place the real app at:
-    # WeChat.app/Contents/MacOS/WeChatAppEx.app/Contents/MacOS/WeChatAppEx
-    try:
-        for nested_app in macos_dir.glob("*.app"):
-            nested_name = _mac_bundle_executable_name(nested_app)
-            if nested_name:
-                candidates.append(nested_app / "Contents" / "MacOS" / nested_name)
-            for name in ("WeChatAppEx", "WeChat", "Weixin", "微信"):
-                candidates.append(nested_app / "Contents" / "MacOS" / name)
-    except OSError:
-        pass
-
-    for cand in _dedupe_paths(candidates):
-        if cand.is_file() and os.access(cand, os.X_OK):
+    for name in ("WeChat", "Weixin"):
+        cand = macos_dir / name
+        if cand.exists():
             return cand
     try:
         for cand in macos_dir.iterdir():
@@ -1386,7 +1349,6 @@ class Capabilities:
     sip_enabled: Optional[bool] = None  # macOS only: None on Win, True/False on Mac
     weixin_running: Optional[bool] = None  # whether the GUI process is alive
     wechat_hardened: Optional[bool] = None  # macOS only: True if hardened runtime still set
-    wechat_app_store: Optional[bool] = None  # macOS only: True for Mac App Store WeChat
     tcc_blocked: Optional[bool] = None  # macOS only: True if ~/Library/Containers/<wechat> listdir blocks/fails
                                          # — common for ad-hoc-signed .app without Full Disk Access
 
@@ -1427,28 +1389,6 @@ def _check_wechat_hardened() -> Optional[bool]:
         return codesign_has_runtime_flag(blob)
     except Exception:
         return None
-
-
-def is_mac_app_store_wechat(app: Path | None = None) -> bool:
-    """Return True for Mac App Store WeChat builds.
-
-    MAS WeChat 4.x uses a nested `WeChatAppEx.app` launcher and is protected
-    differently from the official Tencent DMG build. We deliberately do not
-    auto-resign it because failed write-back can damage the app bundle.
-    """
-    if not IS_MAC:
-        return False
-    app = app or find_weixin_exe()
-    if not app or app.is_file():
-        return False
-    try:
-        if (app / "Contents" / "_MASReceipt" / "receipt").exists():
-            return True
-        if (app / "Contents" / "MacOS" / "WeChatAppEx.app").exists():
-            return True
-    except OSError:
-        return False
-    return False
 
 
 def codesign_has_runtime_flag(blob: str) -> bool:
@@ -1540,9 +1480,7 @@ def detect_capabilities() -> Capabilities:
     sip = _check_sip_enabled()
     weixin_running = _check_weixin_running()
     has_install = wechat_exe is not None or (IS_WINDOWS and bool(weixin_running))
-    mac_main_exec = wechat_main_exec(wechat_exe) if IS_MAC and wechat_exe else None
     hardened = _check_wechat_hardened() if IS_MAC else None
-    app_store = is_mac_app_store_wechat(wechat_exe) if IS_MAC and wechat_exe else None
 
     # Memory scan to extract the key:
     #   - Windows: always works via wx_key.dll
@@ -1569,10 +1507,6 @@ def detect_capabilities() -> Capabilities:
             notes.append("Murmur 没有「完全磁盘访问」权限 —— 系统已阻止读取微信数据。请在「系统设置 → 隐私与安全性 → 完全磁盘访问」给 Murmur 打勾后重启 Murmur。")
         if hardened is False:
             notes.append("WeChat.app 已是 ad-hoc 签名（hardened runtime 已清掉）—— 可直接抓密钥。")
-        elif app_store is True and mac_main_exec is None:
-            notes.append("检测到 Mac App Store 版 WeChat，但主程序文件缺失。请先重新安装 WeChat，再换腾讯官网版或手动粘贴密钥。")
-        elif app_store is True:
-            notes.append("检测到 Mac App Store 版 WeChat。这个版本不再自动重签名，建议换腾讯官网版 WeChat 或手动粘贴密钥。")
         elif hardened is True:
             notes.append("WeChat.app 还带 hardened runtime — 点「重签名」按钮后即可自动抓（不需要关 SIP）。")
         if not weixin_running:
@@ -1599,7 +1533,6 @@ def detect_capabilities() -> Capabilities:
         sip_enabled=sip,
         weixin_running=weixin_running,
         wechat_hardened=hardened,
-        wechat_app_store=app_store,
         tcc_blocked=_LAST_TCC_BLOCKED if IS_MAC else None,
     )
 
