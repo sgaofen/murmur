@@ -5662,15 +5662,23 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                         "log": steps_log,
                     })
 
-                # 1. Quit WeChat (graceful, then force)
-                steps_log.append("[1/4] 退出微信…")
-                for app_name in ("WeChat", "Weixin", "微信"):
-                    subprocess.run(["osascript", "-e", f'try\n  tell application "{app_name}" to quit\nend try'],
-                                   capture_output=True, text=True, timeout=10)
-                _time.sleep(1.5)
-                subprocess.run(["pkill", "-x", "WeChat"], capture_output=True)
-                subprocess.run(["pkill", "-x", "Weixin"], capture_output=True)
-                _time.sleep(0.8)
+                # 1. Pre-flight: do NOT quit WeChat for the user. App Store
+                # WeChat can fail codesign while the executable is still mapped,
+                # and auto-quitting before a failing resign feels hostile. Ask
+                # the user to quit it explicitly, then sign only when it is gone.
+                steps_log.append("[1/4] 检查微信是否已退出…")
+                running = _paths.mac_running_weixin_processes()
+                if running:
+                    msg = (
+                        "重签名前请先手动退出 WeChat/微信，然后再点一次。"
+                        "Murmur 不会再自动关闭你的微信，避免签名失败时打断当前会话。"
+                    )
+                    return self._send_json({
+                        "ok": False,
+                        "error": msg,
+                        "stderr": "\n".join(running),
+                        "log": steps_log,
+                    })
 
                 # 2. Run codesign with admin privileges via osascript
                 steps_log.append("[2/4] 重签名 (会弹 macOS 系统认证窗口，请输入开机密码)…")
