@@ -462,12 +462,11 @@ class EchoStore:
         return c
 
     def _guess_self_wxid(self) -> Optional[str]:
-        # echotrace stores decrypted dbs under .../EchoTrace/<self_wxid_short>/
-        # so the directory name itself is the authoritative short-form self wxid.
-        name = self.dir.name
-        if name.startswith("wxid_"):
-            return name
-        return None
+        # Murmur stores decrypted dbs under .../Murmur/decrypted/<account_short>/.
+        # WeChat 4.x Name2Id uses the same short account id for messages sent by
+        # self, and it is not always wxid_* (for example: alias123456789).
+        name = self.dir.name.strip()
+        return name or None
 
     # --- contacts ---
 
