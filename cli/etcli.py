@@ -5661,39 +5661,61 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                         "log": steps_log,
                     })
 
-                # 1. Pre-flight: do NOT quit WeChat for the user. App Store
-                # WeChat can fail codesign while the executable is still mapped,
-                # and auto-quitting before a failing resign feels hostile. Ask
-                # the user to quit it explicitly, then sign only when it is gone.
-                steps_log.append("[1/4] 检查微信是否已退出…")
-                running = _paths.mac_running_weixin_processes()
-                if running:
-                    msg = (
-                        "重签名前请先手动退出 WeChat/微信，然后再点一次。"
-                        "Murmur 不会再自动关闭你的微信，避免签名失败时打断当前会话。"
-                    )
-                    return self._send_json({
-                        "ok": False,
-                        "error": msg,
-                        "stderr": "\n".join(running),
-                        "log": steps_log,
-                    })
+                # 1. Quit WeChat (graceful, then force).
+                # Restored from v0.3.17 — for Tencent direct-download WeChat
+                # (com.tencent.xinWeChat), auto-quitting is reliable and the
+                # whole flow just works. We previously refused to auto-quit out
+                # of App Store WeChat concerns, but that made users hand-quit
+                # then immediately fail because most don't fully kill helper
+                # processes — and lost a working flow for the 95% who run the
+                # Tencent build.
+                steps_log.append("[1/4] 退出微信…")
+                for app_name in ("WeChat", "Weixin", "微信"):
+                    subprocess.run(["osascript", "-e", f'try\n  tell application "{app_name}" to quit\nend try'],
+                                   capture_output=True, text=True, timeout=10)
+                _time.sleep(1.5)
+                subprocess.run(["pkill", "-x", "WeChat"], capture_output=True)
+                subprocess.run(["pkill", "-x", "Weixin"], capture_output=True)
+                _time.sleep(0.8)
 
-                # 2. Run codesign with admin privileges via osascript
+                # 2. Run codesign with admin privileges via osascript.
+                # Approach (minimal, tested working on macOS Sequoia 15 +
+                # WeChat 4.1.9): `codesign --force --sign - <main_exec>`.
+                # That's it. No --deep, no --remove-signature, no xattr strip.
+                # - We sign ONLY the main executable inside the bundle, not
+                #   the whole bundle. AMFI only checks the main exec when
+                #   deciding whether to permit task_for_pid(), so the helpers
+                #   and nested XPC services don't matter for our purpose.
+                # - --force replaces the existing signature in place without
+                #   needing to first --remove-signature (which on Sequoia/Tahoe
+                #   can blow up with "internal error in Code Signing subsystem"
+                #   on APFS-compressed Mach-Os).
+                # - NOT using --deep avoids walking into Tencent's vlc_plugins
+                #   and similar nested binaries that Apple's codesign refuses
+                #   to re-sign for opaque reasons ("internal error in Code
+                #   Signing subsystem In subcomponent: ...vlc_plugins/...").
+                # - --preserve-metadata=identifier,entitlements,requirements
+                #   keeps WeChat's bundle id + camera/microphone entitlements
+                #   + team requirements. flags and runtime are NOT in the
+                #   preserve list, so the new ad-hoc signature drops the
+                #   hardened-runtime flag — exactly what AMFI needs.
+                # SAFETY NET: `ditto` a backup of the main exec first; if
+                # codesign somehow leaves the exec empty/corrupt, the trap
+                # restores it via atomic `install -m 755`.
                 steps_log.append("[2/4] 重签名 (会弹 macOS 系统认证窗口，请输入开机密码)…")
-                # Modern macOS: plain `codesign --force --sign -` PRESERVES the existing
-                # flags (including hardened-runtime), which defeats the whole point.
-                # Fix: first wipe the signature, then ad-hoc re-sign without preserving
-                # flags. Use a chained shell command — osascript runs them as one
-                # admin-elevated subshell so the password prompt only appears once.
                 main_exec_q = shlex.quote(str(main_exec))
                 shell_cmd = (
-                    f"codesign --remove-signature {main_exec_q} && "
-                    "codesign --force --sign - "
-                    "--preserve-metadata=identifier,entitlements,requirements "
-                    f"{main_exec_q}"
+                    "set -e\n"
+                    f"target={main_exec_q}\n"
+                    'backup="$(/usr/bin/mktemp -t murmur-wechat-main)"\n'
+                    'trap \'if [ -f "$backup" ] && [ ! -s "$target" ]; then /usr/bin/install -m 755 "$backup" "$target"; fi; /bin/rm -f "$backup"\' EXIT\n'
+                    '/usr/bin/ditto "$target" "$backup"\n'
+                    '/bin/chmod 755 "$backup"\n'
+                    '/usr/bin/codesign --force --sign - --preserve-metadata=identifier,entitlements,requirements "$target"\n'
                 )
-                cmd = (f'do shell script "{shell_cmd}" with administrator privileges')
+                # AppleScript do-shell-script needs backslash + double-quote escaping
+                apple_shell_cmd = shell_cmd.replace("\\", "\\\\").replace('"', '\\"')
+                cmd = f'do shell script "{apple_shell_cmd}" with administrator privileges'
                 t0 = _time.time()
                 r = subprocess.run(["osascript", "-e", cmd],
                                    capture_output=True, text=True, timeout=120)

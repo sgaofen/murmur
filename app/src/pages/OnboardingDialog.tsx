@@ -974,16 +974,16 @@ function MacResignPrompt({ diag, onConsent, onPaste }: { diag: Diagnose; onConse
       <div className="et-serif" style={{ fontSize: 15, lineHeight: 1.7, color: 'var(--et-ink-soft)', marginBottom: 14 }}>
         macOS 默认给 WeChat 加了 <strong>hardened runtime</strong> 标记，导致系统拒绝任何调试器附加 ——
         所以也不能从内存里抓 SQLCipher 密钥。<br/>
-        但有个不需要关 SIP 的做法：<strong>先手动退出 WeChat，再给主程序重新做一次 ad-hoc 签名</strong>。
+        但有个不需要关 SIP 的做法：<strong>给主程序重新做一次 ad-hoc 签名</strong>。
       </div>
       <div style={{
         padding: '12px 14px', background: 'var(--et-paper-2)',
         border: '0.5px solid var(--et-line-2)', borderRadius: 8,
         fontSize: 13, color: 'var(--et-ink)', lineHeight: 1.85, marginBottom: 12,
       }}>
-        <div style={{ marginBottom: 8, fontWeight: 600 }}>请先手动退出 WeChat，然后点确认。我会做这几件事：</div>
+        <div style={{ marginBottom: 8, fontWeight: 600 }}>点确认后，我会做这几件事：</div>
         <ol style={{ margin: 0, paddingLeft: 20 }}>
-          <li style={{ marginBottom: 4 }}>确认 WeChat 已经完全退出；如果还在运行，会停下来提醒你，不会自动关闭</li>
+          <li style={{ marginBottom: 4 }}>自动退出 WeChat（先发 quit，再 pkill 兜底）</li>
           <li style={{ marginBottom: 4 }}>弹 macOS 系统认证窗 — <strong>输入开机密码</strong></li>
           <li style={{ marginBottom: 4 }}>对 WeChat 主可执行文件做 <code>codesign --remove-signature</code> + 重新 ad-hoc 签名</li>
           <li>重启 WeChat → <strong>停在你这里等你下一步</strong>，不会自动跑抓 key</li>
@@ -1003,7 +1003,7 @@ function MacResignPrompt({ diag, onConsent, onPaste }: { diag: Diagnose; onConse
         如果不想动 WeChat，下面有「手动粘贴密钥」的备选路径。
       </div>
       <CapabilityList diag={diag} />
-      <button onClick={onConsent} style={primaryBtn}>我已退出 WeChat，开始重签名</button>
+      <button onClick={onConsent} style={primaryBtn}>开始重签名</button>
       <button onClick={onPaste} style={{
         ...primaryBtn, marginTop: 8, background: 'transparent',
         color: 'var(--et-ink)', boxShadow: 'none',
