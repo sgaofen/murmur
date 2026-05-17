@@ -794,7 +794,7 @@ STOPWORDS.update("这个 那个 一下 还是 就是 没有 什么 怎么 为啥
 STOP_CHARS = set("的了是我你他她也都在就不和与这那一个有没啊吧呀嗯哦嘛呢吗哈呜哇噢哎唉哟唔嗷嘿哼啦喔把被让给从向对跟比又再才还但而或因所以之上下里外中后前时日年月来去到过")
 NON_TEXT = re.compile(r"\[[^\]]+\]")
 URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
-APP_VERSION = "0.4.2"
+APP_VERSION = "0.4.3"
 YEARBOOK_CACHE_VERSION = 6
 
 
@@ -5664,19 +5664,48 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 # 1. Quit WeChat (graceful, then force).
                 # Restored from v0.3.17 — for Tencent direct-download WeChat
                 # (com.tencent.xinWeChat), auto-quitting is reliable and the
-                # whole flow just works. We previously refused to auto-quit out
-                # of App Store WeChat concerns, but that made users hand-quit
-                # then immediately fail because most don't fully kill helper
-                # processes — and lost a working flow for the 95% who run the
-                # Tencent build.
+                # whole flow just works.
+                # WeChat 4.x has many helper processes (WeChatAppEx, crashpad_handler,
+                # wxocr, wxplayer, wxutility, *Helper, *Helper (GPU), *Helper (Renderer)
+                # etc.) that map Mach-O files inside the bundle. If ANY of them is
+                # still alive, codesign on the main exec returns
+                # `Operation not permitted (1)` because the binary is in use.
+                # `pkill -x WeChat` only matches the exact name "WeChat"; we also need
+                # `pkill -f /Applications/WeChat.app/` to catch every process whose
+                # command line lives inside the bundle (main, AppEx, all helpers,
+                # crashpad, wx* utilities). Same for Weixin.app.
                 steps_log.append("[1/4] 退出微信…")
-                for app_name in ("WeChat", "Weixin", "微信"):
+                for app_name in ("WeChat", "Weixin", "微信", "WeChatAppEx"):
                     subprocess.run(["osascript", "-e", f'try\n  tell application "{app_name}" to quit\nend try'],
                                    capture_output=True, text=True, timeout=10)
                 _time.sleep(1.5)
+                # First gentle SIGTERM across the whole bundle, then SIGKILL anyone
+                # who didn't take the hint. -f matches the full command line so we
+                # catch every helper/sub-process inside the .app.
+                for app_name in ("/Applications/WeChat.app/", "/Applications/Weixin.app/"):
+                    subprocess.run(["pkill", "-f", app_name], capture_output=True)
+                # Also catch the older `pkill -x` cases in case the app lives outside
+                # /Applications (dev/test installs).
                 subprocess.run(["pkill", "-x", "WeChat"], capture_output=True)
                 subprocess.run(["pkill", "-x", "Weixin"], capture_output=True)
-                _time.sleep(0.8)
+                _time.sleep(1.2)
+                for app_name in ("/Applications/WeChat.app/", "/Applications/Weixin.app/"):
+                    subprocess.run(["pkill", "-9", "-f", app_name], capture_output=True)
+                _time.sleep(0.6)
+                # Confirm everything WeChat-shaped is gone. If anything is left, the
+                # codesign step below will hit "Operation not permitted" — surface that
+                # to the user with a clear PID list instead of letting codesign fail.
+                still_alive = _paths.mac_running_weixin_processes()
+                if still_alive:
+                    return self._send_json({
+                        "ok": False,
+                        "error": (
+                            "已发 quit + pkill 但还有微信进程没退掉，无法重签名。"
+                            "请到「活动监视器」手动结束以下进程后再点重试，或重启电脑后立刻重试（不开微信）。"
+                        ),
+                        "stderr": "\n".join(still_alive),
+                        "log": steps_log,
+                    })
 
                 # 2. Run codesign with admin privileges via osascript.
                 # Approach (minimal, tested working on macOS Sequoia 15 +

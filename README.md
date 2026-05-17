@@ -6,7 +6,7 @@
 
 [下载最新版](https://github.com/sgaofen/murmur/releases/latest)
 
-当前推荐版本：`v0.4.2`
+当前推荐版本：`v0.4.3`
 
 ![Murmur 关系网总览](docs/screenshots/readme-graph-overview.png)
 
@@ -79,9 +79,9 @@ Intel Mac 暂时没有安装包，需要从源码运行。
 
 ## 视频教程
 
-- [Windows 微信安装视频](https://github.com/sgaofen/murmur/releases/download/v0.4.2/Murmur_Windows_install_tutorial.mp4)
-- [Windows QQ 安装视频](https://github.com/sgaofen/murmur/releases/download/v0.4.2/Murmur_QQ_install_tutorial.mp4)
-- [Mac 安装视频](https://github.com/sgaofen/murmur/releases/download/v0.4.2/Murmur_macOS_install_tutorial.mp4)
+- [Windows 微信安装视频](https://github.com/sgaofen/murmur/releases/download/v0.4.3/Murmur_Windows_install_tutorial.mp4)
+- [Windows QQ 安装视频](https://github.com/sgaofen/murmur/releases/download/v0.4.3/Murmur_QQ_install_tutorial.mp4)
+- [Mac 安装视频](https://github.com/sgaofen/murmur/releases/download/v0.4.3/Murmur_macOS_install_tutorial.mp4)
 
 ## Windows 安装（微信）
 
