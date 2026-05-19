@@ -282,7 +282,7 @@ export function GraphView({
       if (document.visibilityState === 'visible') {
         if (!lastFrame) lastFrame = t;
         const delta = t - lastFrame;
-        if (delta >= 33) {
+        if (delta >= 16) {
           setRotY(r => r + delta * 0.00008);
           lastFrame = t;
         }

@@ -327,9 +327,51 @@ export interface QQProfilesResponse {
   qq_running: boolean;
   qq_install: string | null;
   error?: string;
+  search_roots?: string[];
 }
 export async function getQQProfiles(): Promise<QQProfilesResponse> {
   return j('/api/qq/profiles');
+}
+
+export interface QQScanFound { path: string; qq_numbers: string[]; }
+export interface QQScanState {
+  running: boolean;
+  started_at: number | null;
+  finished_at: number | null;
+  drives_total: number;
+  drives_done: number;
+  current_path: string;
+  dirs_scanned: number;
+  found: QQScanFound[];
+  error: string | null;
+  cancelled: boolean;
+}
+
+export async function saveQQRoot(path: string): Promise<{
+  ok: boolean; saved?: string; profiles?: { qq_number: string; encrypted_root: string }[];
+  error?: string; search_roots?: string[];
+}> {
+  return j('/api/qq/save-root', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  });
+}
+
+export async function startQQScan(opts: { max_depth?: number } = {}): Promise<QQScanState & { ok: boolean; started?: boolean; already_running?: boolean }> {
+  return j('/api/qq/scan-disks', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(opts),
+  });
+}
+
+export async function getQQScanStatus(): Promise<QQScanState> {
+  return j('/api/qq/scan-disks/status');
+}
+
+export async function cancelQQScan(): Promise<{ ok: boolean; cancelled: boolean }> {
+  return j('/api/qq/scan-disks/cancel', { method: 'POST' });
 }
 
 export async function extractQQKey(timeout = 240): Promise<{ ok: boolean; key: string | null; log: string; error: string | null }> {
@@ -699,4 +741,4 @@ export async function openFolder(path?: string): Promise<{ ok: boolean; opened?:
   });
 }
 
-export const APP_VERSION = 'v0.4.1 · Murmur 微语';
+export const APP_VERSION = 'v0.4.2 · Murmur 微语';

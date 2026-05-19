@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+import sys
+import time
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
@@ -233,12 +235,91 @@ class QQStore:
         self._index_cache: Optional[tuple[dict[str, int], dict[str, int]]] = None
         self._heat_cache: Optional[Counter] = None
         self._earliest_ts_cached: Optional[int] = None
+        self._known_malformed: set = set()  # filenames that raised "malformed" — skip silently
+        # One-time post-decrypt step: add an index on column "40021" (peer/group
+        # uid) for c2c_msg_table + group_msg_table. Tencent's stock schema does
+        # NOT index this column even though every Murmur analysis path
+        # (sessions, friends list, graph, home-summary) groups/filters by it.
+        # On 10GB nt_msg.db this turns full-table scans (60s+) into index seeks.
+        # Idempotent + best-effort: if r/w open fails, we just continue with the
+        # original slow plan.
+        self._ensure_perf_indexes()
         # Eagerly resolve self_uid so callers reading `.me` (e.g. /api/info)
         # see a value without having to first hydrate the contacts cache.
         # Pre-set me=None before calling _resolve_self_uid (it reads self.me).
         self.me = me
         if self.me is None:
             self.me = self._resolve_self_uid()
+
+    def _ensure_perf_indexes(self) -> None:
+        """Add Murmur-specific indexes on nt_msg.db so analysis queries don't
+        full-scan a 10GB+ table. Runs once per QQStore instance, idempotent
+        across runs (CREATE INDEX IF NOT EXISTS).
+        """
+        nt_db = self.dir / "nt_msg.db"
+        try:
+            conn = sqlite3.connect(str(nt_db))
+        except sqlite3.Error as e:
+            sys.stderr.write(f"[qq_store] perf-index r/w open failed for {nt_db.name}: {e}\n")
+            return
+        try:
+            # Quick check: do our indexes already exist? Skip the CREATE if so
+            # (avoids touching the file on every app boot).
+            existing = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'murmur_%'"
+            ).fetchall()}
+            wanted = {
+                'murmur_c2c_40021': 'CREATE INDEX IF NOT EXISTS murmur_c2c_40021 ON c2c_msg_table("40021")',
+                'murmur_c2c_40021_40050': 'CREATE INDEX IF NOT EXISTS murmur_c2c_40021_40050 ON c2c_msg_table("40021","40050")',
+                'murmur_group_40021': 'CREATE INDEX IF NOT EXISTS murmur_group_40021 ON group_msg_table("40021")',
+                'murmur_group_40021_40050': 'CREATE INDEX IF NOT EXISTS murmur_group_40021_40050 ON group_msg_table("40021","40050")',
+            }
+            missing = [sql for name, sql in wanted.items() if name not in existing]
+            if not missing:
+                return
+            sys.stderr.write(f"[qq_store] building {len(missing)} perf index(es) on {nt_db.name} "
+                             f"(one-time, expect 10-60s for big DBs)...\n")
+            t0 = time.time()
+            for sql in missing:
+                try:
+                    conn.execute(sql)
+                except sqlite3.DatabaseError as e:
+                    # Table missing / schema mismatch / DB malformed — log and skip
+                    sys.stderr.write(f"[qq_store] skip index ({sql[:60]}...): {e}\n")
+            # ANALYZE so the query planner picks our new indexes immediately.
+            # Without this, the first few queries might still pick the original
+            # plan (e.g., the unique index on 40027 is "good enough" until stats
+            # show 40021 has higher selectivity).
+            try:
+                conn.execute("ANALYZE")
+            except sqlite3.DatabaseError:
+                pass
+            conn.commit()
+            sys.stderr.write(f"[qq_store] perf indexes built in {time.time()-t0:.1f}s\n")
+        except sqlite3.Error as e:
+            sys.stderr.write(f"[qq_store] perf-index pragma failed: {e}\n")
+        finally:
+            conn.close()
+
+    def _is_malformed(self, fname: str, e: BaseException) -> bool:
+        """Helper: detect SQLite 'database disk image is malformed' and log once.
+
+        Returns True if the error is a malformed corruption that the caller
+        should treat as 'no data' instead of propagating. Mirrors EchoStore's
+        equivalent so a corrupted decrypted QQ DB doesn't bring down the
+        whole HTTP API — graph / home-summary / friends just return empty.
+        """
+        if not isinstance(e, sqlite3.DatabaseError):
+            return False
+        if "malformed" not in str(e).lower():
+            return False
+        if fname not in self._known_malformed:
+            sys.stderr.write(
+                f"[qq_store] skipping malformed DB {fname} (will be ignored "
+                f"for the rest of this session)\n"
+            )
+            self._known_malformed.add(fname)
+        return True
 
     # --- connection ---
 
@@ -277,23 +358,32 @@ class QQStore:
         out: dict[str, Contact] = {}
         c = self._conn("profile_info.db")
         try:
-            buddy_uids = {r[0] for r in c.execute('SELECT "1000" FROM buddy_list').fetchall()
-                          if r[0]}
-            for row in c.execute(
-                'SELECT "1000", "1002", "20002", "20009" FROM profile_info_v6'
-            ).fetchall():
-                uid, qq_num, nickname, _signature = row
-                if not uid:
-                    continue
-                qq_str = str(qq_num) if qq_num else ""
-                out[uid] = Contact(
-                    username=uid,
-                    remark="",
-                    nick_name=(nickname or "").strip(),
-                    alias=qq_str,
-                    is_group=False,
-                    is_real_friend=(uid in buddy_uids),
-                )
+            try:
+                buddy_uids = {r[0] for r in c.execute('SELECT "1000" FROM buddy_list').fetchall()
+                              if r[0]}
+            except sqlite3.DatabaseError as e:
+                if not self._is_malformed("profile_info.db", e):
+                    raise
+                buddy_uids = set()
+            try:
+                for row in c.execute(
+                    'SELECT "1000", "1002", "20002", "20009" FROM profile_info_v6'
+                ).fetchall():
+                    uid, qq_num, nickname, _signature = row
+                    if not uid:
+                        continue
+                    qq_str = str(qq_num) if qq_num else ""
+                    out[uid] = Contact(
+                        username=uid,
+                        remark="",
+                        nick_name=(nickname or "").strip(),
+                        alias=qq_str,
+                        is_group=False,
+                        is_real_friend=(uid in buddy_uids),
+                    )
+            except sqlite3.DatabaseError as e:
+                if not self._is_malformed("profile_info.db", e):
+                    raise
             for uid in buddy_uids:
                 if uid not in out:
                     out[uid] = Contact(
@@ -307,9 +397,15 @@ class QQStore:
         try:
             c = self._conn("group_info.db")
             try:
-                for row in c.execute(
-                    'SELECT "60001", "60007", "60002", "60006" FROM group_detail_info_ver1'
-                ).fetchall():
+                try:
+                    rows = c.execute(
+                        'SELECT "60001", "60007", "60002", "60006" FROM group_detail_info_ver1'
+                    ).fetchall()
+                except sqlite3.DatabaseError as e:
+                    if not self._is_malformed("group_info.db", e):
+                        raise
+                    rows = []
+                for row in rows:
                     gnum, name, _owner_uid, _members = row
                     if gnum is None:
                         continue
@@ -352,10 +448,16 @@ class QQStore:
         c = self._conn("nt_msg.db")
         try:
             # c2c sessions: peer uid is in column 40021 (TEXT)
-            for peer_uid, last_ts in c.execute(
-                'SELECT "40021", MAX("40050") FROM c2c_msg_table '
-                'WHERE "40021" IS NOT NULL GROUP BY "40021"'
-            ).fetchall():
+            try:
+                c2c_rows = c.execute(
+                    'SELECT "40021", MAX("40050") FROM c2c_msg_table '
+                    'WHERE "40021" IS NOT NULL GROUP BY "40021"'
+                ).fetchall()
+            except sqlite3.DatabaseError as e:
+                if not self._is_malformed("nt_msg.db (c2c_msg_table)", e):
+                    raise
+                c2c_rows = []
+            for peer_uid, last_ts in c2c_rows:
                 if not peer_uid:
                     continue
                 ct = contacts.get(peer_uid)
@@ -367,10 +469,16 @@ class QQStore:
                     is_group=False,
                 ))
             # group sessions: 40021 is the group number (TEXT)
-            for gnum, last_ts in c.execute(
-                'SELECT "40021", MAX("40050") FROM group_msg_table '
-                'WHERE "40021" IS NOT NULL GROUP BY "40021"'
-            ).fetchall():
+            try:
+                group_rows = c.execute(
+                    'SELECT "40021", MAX("40050") FROM group_msg_table '
+                    'WHERE "40021" IS NOT NULL GROUP BY "40021"'
+                ).fetchall()
+            except sqlite3.DatabaseError as e:
+                if not self._is_malformed("nt_msg.db (group_msg_table)", e):
+                    raise
+                group_rows = []
+            for gnum, last_ts in group_rows:
                 if not gnum:
                     continue
                 uname = f"{gnum}{GROUP_SUFFIX}"
@@ -400,10 +508,15 @@ class QQStore:
             peer_id = username
         c = self._conn("nt_msg.db")
         try:
-            row = c.execute(
-                f'SELECT COUNT(*) FROM {table} WHERE "40021" = ?', (peer_id,)
-            ).fetchone()
-            return int(row[0]) if row else 0
+            try:
+                row = c.execute(
+                    f'SELECT COUNT(*) FROM {table} WHERE "40021" = ?', (peer_id,)
+                ).fetchone()
+                return int(row[0]) if row else 0
+            except sqlite3.DatabaseError as e:
+                if not self._is_malformed(f"nt_msg.db ({table})", e):
+                    raise
+                return 0
         finally:
             c.close()
 
@@ -443,29 +556,49 @@ class QQStore:
                f'FROM {table} WHERE ' + " AND ".join(wheres) +
                ' ORDER BY "40050" ASC')
 
+        # Stream rows via cursor so a corrupt page mid-iteration only kills
+        # the rest of THAT iteration, not the call. Collect what we can,
+        # log once, and return whatever survived.
+        out: list[Message] = []
         c = self._conn("nt_msg.db")
         try:
-            rows = c.execute(sql, params).fetchall()
+            try:
+                cursor = c.execute(sql, params)
+            except sqlite3.DatabaseError as e:
+                if not self._is_malformed(f"nt_msg.db ({table})", e):
+                    raise
+                cursor = None
+            if cursor is not None:
+                while True:
+                    try:
+                        row = cursor.fetchone()
+                    except sqlite3.DatabaseError as e:
+                        if not self._is_malformed(f"nt_msg.db ({table}) mid-iteration", e):
+                            raise
+                        break  # can't recover position once cursor faults
+                    if row is None:
+                        break
+                    msg_id, sender_uid, ts, type_tag, content_blob, group_disp = row
+                    if msg_id is None or ts is None:
+                        continue
+                    try:
+                        text, wx_type, label = _render_content(type_tag or 0, content_blob)
+                    except Exception:
+                        continue  # render bug shouldn't drop the whole call
+                    if text_only and wx_type != 1:
+                        continue
+                    canonical = "self" if (sender_uid and sender_uid == self_uid) else (sender_uid or "")
+                    sender_name = resolve_name(canonical, group_disp)
+                    out.append(Message(
+                        create_time=int(ts),
+                        sender_wxid=canonical,
+                        sender_name=sender_name,
+                        msg_type=wx_type,
+                        text=text,
+                        raw_type_label=label,
+                    ))
         finally:
             c.close()
-
-        out: list[Message] = []
-        for msg_id, sender_uid, ts, type_tag, content_blob, group_disp in rows:
-            if msg_id is None or ts is None:
-                continue
-            text, wx_type, label = _render_content(type_tag or 0, content_blob)
-            if text_only and wx_type != 1:
-                continue
-            canonical = "self" if (sender_uid and sender_uid == self_uid) else (sender_uid or "")
-            sender_name = resolve_name(canonical, group_disp)
-            out.append(Message(
-                create_time=int(ts),
-                sender_wxid=canonical,
-                sender_name=sender_name,
-                msg_type=wx_type,
-                text=text,
-                raw_type_label=label,
-            ))
 
         if limit:
             n = max(0, int(limit))
@@ -488,17 +621,29 @@ class QQStore:
         out_last: dict[str, int] = {}
         c = self._conn("nt_msg.db")
         try:
-            for peer, n, last in c.execute(
-                'SELECT "40021", COUNT(*), MAX("40050") FROM c2c_msg_table '
-                'WHERE "40021" IS NOT NULL GROUP BY "40021"'
-            ).fetchall():
+            try:
+                c2c = c.execute(
+                    'SELECT "40021", COUNT(*), MAX("40050") FROM c2c_msg_table '
+                    'WHERE "40021" IS NOT NULL GROUP BY "40021"'
+                ).fetchall()
+            except sqlite3.DatabaseError as e:
+                if not self._is_malformed("nt_msg.db (c2c index)", e):
+                    raise
+                c2c = []
+            for peer, n, last in c2c:
                 if peer:
                     out_counts[peer] = int(n or 0)
                     out_last[peer] = int(last or 0)
-            for gnum, n, last in c.execute(
-                'SELECT "40021", COUNT(*), MAX("40050") FROM group_msg_table '
-                'WHERE "40021" IS NOT NULL GROUP BY "40021"'
-            ).fetchall():
+            try:
+                grp = c.execute(
+                    'SELECT "40021", COUNT(*), MAX("40050") FROM group_msg_table '
+                    'WHERE "40021" IS NOT NULL GROUP BY "40021"'
+                ).fetchall()
+            except sqlite3.DatabaseError as e:
+                if not self._is_malformed("nt_msg.db (group index)", e):
+                    raise
+                grp = []
+            for gnum, n, last in grp:
                 if gnum:
                     uname = f"{gnum}{GROUP_SUFFIX}"
                     out_counts[uname] = int(n or 0)

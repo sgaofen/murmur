@@ -424,6 +424,7 @@ class EchoStore:
         self._contacts: Optional[dict[str, Contact]] = None
         self._sessions: Optional[list[Session]] = None
         self._msg_db_for_session: dict[str, str] = {}  # username → msg_*.db filename
+        self._known_malformed: set[str] = set()  # filenames that raised "malformed" — skip silently
         self._zstd = None
 
     # --- connection helpers ---
@@ -465,6 +466,7 @@ class EchoStore:
         # Murmur stores decrypted dbs under .../Murmur/decrypted/<account_short>/.
         # WeChat 4.x Name2Id uses the same short account id for messages sent by
         # self, and it is not always wxid_* (for example: alias123456789).
+        # See PR #18 (CardLos19).
         name = self.dir.name.strip()
         return name or None
 
@@ -538,11 +540,20 @@ class EchoStore:
         found: list[str] = []
         for fname in sorted(p.name for p in self.dir.glob("message_*.db")
                             if "_fts" not in p.name and "_resource" not in p.name and "biz_" not in p.name):
+            if fname in self._known_malformed:
+                continue
             c = self._conn(fname)
             try:
                 exists = c.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
                 ).fetchone()
+            except sqlite3.DatabaseError as e:
+                if "malformed" in str(e).lower():
+                    if fname not in self._known_malformed:
+                        sys.stderr.write(f"[store] skipping malformed DB {fname} (will be ignored for the rest of this session)\n")
+                        self._known_malformed.add(fname)
+                    continue
+                raise
             finally:
                 c.close()
             if exists:
@@ -656,6 +667,13 @@ class EchoStore:
                     sender_name = resolve_name(sender_wxid)
                     text = self._render_content(mtype, content, is_group)
                     all_rows.append((ts, mtype, sender_wxid, sender_name, text))  # type: ignore[arg-type]
+            except sqlite3.DatabaseError as e:
+                if "malformed" in str(e).lower():
+                    if fname not in self._known_malformed:
+                        sys.stderr.write(f"[store] skipping malformed DB {fname} mid-iteration (will be ignored for the rest of this session)\n")
+                        self._known_malformed.add(fname)
+                    continue
+                raise
             finally:
                 c.close()
 
@@ -4046,12 +4064,24 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
 
     def _send_json(self, payload, status=200):
         body = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self._send_cors_headers()
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self._send_cors_headers()
+            self.end_headers()
+            self.wfile.write(body)
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, OSError) as ce:
+            # Client gave up waiting (10053 / EPIPE) — common on slow endpoints
+            # (large /api/friends, graph build on 10GB nt_msg.db). Don't pollute
+            # the log with double tracebacks; just note and move on.
+            try:
+                sys.stderr.write(
+                    f"[etcli] client closed connection mid-response on {self.path}: "
+                    f"{type(ce).__name__}\n"
+                )
+            except Exception:
+                pass
 
     def do_OPTIONS(self):  # noqa: N802
         if not self._origin_allowed():
@@ -4060,13 +4090,36 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         self._send_cors_headers()
         self.end_headers()
 
+    def _send_exception_response(self, e: Exception):
+        msg = str(e)
+        if isinstance(e, sqlite3.DatabaseError) and "malformed" in msg.lower():
+            cls = self.__class__
+            plat = getattr(cls, "_active_platform", "wechat")
+            if plat == "qq":
+                hint_dir = "~/Documents/Murmur/decrypted_qq/<QQ号>/"
+                action = "重新登录 QQ 后再让 Murmur 重新抓 key + 解密"
+            else:
+                hint_dir = "~/Documents/Murmur/decrypted/<wxid>/"
+                action = "「设置 → 重新解密」强制刷新一次"
+            self._send_json({
+                "error": "database_malformed",
+                "type": type(e).__name__,
+                "message": (
+                    f"解密后的某个 {plat.upper()} 数据库文件损坏（SQLite: database disk image is malformed）。"
+                    f"请尝试 {action}。如果仍报错，把 {hint_dir} 目录截图发给作者排查。"
+                ),
+                "detail": msg,
+            }, status=503)
+            return
+        self._send_json({"error": msg, "type": type(e).__name__}, status=500)
+
     def do_GET(self):  # noqa: N802
         try:
             if not self._origin_allowed():
                 return self._send_json({"error": "origin_not_allowed"}, 403)
             self._dispatch_get()
         except Exception as e:
-            self._send_json({"error": str(e), "type": type(e).__name__}, status=500)
+            self._send_exception_response(e)
 
     def do_POST(self):  # noqa: N802
         try:
@@ -4074,7 +4127,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 return self._send_json({"error": "origin_not_allowed"}, 403)
             self._dispatch_post()
         except Exception as e:
-            self._send_json({"error": str(e), "type": type(e).__name__}, status=500)
+            self._send_exception_response(e)
 
     def _dispatch_get(self):
         url = urllib.parse.urlparse(self.path)
@@ -6122,7 +6175,11 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 "profiles": out,
                 "qq_running": bool(_qpaths.qq_running_pids()),
                 "qq_install": str(_qpaths.find_qq_install_dir()) if _qpaths.find_qq_install_dir() else None,
+                "search_roots": [str(p) for p in _qpaths.qq_search_paths()],
             })
+
+        if path == "/api/qq/scan-disks/status":
+            return self._send_json(_qpaths.get_qq_scan_state())
 
         return self._send_json({"error": "unknown qq endpoint", "path": path}, 404)
 
@@ -6137,6 +6194,56 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             opts = json.loads(body.decode("utf-8") or "{}")
         except json.JSONDecodeError:
             opts = {}
+
+        if path == "/api/qq/save-root":
+            root = (opts.get("path") or "").strip()
+            if not root:
+                return self._send_json({"ok": False, "error": "path required"}, 400)
+            try:
+                saved = _qpaths.save_qq_root(root)
+                profiles = _qpaths.discover_qq_profiles()
+                matched = [
+                    {
+                        "qq_number": p.qq_number,
+                        "encrypted_root": str(p.nt_db_dir),
+                        "tencent_files_root": str(p.tencent_files_root),
+                    }
+                    for p in profiles
+                ]
+                if not matched:
+                    return self._send_json({
+                        "ok": False,
+                        "saved": str(saved),
+                        "error": "已保存路径，但里面没找到 <QQ号>/nt_qq/nt_db/nt_msg.db。请确认你粘的是 Tencent Files 文件夹。",
+                        "search_roots": [str(p) for p in _qpaths.qq_search_paths()],
+                    })
+                return self._send_json({
+                    "ok": True,
+                    "saved": str(saved),
+                    "profiles": matched,
+                    "search_roots": [str(p) for p in _qpaths.qq_search_paths()],
+                })
+            except Exception as e:
+                return self._send_json({"ok": False, "error": f"{type(e).__name__}: {e}"}, 500)
+
+        if path == "/api/qq/scan-disks":
+            state = _qpaths.get_qq_scan_state()
+            if state.get("running"):
+                return self._send_json({"ok": True, "already_running": True, **state})
+            max_depth = int(opts.get("max_depth", 8))
+            max_depth = max(2, min(20, max_depth))
+            import threading as _th
+            t = _th.Thread(
+                target=_qpaths.scan_for_qq_data_async,
+                kwargs={"max_depth": max_depth},
+                daemon=True,
+            )
+            t.start()
+            return self._send_json({"ok": True, "started": True})
+
+        if path == "/api/qq/scan-disks/cancel":
+            _qpaths.cancel_qq_scan()
+            return self._send_json({"ok": True, "cancelled": True})
 
         if path == "/api/qq/extract-key":
             timeout = int(opts.get("timeout", 240))
@@ -6744,6 +6851,16 @@ def build_relationship_graph(store: EchoStore, *,
     # Track per-pair, per-group counts so we can dampen large-group noise after collection.
     mutual_reply_per_group: dict[str, dict[tuple[str, str], int]] = {}
 
+    # Time-bound group message reads to `recent_days` window. For 10GB+ QQ
+    # nt_msg.db this turns "scan every message in every group ever" into a
+    # bounded window. Mutual-reply detection only needs recent activity to
+    # surface live relationships; ancient history doesn't change the graph.
+    _now_ts = int(datetime.now(CST).timestamp())
+    _msg_since = _now_ts - recent_days * 86400 if recent_days else None
+    # Per-group message cap: protect against pathological 500K+ message groups.
+    # Mutual-reply counts are capped later anyway (per_pair_cap ~20), so reading
+    # the first 50K recent messages already captures every meaningful pair.
+    _PER_GROUP_MAX = 50000
     for s in sessions:
         if not s.is_group:
             continue
@@ -6751,8 +6868,9 @@ def build_relationship_graph(store: EchoStore, *,
         per_user: dict[str, int] = {}
         prev_msgs: list[tuple[int, str]] = []
         per_group_pairs: dict[tuple[str, str], int] = {}
+        msgs_processed = 0
 
-        for m in store.messages(s.username, text_only=False):
+        for m in store.messages(s.username, text_only=False, since=_msg_since):
             if m.sender_wxid == "self" or not m.sender_wxid:
                 continue
             senders.add(m.sender_wxid)
@@ -6765,6 +6883,10 @@ def build_relationship_graph(store: EchoStore, *,
                     a, b = sorted([m.sender_wxid, prev_wxid])
                     per_group_pairs[(a, b)] = per_group_pairs.get((a, b), 0) + 1
             prev_msgs.append((m.create_time, m.sender_wxid))
+
+            msgs_processed += 1
+            if msgs_processed >= _PER_GROUP_MAX:
+                break
 
         if senders:
             group_members[s.username] = senders

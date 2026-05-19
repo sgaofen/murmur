@@ -97,6 +97,8 @@ Intel Mac 暂时没有安装包，需要从源码运行。
 
 走完微信流程后，顶栏点「+ 添加新账号 → 🐧 QQ」（或 Welcome 页底部「🐧 切换到 QQ」）。具体见 QQ 安装视频。
 
+> ⚠️ **开始前先把电脑端 QQ 完全退出**：手机 QQ 上点登录设备 → 退出电脑端 QQ → 再确认电脑端 QQ 没在后台跑（任务管理器搜 `QQ.exe` / `QQEX.exe` 全部杀掉）。否则 Murmur 启动的带调试器 QQ 会被已登录的实例抢走，抓不到 key。
+
 ## Mac 安装
 
 1. 双击 `Murmur_macOS_AppleSilicon.dmg`。

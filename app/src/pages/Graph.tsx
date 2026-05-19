@@ -288,8 +288,18 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
     setLoading(true);
     setData(null);
     fetch(`${API_BASE}/api/graph?scope=private&top_n=${topN}`)
-      .then(r => r.json())
-      .then((bg: BackendGraph) => {
+      .then(async r => {
+        const body = await r.json().catch(() => null);
+        if (!r.ok) {
+          const msg = (body && (body.message || body.error)) || `HTTP ${r.status}`;
+          throw new Error(`后端返回错误：${msg}`);
+        }
+        return body;
+      })
+      .then((bg: BackendGraph | null) => {
+        if (!bg || !Array.isArray(bg.nodes) || !Array.isArray(bg.edges)) {
+          throw new Error('关系图数据格式异常（缺少 nodes/edges 字段）。可能是缓存损坏 —— 在「设置 → 重建缓存」里点一下试试。');
+        }
         setBackendNodes(bg.nodes);
         setData(layoutNodes(bg));
         setLoading(false);
