@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 import sys
+import threading
 import time
 from collections import Counter
 from dataclasses import dataclass
@@ -251,17 +252,31 @@ class QQStore:
         if self.me is None:
             self.me = self._resolve_self_uid()
 
+    # Process-wide lock around the perf-index build. Multiple parallel
+    # /api/qq/* requests on app boot can each instantiate a QQStore (Murmur's
+    # frontend fires several endpoints in parallel), and without this they
+    # race to CREATE INDEX on the same nt_msg.db and one fails with
+    # "database is locked". Reported in #24 (FurLC).
+    _INDEX_LOCK = threading.Lock()
+
     def _ensure_perf_indexes(self) -> None:
         """Add Murmur-specific indexes on nt_msg.db so analysis queries don't
         full-scan a 10GB+ table. Runs once per QQStore instance, idempotent
         across runs (CREATE INDEX IF NOT EXISTS).
         """
         nt_db = self.dir / "nt_msg.db"
-        try:
-            conn = sqlite3.connect(str(nt_db))
-        except sqlite3.Error as e:
-            sys.stderr.write(f"[qq_store] perf-index r/w open failed for {nt_db.name}: {e}\n")
-            return
+        # Serialize concurrent builders. The first arrival builds; everyone
+        # else, after acquiring the lock, sees indexes already exist and
+        # exits the loop early.
+        with self.__class__._INDEX_LOCK:
+            try:
+                conn = sqlite3.connect(str(nt_db), timeout=30)
+            except sqlite3.Error as e:
+                sys.stderr.write(f"[qq_store] perf-index r/w open failed for {nt_db.name}: {e}\n")
+                return
+            self._build_perf_indexes(conn, nt_db)
+
+    def _build_perf_indexes(self, conn, nt_db) -> None:
         try:
             # Quick check: do our indexes already exist? Skip the CREATE if so
             # (avoids touching the file on every app boot).
@@ -324,6 +339,12 @@ class QQStore:
     # --- connection ---
 
     def _conn(self, fname: str) -> sqlite3.Connection:
+        # NOTE: do NOT install a Python text_factory here. It triggers per-row
+        # Python callbacks for every TEXT cell, which for 5M+ message rows
+        # adds 30× overhead vs the default C-level UTF-8 decode (verified on
+        # 25GB synth: graph build 9.9s → 337s with a callable text_factory).
+        # Non-UTF-8 bytes in column 40090 (#24) are handled at the row level
+        # in messages() instead — read as bytes there, decode with replace.
         return sqlite3.connect(f"file:{(self.dir / fname).as_posix()}?mode=ro", uri=True)
 
     # --- self uid ---
@@ -552,7 +573,13 @@ class QQStore:
         if until is not None:
             wheres.append('"40050" <= ?')
             params.append(int(until))
-        sql = (f'SELECT "40001", "40020", "40050", "40005", "40800", "40090" '
+        # CAST the two TEXT columns (40020 sender_uid, 40090 group_disp) to BLOB
+        # so sqlite returns bytes, not Python str. We decode them ourselves with
+        # errors='replace' below — needed because real QQNT data occasionally
+        # has non-UTF-8 bytes in 40090 (sender display name from raw GBK etc).
+        # CAST is C-level fast (no Python callback per row), unlike installing a
+        # text_factory which adds 30× overhead on 5M+ row reads. (#24 FurLC)
+        sql = (f'SELECT "40001", CAST("40020" AS BLOB), "40050", "40005", "40800", CAST("40090" AS BLOB) '
                f'FROM {table} WHERE ' + " AND ".join(wheres) +
                ' ORDER BY "40050" ASC')
 
@@ -578,9 +605,21 @@ class QQStore:
                         break  # can't recover position once cursor faults
                     if row is None:
                         break
-                    msg_id, sender_uid, ts, type_tag, content_blob, group_disp = row
+                    msg_id, sender_uid_bytes, ts, type_tag, content_blob, group_disp_bytes = row
                     if msg_id is None or ts is None:
                         continue
+                    # Decode TEXT-as-BLOB columns with replace fallback.
+                    # bytes.decode('utf-8', errors='replace') is C-level fast,
+                    # so the per-row cost is one C call vs the Python lambda
+                    # overhead a text_factory would impose.
+                    if isinstance(sender_uid_bytes, bytes):
+                        sender_uid = sender_uid_bytes.decode('utf-8', errors='replace')
+                    else:
+                        sender_uid = sender_uid_bytes or ""
+                    if isinstance(group_disp_bytes, bytes):
+                        group_disp = group_disp_bytes.decode('utf-8', errors='replace')
+                    else:
+                        group_disp = group_disp_bytes or ""
                     try:
                         text, wx_type, label = _render_content(type_tag or 0, content_blob)
                     except Exception:
