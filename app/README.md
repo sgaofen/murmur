@@ -1,73 +1,24 @@
-# React + TypeScript + Vite
+# Murmur 前端（`app/`）
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Murmur 桌面端的 **Tauri + React + TypeScript** 前端。
+- `src/` — React 组件、页面、状态（`components/`、`pages/`、`data/`、`utils/`）
+- `src-tauri/` — Rust 端：命令、窗口、打包配置（`tauri.conf.json`）
+- `scripts/` — 后端打包与 Tauri 构建脚本
+- 聊天分析用的 Python CLI 后端在仓库根目录的 `cli/`，由 `scripts/bundle-backend.mjs` 打进桌面包
 
-Currently, two official plugins are available:
+## 开发
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm ci              # 按 package-lock.json 严格安装依赖
+npm run dev         # 仅前端热更新（Vite，在浏览器里调 UI）
+npm run tauri:dev   # 完整桌面应用（Tauri 起 Rust 壳 + 前端）
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+## 构建
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm run build       # 类型检查 + 前端产物：tsc -b && vite build → dist/
+npm run tauri:build # 打包桌面安装包：先 backend:bundle，再 tauri build
 ```
+
+发布安装包由 GitHub Actions（`.github/workflows/release-build.yml`）在推送 `v*` tag 时自动构建。
