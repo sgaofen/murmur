@@ -10,7 +10,19 @@
 
 ![Murmur 关系网总览](docs/screenshots/readme-graph-overview.png)
 
-## v0.4.0 新增
+## 更新日志
+
+### v0.4.3 — Mac 重签名补丁
+- 修复 Sequoia 上 codesign `Operation not permitted (1)`：重签名前彻底退出微信全部 helper / crashpad / wx* 进程（旧版只杀主进程，helper 仍映射 bundle 内 Mach-O，导致改不动主二进制）。
+
+### v0.4.2 — Mac 重签名 + Windows QQ 大库性能
+- **Mac**：修复 Sequoia (15+) 微信重签名失败导致装不上的根因（放弃 `--remove-signature`）。
+- **Windows**：10GB+ QQ `nt_msg.db` 首次加载自动建 4 个索引，关系网 / 首页加载从 ~4 分钟超时降到 10 秒内（#24，最高约 85×）。
+
+### v0.4.1
+- Win + Mac 稳定版：QQ NT 导入向导 + 安装 / QQ 导入视频教程。
+
+### v0.4.0
 
 - **年度总览** — 跨所有朋友的「Spotify Wrapped」：Top 5、月度冠军、最忙的一天、最长连续聊天、24×7 热力图、深夜之王、最对等的关系、谁先开聊、口头禅、走丢的人。Home 顶栏 📅 进入。
 - **双人关系档案导出** — Murmur 独有：导出朋友 A 与朋友 B 之间的完整关系（共群对话 + 朋友圈互动 + 你私聊里互相提及 + 各自和你的对话样本），三种格式（MD/JSON/HTML）。Friend 页关联朋友卡片每条朋友右侧 📤 一键。
@@ -66,8 +78,8 @@ Murmur 把每个朋友的样本消息 + 离线证据 + 数据指纹（最长连�
 
 Windows 用户：
 
-- 推荐：`Murmur_0.4.1_x64-setup.exe`
-- 备用：`Murmur_0.4.1_x64_en-US.msi`
+- 推荐：`Murmur_0.4.3_x64-setup.exe`
+- 备用：`Murmur_0.4.3_x64_en-US.msi`
 
 Mac 用户：
 
@@ -85,7 +97,7 @@ Intel Mac 暂时没有安装包，需要从源码运行。
 
 ## Windows 安装（微信）
 
-1. 双击 `Murmur_0.4.1_x64-setup.exe`，按引导装。
+1. 双击 `Murmur_0.4.3_x64-setup.exe`，按引导装。
 2. 打开微信，**退出登录回到登录页，但不要关闭微信进程**。
 3. 打开 Murmur，点「开始抓密钥」。
 4. 看到等待提示后，回微信扫码登录一次。
