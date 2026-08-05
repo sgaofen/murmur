@@ -6,11 +6,18 @@
 
 [下载最新版](https://github.com/sgaofen/murmur/releases/latest)
 
-当前推荐版本：`v0.4.3`
+当前推荐版本：`v0.4.4`
 
 ![Murmur 关系网总览](docs/screenshots/readme-graph-overview.png)
 
 ## 更新日志
+
+### v0.4.4 — 手动填路径找不到数据 + QQ 索引并发
+
+- **手动粘贴微信路径仍提示「找不到 wxid_*/db_storage」**（Windows 为主，Mac 同样受影响）。两个独立原因：
+  - 识别逻辑只认一组**固定**的目录名（`Tencent/xwechat_files` 等）。微信「文件管理」里显示的是你自己选的存储目录，只要不叫这几个名字之一——`WeChat\`、`Weixin\`、`微信文件\`、任何自定义名——粘贴的路径完全正确也会被判定为找不到。实测 8 种常见布局有 5 种失败。现在改为在你给的路径下有界搜索，任何层级结构都能认出来。
+  - 微信号别名以 `all` 开头的账号（如 `allen_9f3a`）被误当成微信自带的 `all_users` 共享目录跳过，导致**无论粘贴哪一层都找不到**。
+- **QQ**：修复首次加载时多个请求并发建索引互相撞锁，导致索引被跳过、大库性能优化白做的问题（#24 后续）。
 
 ### v0.4.3 — Mac 重签名补丁
 - 修复 Sequoia 上 codesign `Operation not permitted (1)`：重签名前彻底退出微信全部 helper / crashpad / wx* 进程（旧版只杀主进程，helper 仍映射 bundle 内 Mach-O，导致改不动主二进制）。
@@ -78,8 +85,8 @@ Murmur 把每个朋友的样本消息 + 离线证据 + 数据指纹（最长连�
 
 Windows 用户：
 
-- 推荐：`Murmur_0.4.3_x64-setup.exe`
-- 备用：`Murmur_0.4.3_x64_en-US.msi`
+- 推荐：`Murmur_0.4.4_x64-setup.exe`
+- 备用：`Murmur_0.4.4_x64_en-US.msi`
 
 Mac 用户：
 
@@ -97,7 +104,7 @@ Intel Mac 暂时没有安装包，需要从源码运行。
 
 ## Windows 安装（微信）
 
-1. 双击 `Murmur_0.4.3_x64-setup.exe`，按引导装。
+1. 双击 `Murmur_0.4.4_x64-setup.exe`，按引导装。
 2. 打开微信，**退出登录回到登录页，但不要关闭微信进程**。
 3. 打开 Murmur，点「开始抓密钥」。
 4. 看到等待提示后，回微信扫码登录一次。
