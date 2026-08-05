@@ -18,6 +18,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -427,6 +428,7 @@ _IGNORED_WECHAT_ACCOUNT_DIRS = {
     "xwechat_files",
     "wechat files",
     "all_users",
+    "all users",
     "backup",
     "old_backup",
     "app_data",
@@ -442,7 +444,12 @@ def _looks_like_account_dir(p: Path) -> bool:
     except (PermissionError, OSError):
         return False
     name = p.name.lower()
-    if name in _IGNORED_WECHAT_ACCOUNT_DIRS or name.startswith("all"):
+    # Exact matches only. This used to also reject anything starting with "all",
+    # which was meant for `all_users` but silently swallowed real accounts whose
+    # WeChat alias happens to start with those letters (allen_9f3a, ally_1a2b …).
+    # Such a user could paste the correct path at every level and still be told
+    # nothing was found — `all_users`/`all users` are in the set above instead.
+    if name in _IGNORED_WECHAT_ACCOUNT_DIRS:
         return False
     try:
         return (p / "db_storage").is_dir()
@@ -584,6 +591,36 @@ def _wechat_root_config_paths() -> list[Path]:
             out.extend(_windows_xwechat_variants(p))
         else:
             out.append(p)
+    return _dedupe_paths(out)
+
+
+def _user_supplied_roots() -> list[Path]:
+    """Paths the user explicitly handed us — normalised, but NOT fanned out into
+    the hardcoded wrapper variants.
+
+    `_wechat_root_config_paths()` expands each saved path into a fixed list of
+    plausible layouts (`Tencent/xwechat_files`, `Documents/xwechat_files`, …).
+    That list cannot cover every folder name people pick, so we keep the bare
+    user path around too and search under it directly — see
+    `_descend_for_account_dirs`.
+    """
+    raws: list[str] = []
+    env_raw = os.environ.get("MURMUR_WECHAT_ROOT", "").strip()
+    if env_raw:
+        raws.extend(env_raw.split(os.pathsep))
+    cfg = load_config()
+    saved = cfg.get("wechat_roots", [])
+    if isinstance(saved, str):
+        saved = [saved]
+    if isinstance(saved, list):
+        raws.extend(x for x in saved if isinstance(x, str))
+
+    out: list[Path] = []
+    for raw in raws:
+        raw = raw.strip().strip('"')
+        if not raw:
+            continue
+        out.append(_normalize_user_root(Path(os.path.expandvars(os.path.expanduser(raw)))))
     return _dedupe_paths(out)
 
 
@@ -898,6 +935,58 @@ def _safe_listdir(p: Path, timeout_s: float = 1.5) -> Optional[list[Path]]:
     return result["entries"]
 
 
+def _descend_for_account_dirs(
+    root: Path,
+    *,
+    max_depth: int = 4,
+    budget: int = 3000,
+    deadline_s: float = 8.0,
+) -> list[Path]:
+    """Bounded breadth-first search under a USER-SUPPLIED root for account dirs.
+
+    Only called on paths the user typed, and only after the shallow lookup came
+    up empty. `_windows_xwechat_variants` enumerates a fixed set of wrapper
+    names, so someone who keeps WeChat under `D:\\Weixin\\`, `D:\\微信文件\\`
+    or `D:\\data\\wx\\` pastes a perfectly correct path and is still told
+    nothing was found — the single most confusing failure this UI can produce.
+    Walking a few levels down handles any layout without another round of
+    whack-a-mole on folder names.
+
+    Bounded on depth, directories visited AND wall clock so pasting `D:\\`
+    degrades into a quick shallow look rather than a whole-drive crawl; that job
+    belongs to /api/scan-disks. The wall clock matters independently: every
+    listdir here can burn up to `_safe_listdir`'s own 1.5s timeout, so a budget
+    counted only in directories could still stall the request for minutes on a
+    dying disk or a disconnected network drive. Account dirs are not descended
+    into — WeChat data holds tens of thousands of media files and nothing we
+    want is below that level.
+    """
+    found: list[Path] = []
+    visited = 0
+    started = time.monotonic()
+    frontier: list[tuple[Path, int]] = [(root, 0)]
+    while frontier and visited < budget:
+        if time.monotonic() - started > deadline_s:
+            break
+        cur, depth = frontier.pop(0)
+        entries = _safe_listdir(cur)
+        if entries is None:  # TCC-blocked or hung — skip, don't fail the walk
+            continue
+        visited += 1
+        for entry in entries:
+            try:
+                if not entry.is_dir():
+                    continue
+            except (PermissionError, OSError):
+                continue
+            if _looks_like_account_dir(entry):
+                found.append(entry)
+                continue
+            if depth + 1 <= max_depth and entry.name.lower() not in _SCAN_SKIP_NAMES:
+                frontier.append((entry, depth + 1))
+    return found
+
+
 _LAST_TCC_BLOCKED: bool = False  # set by discover_wechat_profiles
 
 
@@ -994,36 +1083,60 @@ def discover_wechat_profiles() -> list[WeChatProfile]:
                     picked.append(max(dirs, key=_db_storage_size))
             wxid_subs = picked
 
-        for sub in wxid_subs:
-            wxid_full = sub.name
-            profile_key = str(sub)
-            if profile_key in seen_profiles:
-                continue
-            # Require the wxid dir to actually contain decryptable data.
-            # Without this guard, a `wxid_*/` directory whose `db_storage/` is
-            # empty (or missing entirely) gets reported as a valid profile —
-            # diagnose then says "微信数据 已找到 ✓", refresh.py iterates 0 DBs
-            # and exits 0, the post-decrypt promote finds no session.db, and
-            # the user sees "decrypt subprocess returned 0 but no decrypted
-            # directory found". Filter such empty shells out at discovery.
-            db_storage = sub / "db_storage"
+        _add_profiles(wxid_subs, profiles, seen_profiles, plat)
+
+    # The user pasted a path and we still found nothing. Before reporting
+    # failure — the worst outcome this screen has — search under what they gave
+    # us. The hardcoded wrapper list can't know they keep WeChat in `D:\Weixin\`.
+    if not profiles:
+        for user_root in _user_supplied_roots():
             try:
-                if not db_storage.is_dir():
-                    continue
-                if not any(db_storage.rglob("*.db")):
+                if not user_root.exists():
                     continue
             except (PermissionError, OSError):
+                _LAST_TCC_BLOCKED = True
                 continue
-            seen_profiles.add(profile_key)
-            wxid_short = _wechat_account_short(wxid_full)
-            profiles.append(WeChatProfile(
-                wxid=wxid_full,
-                wxid_short=wxid_short,
-                encrypted_root=db_storage,
-                cache_root=sub,
-                platform=plat,
-            ))
+            _add_profiles(_descend_for_account_dirs(user_root), profiles, seen_profiles, plat)
+
     return profiles
+
+
+def _add_profiles(
+    account_dirs: list[Path],
+    profiles: list[WeChatProfile],
+    seen_profiles: set[str],
+    plat: str,
+) -> None:
+    """Validate candidate account dirs and append the usable ones to `profiles`."""
+    for sub in account_dirs:
+        wxid_full = sub.name
+        profile_key = str(sub)
+        if profile_key in seen_profiles:
+            continue
+        # Require the wxid dir to actually contain decryptable data.
+        # Without this guard, a `wxid_*/` directory whose `db_storage/` is
+        # empty (or missing entirely) gets reported as a valid profile —
+        # diagnose then says "微信数据 已找到 ✓", refresh.py iterates 0 DBs
+        # and exits 0, the post-decrypt promote finds no session.db, and
+        # the user sees "decrypt subprocess returned 0 but no decrypted
+        # directory found". Filter such empty shells out at discovery.
+        db_storage = sub / "db_storage"
+        try:
+            if not db_storage.is_dir():
+                continue
+            if not any(db_storage.rglob("*.db")):
+                continue
+        except (PermissionError, OSError):
+            continue
+        seen_profiles.add(profile_key)
+        wxid_short = _wechat_account_short(wxid_full)
+        profiles.append(WeChatProfile(
+            wxid=wxid_full,
+            wxid_short=wxid_short,
+            encrypted_root=db_storage,
+            cache_root=sub,
+            platform=plat,
+        ))
 
 
 # (db_filename, sentinel_table) pairs we expect under a healthy decrypted dir.
