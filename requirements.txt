@@ -5,6 +5,14 @@
 # zstandard is REQUIRED (zstd-compressed message_content / silk voice files).
 # cryptography is REQUIRED (pure-Python WCDB v4 SQLCipher decrypt: decrypt_py.py).
 # pycryptodome is REQUIRED on Windows for WeChat .dat image AES decrypt.
+# pilk is REQUIRED on macOS/Linux for silk -> mp3 voice decode (voice.py); builds
+# locally against a C compiler (Xcode CLT on Mac). Windows uses the bundled
+# silk_v3_decoder.exe instead, so it's excluded there.
+#
+# frida is NOT listed here — it's only needed for the macOS live-key-capture
+# fallback (hook_cc_key_frida.py, used when extract_key_mac.py's memory scans
+# come up empty on WeChat 4.1.9+). See requirements-mac-keyextract.txt.
 zstandard>=0.22
 cryptography>=42
 pycryptodome>=3.20
+pilk>=0.2.4; sys_platform != "win32"

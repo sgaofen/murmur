@@ -61,6 +61,27 @@ def _hmac_key_from_aes(aes_key: bytes, salt: bytes) -> bytes:
     return hashlib.pbkdf2_hmac("sha512", aes_key, mac_salt, HMAC_KEY_ITER, KEY_SIZE)
 
 
+def verify_candidate_key(page1: bytes, candidate_key: bytes) -> bool:
+    """Cheap, near-zero-false-positive check: does `candidate_key` (32 raw bytes)
+    HMAC-verify against page 1 of a SQLCipher v4 DB? No AES decrypt needed —
+    just 2 fast PBKDF2 rounds (HMAC-key derivation) + one HMAC-SHA512 over the
+    page body. Used to brute-force-verify AES key candidates found in memory.
+    """
+    if len(candidate_key) != KEY_SIZE or len(page1) != PAGE_SIZE:
+        return False
+    salt = page1[:SALT_SIZE]
+    body_end = PAGE_SIZE - RESERVE
+    body = page1[SALT_SIZE:body_end]
+    iv = page1[body_end:body_end + AES_BLOCK]
+    stored_hmac = page1[body_end + AES_BLOCK:body_end + AES_BLOCK + HMAC_HASH_SIZE]
+    hmac_key = _hmac_key_from_aes(candidate_key, salt)
+    mac = hmac.new(hmac_key, digestmod=hashlib.sha512)
+    mac.update(body)
+    mac.update(iv)
+    mac.update((1).to_bytes(4, "little"))
+    return hmac.compare_digest(mac.digest(), stored_hmac)
+
+
 def decrypt_db(src_path: Path, dst_path: Path, key_hex: str, *, pre_derived: bool = False) -> None:
     """Decrypt one .db file. Raises ValueError on bad key / corruption.
 

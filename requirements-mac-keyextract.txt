@@ -1,0 +1,8 @@
+# Optional: only needed for cli/hook_cc_key_frida.py, the macOS live-key-
+# capture fallback for WeChat 4.1.9+ (used when extract_key_mac.py's memory
+# scans come up empty — see that file's own header comment for why).
+#
+# Install with:
+#   python3.12 -m pip install -r requirements-mac-keyextract.txt
+-r requirements.txt
+frida>=17.0

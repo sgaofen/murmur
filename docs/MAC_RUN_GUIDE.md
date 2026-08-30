@@ -15,14 +15,34 @@
 | 功能 | Mac 状态 |
 |------|---------|
 | 数据库解密 (微信 → SQLite) | ✅ 支持（纯 Python WCDB v4 解密） |
-| 抓 SQLCipher 密钥 | ✅ 支持（扫描 WeChat 进程内存，需完全磁盘访问 + WeChat ad-hoc 重签名） |
-| 抓 image AES key | ⚠️ 暂不支持自动抓取 |
+| 抓 SQLCipher 密钥 | ✅ 支持（需完全磁盘访问 + WeChat ad-hoc 重签名。WeChat 4.1.9 以下用内存扫描 `extract_key_mac.py`；4.1.9+ 内存扫描经常 0 命中，改用 `hook_cc_key_frida.py` 实时抓，见下方「WeChat 4.1.9+ 抓密钥」） |
+| 抓 image AES key | ✅ 支持（从 kvcomm 缓存推导 + 用真实密文校验，`media.py extract-image-key`，只需磁盘访问，不需要 root） |
+| 语音 silk → mp3 | ✅ 支持（`pip install pilk` 本地解码 + ffmpeg 转 mp3，见 `requirements.txt`；不再依赖 Windows 的 silk_v3_decoder.exe。真实音频数据在 `media_*.db` 的 `VoiceInfo` 表，不在 `message_*.db` 里，`voice.py` 已按这个改） |
 | **浏览/分析已解密的数据** | ✅ 完全支持 |
 | AI agent 调用 (claude / codex) | ✅ 完全支持 |
 | 媒体相册 / 完整对话 / AI 分析 | ✅ 完全支持 |
 | 视频 / 已解密图片预览 | ✅ 完全支持 |
 
 **推荐工作流**：直接跑 `bash start-mac.sh`。首次没有解密数据时，应用内 onboarding 会引导你授权完全磁盘访问、重签名 WeChat、点开几个对话并抓取 per-DB key。
+
+## WeChat 4.1.9+ 抓密钥（内存扫描 0 命中时）
+
+`extract_key_mac.py` 靠扫描 WeChat 进程内存找 WCDB 缓存的密钥。这个方法在 WeChat 4.1.9 以下工作正常，但 **4.1.9 之后的版本，内存扫描（无论是找 ASCII 文本格式，还是直接找已知 salt 原始字节）经常直接 0 命中** —— 密钥材料不再稳定驻留内存，扫不到不代表哪里配置错了。
+
+遇到这种情况，改用 `cli/hook_cc_key_frida.py`（Frida 实时 hook，跟 WCDB 调用 CommonCrypto 加密函数的那一刻直接截获 key，不用等它"留"在内存里）：
+
+```bash
+python3.12 -m pip install -r requirements-mac-keyextract.txt   # 装 frida，一次性
+python3.12 cli/hook_cc_key_frida.py --seconds 60
+```
+
+**关键：脚本跑起来之后要主动去用微信**（发消息、发语音、发/看图片、点开还没打开过的对话、翻朋友圈、点通讯录/收藏/表情面板）——WCDB 只有在某个数据库真正被用到时才会把 key 传给加密函数，光晾在那不操作基本抓不到。发送新内容（不只是看历史）最可靠，因为一定会触发新的加密写入。
+
+一次跑 30~60 秒基本不可能把所有库（联系人、会话、每个消息分片、朋友圈、收藏、表情、图片/视频、头像……WeChat 4.x 有 20 来个独立加密库）都覆盖到——多跑几轮就行，`decrypted_keys.json` 里已经抓到的 key 会在下次启动时自动读出来，只会去找还缺的，不会互相覆盖。
+
+`cli/hook_cc_key.py` 是同样思路的 lldb 版本，不需要装 frida，但**不推荐默认用**——lldb 断点会让微信在抓取窗口内整个卡住/掉帧（后台 WCDB 线程调用加密函数太频繁），Frida 版本是内联 hook，不涉及"暂停整个进程"，实测同样调用量下完全无感。lldb 版本留着当免依赖兜底。
+
+两个脚本都需要跟 `extract_key_mac.py` 一样的前提：完全磁盘访问 + WeChat 已经 ad-hoc 重签名去掉 hardened runtime（见上面「首次启动 onboarding」）。不需要额外 sudo，但如果 attach 失败可以加上试试。
 
 ## 一键检查（先跑这个）
 

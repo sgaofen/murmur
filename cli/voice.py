@@ -1,7 +1,7 @@
 """voice.py — WeChat 语音消息提取与转文字
 
 两步流程:
-  1. silk → mp3   (用 echotrace 自带的 silk_v3_decoder.exe)
+  1. silk → mp3   (Windows: echotrace 自带的 silk_v3_decoder.exe；macOS/Linux: pilk 本地解码 + ffmpeg 转 mp3)
   2. mp3 → 文字   (用本地 Whisper, 可选)
 
 使用:
@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sqlite3
 import struct
 import subprocess
@@ -49,37 +50,95 @@ def _find_silk_decoder() -> Path | None:
     return None
 
 
-def silk_to_mp3(silk_path: Path, mp3_path: Path) -> bool:
-    """Decode a single .silk → .mp3. Returns True on success."""
+def _silk_to_mp3_windows(silk_path: Path, mp3_path: Path) -> bool:
     decoder = _find_silk_decoder()
     if not decoder:
         raise RuntimeError("silk_v3_decoder.exe not found. Get it from echotrace project.")
-    if not IS_WINDOWS:
-        raise RuntimeError("silk decoding currently requires Windows binary. TODO: bundle .so/.dylib.")
-    mp3_path.parent.mkdir(parents=True, exist_ok=True)
     # silk_v3_decoder takes input + output paths
     r = subprocess.run([str(decoder), str(silk_path), str(mp3_path)],
                        capture_output=True, timeout=60)
     return r.returncode == 0 and mp3_path.exists() and mp3_path.stat().st_size > 0
 
 
+def _silk_to_mp3_pilk(silk_path: Path, mp3_path: Path) -> bool:
+    """macOS/Linux: decode via `pilk` (pip install pilk — pure C SILK v3 codec,
+    builds locally with a C compiler, no Windows binary needed), then transcode
+    the PCM wav to mp3 with ffmpeg so the output stays a drop-in .mp3 file."""
+    try:
+        import pilk
+    except ImportError:
+        raise RuntimeError("pilk not installed. Run: pip install pilk (needs a C compiler).")
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg not found on PATH; needed to transcode wav -> mp3.")
+    wav_path = mp3_path.with_suffix(".wav")
+    try:
+        pilk.silk_to_wav(str(silk_path), str(wav_path))
+        if not wav_path.exists() or wav_path.stat().st_size == 0:
+            return False
+        r = subprocess.run([ffmpeg, "-y", "-loglevel", "error", "-i", str(wav_path), str(mp3_path)],
+                           capture_output=True, timeout=60)
+        return r.returncode == 0 and mp3_path.exists() and mp3_path.stat().st_size > 0
+    finally:
+        try:
+            wav_path.unlink()
+        except OSError:
+            pass
+
+
+def silk_to_mp3(silk_path: Path, mp3_path: Path) -> bool:
+    """Decode a single .silk → .mp3. Returns True on success."""
+    mp3_path.parent.mkdir(parents=True, exist_ok=True)
+    if IS_WINDOWS:
+        return _silk_to_mp3_windows(silk_path, mp3_path)
+    return _silk_to_mp3_pilk(silk_path, mp3_path)
+
+
 # ---------- Locating voice payloads in WeChat 4.x ----------
 #
-# WeChat 4.x stores private voice messages as zstd-compressed binary inside
-# message_*.db's `Msg_<md5>` rows of type=34. The encoded SILK is in `compress_content` (BLOB)
-# or wrapped in `packed_info_data`. We extract them via SQL.
-#
-# Group voice messages also exist; layout is the same.
+# message_*.db's `Msg_<md5>` rows of type=34 do NOT contain the audio. Their
+# `message_content` is zstd-compressed XML metadata only, e.g.:
+#   <msg><voicemsg voiceformat="4" length="6554" voicelength="3850" .../></msg>
+# `length` there is exactly the byte length of the real payload, which lives
+# in a SEPARATE db, media_*.db, table `VoiceInfo(chat_name_id, create_time,
+# local_id, svr_id, voice_data, data_index)` — `voice_data` is the raw
+# Tencent-flavoured SILK stream (`\x02#!SILK_V3...`), ready for pilk as-is.
+# `local_id` alone collides across different Msg_<hash> tables (each has its
+# own AUTOINCREMENT), so the join key is (local_id, create_time) together.
 
 VOICE_TYPE = 34
 
 
-def find_voice_messages(decrypted_dir: Path, *, wxid_filter: str | None = None) -> Iterator[dict]:
-    """Yield {db, table, local_id, create_time, sender, blob} for every voice message.
+def _load_voice_data_index(decrypted_dir: Path) -> dict[tuple[int, int], bytes]:
+    """{(local_id, create_time): raw_silk_bytes} from every media_*.db's VoiceInfo table."""
+    index: dict[tuple[int, int], bytes] = {}
+    for p in sorted(decrypted_dir.glob("media_*.db")):
+        c = sqlite3.connect(f"file:{p.as_posix()}?mode=ro", uri=True)
+        try:
+            has_table = c.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='VoiceInfo'"
+            ).fetchone()
+            if not has_table:
+                continue
+            for local_id, ts, data in c.execute(
+                "SELECT local_id, create_time, voice_data FROM VoiceInfo"
+            ):
+                if data:
+                    index[(local_id, ts)] = data
+        except sqlite3.OperationalError:
+            continue
+        finally:
+            c.close()
+    return index
 
-    NOTE: message_content is declared TEXT but actually holds binary zstd-compressed SILK.
-    We force text_factory = bytes to get raw bytes."""
+
+def find_voice_messages(decrypted_dir: Path, *, wxid_filter: str | None = None) -> Iterator[dict]:
+    """Yield {db, table, local_id, create_time, sender, voice_data} for every voice message.
+
+    voice_data is the raw SILK payload pulled from media_*.db's VoiceInfo table
+    (None if this particular message's audio wasn't found there)."""
     import hashlib
+    voice_index = _load_voice_data_index(decrypted_dir)
     for p in sorted(decrypted_dir.glob("message_*.db")):
         if any(skip in p.name for skip in ("_fts", "_resource", "biz_")):
             continue
@@ -109,6 +168,7 @@ def find_voice_messages(decrypted_dir: Path, *, wxid_filter: str | None = None) 
                         "local_id": local_id, "create_time": ts,
                         "sender_id": sid, "content": content,
                         "compress": compress, "packed": packed,
+                        "voice_data": voice_index.get((local_id, ts)),
                     }
         finally:
             c.close()
@@ -204,13 +264,17 @@ def cmd_extract(args):
     t0 = time.time()
     for v in find_voice_messages(decrypted, wxid_filter=args.wxid):
         n_total += 1
-        # Extract SILK from primary blob: try compress_content first (most common in 4.x)
-        silk_bytes = None
-        for blob in (v["compress"], v["content"]):
-            if isinstance(blob, bytes):
-                silk_bytes = extract_silk_from_blob(blob)
-                if silk_bytes:
-                    break
+        # The real payload lives in media_*.db's VoiceInfo table (see
+        # find_voice_messages docstring) — message_content is just XML
+        # metadata. Fall back to the old direct-blob scan in case some
+        # message predates VoiceInfo or media_*.db is missing.
+        silk_bytes = v.get("voice_data")
+        if not silk_bytes:
+            for blob in (v["compress"], v["content"]):
+                if isinstance(blob, bytes):
+                    silk_bytes = extract_silk_from_blob(blob)
+                    if silk_bytes:
+                        break
         if not silk_bytes:
             failed += 1
             continue

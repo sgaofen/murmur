@@ -7,9 +7,14 @@ How it works (the elegant path that doesn't need SIP off):
          sudo codesign --force --deep --sign - /Applications/WeChat.app
   3. Re-launch WeChat, log in, open a couple of chats so WCDB materialises
      the per-DB derived keys in process memory.
-  4. Run this script — it attaches via Mach VM API, scans WeChat's memory
-     for the WCDB hex literal `x'<64hex_aes_key><32hex_salt>'`, matches each
-     salt to a DB on disk, and writes per-DB AES keys to
+  4. Run this script — it attaches via Mach VM API and scans WeChat's memory
+     two ways: (a) the legacy WCDB hex literal `x'<64hex_aes_key><32hex_salt>'`,
+     matching each salt to a DB on disk; (b) as of WeChat 4.1.8+ that ASCII
+     literal is no longer reliably resident (see extract_image_key_v2.py's
+     analogous note for the image key), so it also anchors on each DB's known
+     raw 16-byte salt bytes and brute-force-verifies (via cheap HMAC, no
+     AES/PBKDF2) a byte-offset neighborhood around each match for the raw
+     32-byte key. Either way, writes per-DB AES keys to
      ~/.murmur/decrypted_keys.json (consumed by refresh.py raw-key mode).
 
 Background:
@@ -50,6 +55,7 @@ except (AttributeError, ValueError):
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from paths import discover_wechat_profiles, IS_MAC, murmur_config_path, wechat_main_exec  # noqa: E402
+from decrypt_py import verify_candidate_key  # noqa: E402
 
 PAGE_SIZE = 4096
 SALT_SIZE = 16
@@ -183,17 +189,66 @@ def collect_db_salts(profile) -> dict[str, dict]:
 
 # ---------- memory scan ----------
 
-def scan_memory_for_keys(task: int, *, deadline: float) -> set[tuple[str, str]]:
-    """Scan all RW heap regions for the WCDB `x'<key><salt>'` pattern.
-       Returns a set of (key_hex_lower, salt_hex_lower) tuples."""
-    found: set[tuple[str, str]] = set()
+# How far around a raw salt match to brute-force for the adjacent raw key.
+# Cheap (verify is ~2 HMAC-SHA512 calls, no AES/PBKDF2), so we don't need to
+# guess the exact struct layout — just try every byte offset in the window.
+RAW_ANCHOR_MARGIN = 96
+
+
+def find_key_near_salt_match(buf: bytes, salt_off: int, salt_len: int, page1: bytes,
+                              margin: int = RAW_ANCHOR_MARGIN) -> str | None:
+    """Given `buf` contains a DB's raw salt at `salt_off`, brute-force every
+    byte offset in a `margin`-wide neighborhood around it for a 32-byte
+    window that HMAC-verifies as that DB's AES key. Returns hex key or None.
+    Pure function — no Mach VM dependency, so this is unit-testable standalone.
+    """
+    lo = max(0, salt_off - margin)
+    hi = min(len(buf), salt_off + salt_len + margin)
+    for cand_start in range(lo, hi - KEY_SIZE + 1):
+        cand = buf[cand_start:cand_start + KEY_SIZE]
+        if verify_candidate_key(page1, cand):
+            return cand.hex()
+    return None
+
+
+def scan_memory(task: int, salt_to_db: dict, *, deadline: float) -> tuple[set[tuple[str, str]], dict[str, str]]:
+    """Single pass over WeChat's RW heap regions, looking for per-DB keys two ways:
+
+    1. Legacy: the WCDB `x'<64hex key><32hex salt>'` ASCII PRAGMA literal.
+       Returns candidates as a set of (key_hex, salt_hex) — caller matches
+       salt_hex against known DBs.
+    2. Fallback: WeChat 4.1.8+ apparently stopped keeping that ASCII literal
+       resident (same version threshold where extract_image_key_v2.py had to
+       drop its ASCII filter for the image key — see that file's docstring).
+       So we also search for each DB's raw 16-byte salt bytes directly (we
+       already know every salt — it's page 1 of the encrypted file on disk)
+       and brute-force-verify a small byte-offset neighborhood around each
+       match as a candidate 32-byte raw AES key, via HMAC (no AES/PBKDF2
+       needed to check — ~130k verifies/sec measured on this machine, so
+       even a wide, unaligned neighborhood costs nothing per match).
+
+    Returns (ascii_candidates, raw_matched) where raw_matched maps
+    db_relative_name -> key_hex for anything found via method 2.
+    """
+    ascii_found: set[tuple[str, str]] = set()
+    raw_matched: dict[str, str] = {}
+    # snapshot of {raw_salt_bytes: (db_name, page1_bytes)} — shrinks as we find keys.
+    # --salts mode (root can't list the TCC-protected container) has no page1
+    # bytes to verify against, so those entries only get the ascii-literal pass.
+    pending = {
+        bytes.fromhex(salt_hex): (info["name"], info["page1"])
+        for salt_hex, info in salt_to_db.items()
+        if info.get("page1")
+    }
+
     addr = mach_vm_address_t(0)
     region_count = 0
     bytes_scanned = 0
 
     while True:
         if time.time() > deadline:
-            sys.stderr.write(f"[scan] timeout — {region_count} regions, {bytes_scanned // (1024*1024)}MB scanned, {len(found)} keys so far\n")
+            sys.stderr.write(f"[scan] timeout — {region_count} regions, {bytes_scanned // (1024*1024)}MB scanned, "
+                             f"{len(ascii_found)} ascii candidates, {len(raw_matched)} raw-matched\n")
             break
 
         size = mach_vm_size_t(0)
@@ -229,21 +284,39 @@ def scan_memory_for_keys(task: int, *, deadline: float) -> set[tuple[str, str]]:
                 if kr2 == 0 and data_count.value > 0:
                     buf = ctypes.string_at(data_addr.value, data_count.value)
                     bytes_scanned += data_count.value
+
                     for m in HEX_PATTERN.finditer(buf):
                         hex_str = m.group(1).decode("ascii").lower()
-                        key_hex = hex_str[:64]
-                        salt_hex = hex_str[64:]
-                        found.add((key_hex, salt_hex))
+                        ascii_found.add((hex_str[:64], hex_str[64:]))
+
+                    if pending:
+                        for raw_salt, (db_name, page1) in list(pending.items()):
+                            start = 0
+                            while True:
+                                off = buf.find(raw_salt, start)
+                                if off == -1:
+                                    break
+                                hit = find_key_near_salt_match(buf, off, len(raw_salt), page1)
+                                if hit:
+                                    raw_matched[db_name] = hit
+                                    del pending[raw_salt]
+                                    sys.stderr.write(f"[raw-scan] matched {db_name} via raw salt anchor\n")
+                                    break
+                                start = off + 1
+
                     libc.mach_vm_deallocate(libc.mach_task_self(),
                                             data_addr.value, data_count.value)
-                # Overlap by pattern length so we don't miss matches across chunks
-                step = chunk - 100 if chunk > 100 else chunk
+                # Overlap generously so a salt match (+ its brute-force margin)
+                # spanning a chunk boundary still appears whole in one read.
+                overlap = max(2 * RAW_ANCHOR_MARGIN + SALT_SIZE, 100)
+                step = chunk - overlap if chunk > overlap else chunk
                 cur += step
 
         addr.value += size.value
 
-    sys.stderr.write(f"[scan] done — {region_count} regions, {bytes_scanned // (1024*1024)}MB, {len(found)} unique candidates\n")
-    return found
+    sys.stderr.write(f"[scan] done — {region_count} regions, {bytes_scanned // (1024*1024)}MB, "
+                     f"{len(ascii_found)} ascii candidates, {len(raw_matched)} raw-matched\n")
+    return ascii_found, raw_matched
 
 
 # ---------- main ----------
@@ -251,7 +324,7 @@ def scan_memory_for_keys(task: int, *, deadline: float) -> set[tuple[str, str]]:
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description="Extract WeChat 4.x SQLCipher keys from a Mac WeChat process")
     p.add_argument("--pid", type=int, help="WeChat PID (auto-detected by default)")
-    p.add_argument("--timeout", type=int, default=120, help="seconds to scan before giving up")
+    p.add_argument("--timeout", type=int, default=180, help="seconds to scan before giving up")
     p.add_argument("--auto-restart", action="store_true",
                    help="(no-op on Mac — kept for parity with extract_key_dll.py)")
     p.add_argument("--out", help="output JSON path (default: ~/.murmur/decrypted_keys.json)")
@@ -337,19 +410,22 @@ def main(argv=None) -> int:
 
     # --- Step 5: scan ---
     deadline = time.time() + args.timeout
-    candidates = scan_memory_for_keys(target_task.value, deadline=deadline)
+    candidates, raw_matched = scan_memory(target_task.value, salt_to_db, deadline=deadline)
 
     # --- Step 6: match keys to DBs by salt ---
-    matched: dict[str, str] = {}  # db_relative_name → aes_key_hex
+    matched: dict[str, str] = dict(raw_matched)  # db_relative_name → aes_key_hex
     for key_hex, salt_hex in candidates:
         info = salt_to_db.get(salt_hex)
-        if not info:
+        if not info or info["name"] in matched:
             continue
         matched[info["name"]] = key_hex
 
     if not matched:
         print("[ERR] no key matched any DB salt. WCDB hadn't materialised the keys yet.")
         print("      Try: open WeChat, click into a few chats so the DBs get opened, then re-run.")
+        print("      If that keeps failing (common on WeChat 4.1.9+ — the ASCII-literal and raw-salt")
+        print("      scans above can both legitimately come up empty), try hook_cc_key_frida.py")
+        print("      instead: `pip install frida` then `python3.12 hook_cc_key_frida.py`.")
         return 4
 
     # --- Step 7: emit summary + save JSON ---
@@ -362,13 +438,14 @@ def main(argv=None) -> int:
         else Path(args.out) if args.out
         else (murmur_config_path().parent / "decrypted_keys.json")
     )
+    name_to_salt = {info["name"]: salt for salt, info in salt_to_db.items()}
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps({
         "wxid": profile_wxid,
         "extracted_at": int(time.time()),
         "keys_by_db": matched,
         # Also store by-salt for any later DB whose name we didn't enumerate
-        "keys_by_salt": {salt: key for (key, salt) in candidates if salt in salt_to_db},
+        "keys_by_salt": {name_to_salt[name]: key for name, key in matched.items() if name in name_to_salt},
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     sys.stderr.write(f"[info] wrote {out_path}\n")
     return 0
