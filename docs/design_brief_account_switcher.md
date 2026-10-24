@@ -42,7 +42,7 @@
 紧贴现有 chip 风格（参考 `<PrivacyToggle />`、`HomeChromeBar` 里的 🌌关系网/📑报告 链接）：
 
 ```
-[💬 wxid_n…97a5  ▾]    或    [🐧 QQ 939…010  ▾]
+[💬 wxid_q…8f3c  ▾]    或    [🐧 QQ 246…579  ▾]
 ```
 
 - 高度 26-30px，padding `5-7px 10-12px`
@@ -63,13 +63,13 @@
 ┌─────────────────────────────────────┐
 │ 你的账号                             │
 ├─────────────────────────────────────┤
-│ ✓ 💬 wxid_n…97a5    今天          │  ← 当前激活，橙色背景或高亮边
+│ ✓ 💬 wxid_q…8f3c    今天          │  ← 当前激活，橙色背景或高亮边
 │   12,847 条消息 · 3 个 AI 报告      │
 ├─────────────────────────────────────┤
-│   🐧 QQ 939…010     昨天          │
+│   🐧 QQ 246…579     昨天          │
 │   16,131 条消息 · 已就绪            │
 ├─────────────────────────────────────┤
-│   🐧 QQ 358…864     —             │
+│   🐧 QQ 135…246     —             │
 │   未解密 · 点击设置                  │  ← 浅色，需要解密的态
 ├─────────────────────────────────────┤
 │   ＋ 添加新账号                      │
@@ -111,9 +111,9 @@
 
 ```typescript
 export interface ProfileEntry {
-  id: string;                          // 'wxid_n0cir36u32si12_97a5' or 'qq:939919010'
+  id: string;                          // 'wxid_q1w2e3r4t5y6u7_8f3c' or 'qq:246813579'
   platform: 'wechat' | 'qq';
-  display_id: string;                  // 'wxid_n…97a5' or 'QQ 939…010'  (已脱敏)
+  display_id: string;                  // 'wxid_q…8f3c' or 'QQ 246…579'  (已脱敏)
   msg_count: number | null;            // 12847; null if not yet decrypted
   ai_report_count?: number;            // optional, only for ready profiles
   last_active_ts: number | null;       // unix sec; null if unknown

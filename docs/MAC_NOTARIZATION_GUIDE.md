@@ -65,7 +65,7 @@ xcode-select --install
 1. 打开「钥匙串访问」。
 2. 菜单栏：`钥匙串访问` → `证书助理` → `从证书颁发机构请求证书...`
 3. 用户电子邮件填你的 Apple ID 邮箱。
-4. 常用名称填 `Stephen Yu` 或你的开发者名称。
+4. 常用名称填你的名字或开发者名称。
 5. 选择「存储到磁盘」。
 6. 保存 `CertificateSigningRequest.certSigningRequest`。
 

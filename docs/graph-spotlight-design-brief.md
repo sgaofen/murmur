@@ -48,7 +48,7 @@ interface BackendNode {
 }
 interface BackendCluster {
   id: string;          // "core_1"
-  label: string;       // "太の 这一圈 (11 人)"
+  label: string;       // "朋友K 这一圈 (11 人)"
   members?: string[];  // 成员 wxid 列表
 }
 interface BackendStats {
@@ -57,7 +57,7 @@ interface BackendStats {
 }
 ```
 
-测试数据（开发者本人，可重现）：81 朋友，230 朋友间边，9 核心圈（3-13 人），3 桥梁（kevin / Alex Zhang / SHY）。
+测试数据（开发者本人，可重现）：81 朋友，230 朋友间边，9 核心圈（3-13 人），3 桥梁（朋友A / 朋友G / 朋友H）。
 
 跑后端拿真实 payload：
 ```

@@ -178,7 +178,7 @@ def _windows_tencent_nested_xwechat_paths() -> list[Path]:
 
 def _windows_anyname_parent_xwechat_paths() -> list[Path]:
     """Catch-all for users with WeChat data under a non-English parent folder
-    name (e.g. `D:\\我的微信\\xwechat_files`, `C:\\Users\\YY\\资料\\xwechat_files`).
+    name (e.g. `D:\\我的微信\\xwechat_files`, `C:\\Users\\demo\\资料\\xwechat_files`).
 
     The hard-coded seed list in `_windows_tencent_nested_xwechat_paths` only
     covers `Tencent / Tencent Files / Weixin / WeChat`, so a user who moved

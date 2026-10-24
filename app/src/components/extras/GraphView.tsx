@@ -1238,10 +1238,10 @@ function SpotlightBanner({ spotlight, data, onClose }: {
   spotlight: Spotlight; data: GraphData; onClose: () => void;
 }) {
   if (!spotlight) return null;
-  // Cluster labels embed the anchor's real name ("太の 这一圈 (11 人)").
+  // Cluster labels embed the anchor's real name ("朋友K 这一圈 (11 人)").
   // maskText routes the anchor name through the privacy alias table that
   // PrivacyIdentityIndex pre-populates for all friends, so toggling 隐私
-  // mode swaps "太の" → "朋友 XX" without us re-fetching anything.
+  // mode swaps "朋友K" → "朋友 XX" without us re-fetching anything.
   const c = data.clusters.find(x => x.id === spotlight.clusterId);
   const title = maskText(c?.label || '核心圈');
   const sub = `${c?.members?.length || 0} 位成员 · 你不在场时，他们仍在一起说话`;

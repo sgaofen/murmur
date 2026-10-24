@@ -460,7 +460,7 @@ function BatchBtn({ label, sub, onClick, disabled, primary }: {
 }
 
 function ReportItem({ entry, active, onClick }: { entry: ReportEntry; active: boolean; onClick: () => void }) {
-  // Extract a clean display name: "01_kevin" → "kevin", "02_高进__joyyy" → "高进 ↔ joyyy"
+  // Extract a clean display name: "01_friend_a" → "朋友A", "02_朋友B__friend_c" → "朋友B ↔ friend_c"
   const cleaned = maskText(entry.name.replace(/^\d+_/, '').replace(/_/g, ' ').replace(/^(.*?)__(.*)$/, '$1 ↔ $2'));
   return (
     <button type="button" className="reports-item" aria-current={active || undefined} onClick={onClick}>

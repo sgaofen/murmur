@@ -28,8 +28,8 @@
     },
     {
       "id": "wxid",
-      "input": "profile wxid_n0cir36u32si12_97a5 active",
-      "absent": ["n0cir36u32si12", "97a5"],
+      "input": "profile wxid_q1w2e3r4t5y6u7_8f3c active",
+      "absent": ["q1w2e3r4t5y6u7", "8f3c"],
       "present": ["wxid_<"]
     },
     {
@@ -52,8 +52,8 @@
     },
     {
       "id": "qq_numbers",
-      "input": "D:\\Tencent Files\\939919010\\nt_qq active qq:939919010 and QQ 939919010",
-      "absent": ["939919010"],
+      "input": "D:\\Tencent Files\\246813579\\nt_qq active qq:246813579 and QQ 246813579",
+      "absent": ["246813579"],
       "present": ["nt_qq"]
     },
     {
@@ -103,8 +103,8 @@
     },
     {
       "id": "boot_error_realistic",
-      "input": "### Murmur 启动诊断\n- 报错：API /api/home-summary: 500 {\"error\": \"FileNotFoundError: /Users/stephen/Documents/xwechat_files/wxid_abc123def_9f3e/db_storage/contact/contact.db\"}\n- 日志目录：/Users/stephen/Documents/Murmur/logs\n[serve] active=wxid_abc123def_9f3e nick_name=小明",
-      "absent": ["stephen", "abc123def", "9f3e", "小明"],
+      "input": "### Murmur 启动诊断\n- 报错：API /api/home-summary: 500 {\"error\": \"FileNotFoundError: /Users/zoe/Documents/xwechat_files/wxid_abc123def_9f3e/db_storage/contact/contact.db\"}\n- 日志目录：/Users/zoe/Documents/Murmur/logs\n[serve] active=wxid_abc123def_9f3e nick_name=小明",
+      "absent": ["zoe", "abc123def", "9f3e", "小明"],
       "present": ["### Murmur 启动诊断", "API /api/home-summary: 500", "/Documents/Murmur/logs", "contact.db"]
     }
   ]

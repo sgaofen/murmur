@@ -166,7 +166,7 @@ Mac absorbed these ideas manually rather than merging the Windows branch:
    it in `EdgePanel`.
 
    Verified case:
-   - Alex Zhang backend private edge weight: `201`.
+   - 朋友G backend private edge weight: `201`.
    - Previous UI showed `1 条`.
    - Current UI shows raw counts; another verified private edge displayed
      `346 条`.
@@ -322,8 +322,8 @@ Recent validation on Mac:
   - self-friend edge panel exposes Claude/Codex analysis actions,
   - selected edge remains highlighted.
 - Real dual-engine top-1 pair batch:
-  - Claude completed `SHY ↔ for river`.
-  - Codex completed `SHY ↔ for river`.
+  - Claude completed `朋友H ↔ 朋友I`.
+  - Codex completed `朋友H ↔ 朋友I`.
 - Local reports index rebuilt:
   - 32 friend reports,
   - 25 pair reports,
@@ -344,8 +344,8 @@ Additional Mac fix batch on 2026-05-02:
   and supports `Escape` to close, preventing users from getting trapped in long
   histories.
 - Browser verification:
-  - `Дари рай / wxid_pc4rk9lqtzft22` now shows its saved report on the friend
-    page, graph node panel, and `你 ↔ Дари рай` private edge panel.
+  - `朋友J / wxid_demo7x8y9z0k12` now shows its saved report on the friend
+    page, graph node panel, and `你 ↔ 朋友J` private edge panel.
   - The private edge panel shows the raw `346 条` count and report links.
   - The full chat drawer opens and closes with both the sticky button and Esc.
   - A real Codex CLI run for `QQ邮箱提醒 / qqmail` resumed progress after direct

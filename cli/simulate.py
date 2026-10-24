@@ -495,7 +495,7 @@ def _find_etcli_exe() -> Path | None:
         Path.home() / "AppData" / "Local" / "Murmur" / "etcli" / "etcli.exe",
         Path("C:/Murmur/etcli/etcli.exe"),
         Path("C:/Program Files/Murmur/etcli/etcli.exe"),
-        Path(r"C:\Users\YY\murmur\cli\dist\etcli\etcli.exe"),  # dev build fallback
+        Path(r"C:\Users\demo\murmur\cli\dist\etcli\etcli.exe"),  # dev build fallback
     ]
     for p in candidates:
         try:

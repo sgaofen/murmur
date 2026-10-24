@@ -12,8 +12,6 @@
 
 当前版本：`v0.5.0`
 
-![Murmur 关系网总览](docs/screenshots/readme-graph-overview.png)
-
 ## 更新日志
 
 ### v0.5.0 — 抓 key 新路径、实时同步、聊天浏览与搜索、界面改版
@@ -77,29 +75,13 @@
 - **给 AI 助手用（MCP）**：`etcli mcp` 让 Claude Code / Codex 只读查询本机聊天数据。
 - **QQ NT 支持**：Windows 版顶栏可以加 QQ 账号，独立解密 + 独立分析。
 
-## 关系网视觉
-
-![默认视图](docs/screenshots/readme-graph-overview.png)
-
-**核心圈聚焦**
-
-![核心圈聚焦](docs/screenshots/readme-graph-circle.png)
-
-**点人看关系**
-
-![选中朋友](docs/screenshots/readme-graph-friend.png)
-
 ## 单人档案页
 
 每位朋友有独立档案：人物介绍、AI 摘要、离线证据、关联朋友、相册、整对话浏览、双人年代记。关系层级（A 老朋友 / B 常聊 / C 有联系 / D 弱联系 / E 已疏远）由本地算法基于持续年限、电话次数、朋友圈互动等离线证据自动判定。
 
-![单人档案](docs/screenshots/readme-friend.png)
-
 ## AI 关系档案
 
 Murmur 把每个朋友的样本消息 + 离线证据 + 数据指纹（最长连聊、谁主导、深夜比例、年度趋势）+ 评估准则打包，让本机 Claude Code 或 Codex 出一份长文分析。报告里会评估关系定性、列时间持续性、沉默后重连、表达密度等具体证据。
-
-![AI 关系档案](docs/screenshots/readme-report.png)
 
 报告默认存到：
 

@@ -28,7 +28,7 @@ IS_WINDOWS = sys.platform.startswith("win")
 @dataclass
 class QQProfile:
     """One QQ account on this machine."""
-    qq_number: str                  # "939919010"
+    qq_number: str                  # "246813579"
     nt_db_dir: Path                 # …/<qq>/nt_qq/nt_db
     tencent_files_root: Path        # the parent "Tencent Files" dir
 

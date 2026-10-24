@@ -40,11 +40,11 @@ def _find_silk_decoder() -> Path | None:
     if cand.exists():
         return cand
     # 2. echotrace download (legacy)
-    et = Path(r"C:\Users\YY\Downloads\echotrace-main\echotrace-main\assets\silk_v3_decoder.exe")
+    et = Path(r"C:\Users\demo\Downloads\echotrace-main\echotrace-main\assets\silk_v3_decoder.exe")
     if et.exists():
         return et
     # 3. echotrace install dir
-    et2 = Path(r"C:\Users\YY\Downloads\echotrace-windows-v3.0.2\silk_v3_decoder.exe")
+    et2 = Path(r"C:\Users\demo\Downloads\echotrace-windows-v3.0.2\silk_v3_decoder.exe")
     if et2.exists():
         return et2
     return None

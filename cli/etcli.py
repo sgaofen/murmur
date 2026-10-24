@@ -2103,7 +2103,7 @@ def find_friend_in_groups(store: EchoStore, friend_wxid: str,
     you need to see WHO ELSE is in the group and WHO they're talking to. Group nicknames
     are unreliable (people rename freely), so we resolve every speaker by their stable
     wxid → contact.display() (your own contact-book remark/nickname). That way "凯" in the
-    group is rendered as "kevin" if that's how you saved him.
+    group is rendered as "朋友A" if that's how you saved him.
 
     Returns list of {
         group_name, group_id, total_msgs_in_group,
@@ -3922,7 +3922,7 @@ def find_ai_report_for(wxid: str) -> dict | None:
         short = body[:600]
         return {
             "available": True,
-            "path": str(p.relative_to(reports_root.parent)).replace("\\", "/"),  # "friends/01_kevin.md"
+            "path": str(p.relative_to(reports_root.parent)).replace("\\", "/"),  # "friends/01_friend_a.md"
             "size": p.stat().st_size,
             "mtime": int(p.stat().st_mtime),
             "short": short,

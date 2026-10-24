@@ -102,7 +102,7 @@ Capabilities:
 
 在 Windows 上：
 ```
-C:\Users\YY\Documents\Murmur\decrypted\wxid_xxx\   ← 整个拷过来
+C:\Users\demo\Documents\Murmur\decrypted\wxid_xxx\   ← 整个拷过来
 ```
 
 放到 Mac 的相同位置：

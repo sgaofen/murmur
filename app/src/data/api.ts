@@ -86,9 +86,9 @@ export interface InfoResponse {
 
 // Cross-platform profile listing — drives the ProfileSwitcher.
 export interface ProfileEntry {
-  id: string;                 // 'wxid_xxx' for WeChat, 'qq:939919010' for QQ
+  id: string;                 // 'wxid_xxx' for WeChat, 'qq:246813579' for QQ
   platform: 'wechat' | 'qq';
-  display_id: string;         // already masked: 'wxid_n…97a5' / 'QQ 939…010'
+  display_id: string;         // already masked: 'wxid_q…8f3c' / 'QQ 246…579'
   // Surfaced from xwechat_files/all_users/config/global_config — raw nickname
   // and avatar URL pulled by cli/global_config.py. Empty string when the file
   // doesn't exist or this profile isn't the active account in that file.
@@ -1323,7 +1323,7 @@ export async function getPairStream(a: string, b: string): Promise<{
 }
 
 export interface ReportEntry {
-  path: string;       // relative path under reports root (friends/01_kevin.md)
+  path: string;       // relative path under reports root (friends/01_friend_a.md)
   name: string;       // basename without .md
   size: number;
   mtime: number;
