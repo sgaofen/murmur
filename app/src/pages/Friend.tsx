@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
+import type { CSSProperties } from 'react';
 import { Avatar } from '../components/Avatar';
 import { MessageCard } from '../components/MessageCard';
 import { RingChart } from '../components/RingChart';
 import { Stamp } from '../components/Stamp';
-import { getFriend, getMessages, getMoments, getReport, getFriendConnections, getInvokeStream, exportFriendChat } from '../data/api';
-import type { FriendConnection, ExportFormat } from '../data/api';
+import { getFriend, getMessages, getMoments, getReport, getFriendConnections, getInvokeStream, exportFriendChat, openFolder } from '../data/api';
+import type { FriendConnection, ExportFormat, ExportReport, MediaPolicy } from '../data/api';
 import type { Friend, FriendStats, Moment } from '../data/types';
 import { AIAssistantDrawer, ReportReadyBanner } from './AIAssistantDrawer';
 import { MediaGallery } from './extras/MediaGallery';
@@ -517,11 +518,14 @@ function ReportViewerOverlay({ relPath, friendName, onClose }: {
 function ActionDock({ onExportAI, onShowMessages, onExportChat, onOpenYearbook }: {
   onExportAI: () => void;
   onShowMessages: () => void;
-  onExportChat: (fmt: ExportFormat) => Promise<void>;
+  onExportChat: (fmt: ExportFormat, media: MediaPolicy) => Promise<ExportReport | null>;
   onOpenYearbook: () => void;
 }) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [busy, setBusy] = useState<ExportFormat | null>(null);
+  const [media, setMedia] = useState<MediaPolicy>('none');
+  const [report, setReport] = useState<ExportReport | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
   const Btn = ({ icon, label, sub, primary, disabled, onClick }: {
     icon: string; label: string; sub: string; primary?: boolean; disabled?: boolean; onClick?: () => void;
   }) => (
@@ -550,45 +554,157 @@ function ActionDock({ onExportAI, onShowMessages, onExportChat, onOpenYearbook }
 
   async function pick(fmt: ExportFormat) {
     setBusy(fmt);
+    setReport(null);
+    setExportError(null);
     try {
-      await onExportChat(fmt);
+      const r = await onExportChat(fmt, media);
+      if (r) {
+        setReport(r);
+      } else {
+        setPickerOpen(false);
+      }
+    } catch (e: any) {
+      setExportError(e?.message || String(e));
     } finally {
       setBusy(null);
-      setPickerOpen(false);
     }
   }
+
+  const sectionLabel: CSSProperties = {
+    fontSize: 11, color: 'var(--et-mute)', letterSpacing: '0.08em',
+    width: 40, flexShrink: 0, paddingTop: 9,
+  };
 
   return (
     <div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
         <Btn icon="📖" label="完整聊天记录" sub="按时间倒序浏览" onClick={onShowMessages} />
-        <Btn icon="📤" label="导出聊天" sub={pickerOpen ? '选择格式…' : 'JSON · HTML · TXT'} onClick={() => setPickerOpen(v => !v)} />
+        <Btn icon="📤" label="导出聊天" sub={pickerOpen ? '选择格式…' : '6 种格式 · 可带附件'} onClick={() => setPickerOpen(v => !v)} />
         <Btn icon="💑" label="双人年代记" sub="按年份的故事时间线" onClick={onOpenYearbook} />
         <Btn icon="🤖" label="导出 AI 分析包" sub="一键打包给 AI 看" primary onClick={onExportAI} />
       </div>
       {pickerOpen && (
         <div style={{
-          marginTop: 10, padding: 10,
+          marginTop: 10, padding: 12,
           background: 'var(--et-paper)', border: '0.5px solid var(--et-line-2)',
-          borderRadius: 'var(--et-r)', display: 'flex', gap: 8,
+          borderRadius: 'var(--et-r)', display: 'flex', flexDirection: 'column', gap: 10,
         }}>
-          {(['json', 'html', 'txt'] as ExportFormat[]).map(f => (
-            <button key={f} onClick={() => pick(f)} disabled={busy !== null} style={{
-              all: 'unset', cursor: busy !== null ? 'wait' : 'pointer',
-              flex: 1, textAlign: 'center', padding: '10px 0',
-              background: busy === f ? 'var(--et-orange)' : 'var(--et-paper-2)',
-              color: busy === f ? '#fff' : 'var(--et-ink)',
-              border: '0.5px solid var(--et-line-2)', borderRadius: 8,
-              fontSize: 12, fontWeight: 600, textTransform: 'uppercase',
-              opacity: busy !== null && busy !== f ? 0.4 : 1,
-            }}>{busy === f ? '导出中…' : f}</button>
-          ))}
-          <button onClick={() => setPickerOpen(false)} style={{
-            all: 'unset', cursor: 'pointer', padding: '0 14px',
-            color: 'var(--et-mute)', fontSize: 12,
-          }}>取消</button>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <div style={sectionLabel}>附件</div>
+            <div role="radiogroup" aria-label="附件策略" style={{
+              flex: 1, display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6,
+            }}>
+              {MEDIA_OPTIONS.map(o => {
+                const on = media === o.id;
+                return (
+                  <button key={o.id} role="radio" aria-checked={on} disabled={busy !== null}
+                    onClick={() => { setMedia(o.id); setReport(null); }} style={{
+                      all: 'unset', cursor: busy !== null ? 'wait' : 'pointer',
+                      padding: '7px 10px', borderRadius: 8,
+                      background: on ? 'var(--et-orange-soft)' : 'var(--et-paper-2)',
+                      border: `0.5px solid ${on ? 'var(--et-orange)' : 'var(--et-line-2)'}`,
+                      color: on ? 'var(--et-orange-2)' : 'var(--et-ink)',
+                    }}>
+                    <div style={{ fontSize: 12, fontWeight: 600 }}>{o.label}</div>
+                    <div style={{ fontSize: 10.5, color: 'var(--et-mute)', marginTop: 2 }}>{o.sub}</div>
+                  </button>
+                );
+              })}
+            </div>
+            <div style={{ width: 38, flexShrink: 0 }} />
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <div style={sectionLabel}>格式</div>
+            <div style={{
+              flex: 1, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(92px, 1fr))', gap: 6,
+            }}>
+              {EXPORT_FORMATS.map(f => (
+                <button key={f.id} onClick={() => pick(f.id)} disabled={busy !== null} title={f.sub} style={{
+                  all: 'unset', cursor: busy !== null ? 'wait' : 'pointer',
+                  textAlign: 'center', padding: '8px 4px',
+                  background: busy === f.id ? 'var(--et-orange)' : 'var(--et-paper-2)',
+                  color: busy === f.id ? 'var(--et-paper)' : 'var(--et-ink)',
+                  border: '0.5px solid var(--et-line-2)', borderRadius: 8,
+                  opacity: busy !== null && busy !== f.id ? 0.4 : 1,
+                }}>
+                  <div style={{ fontSize: 12, fontWeight: 600 }}>{busy === f.id ? '导出中…' : f.label}</div>
+                  <div style={{ fontSize: 10.5, marginTop: 2, color: busy === f.id ? 'var(--et-paper)' : 'var(--et-mute)' }}>{f.sub}</div>
+                </button>
+              ))}
+            </div>
+            <button onClick={() => { setPickerOpen(false); setReport(null); setExportError(null); }} style={{
+              all: 'unset', cursor: 'pointer', width: 38, flexShrink: 0, textAlign: 'center',
+              paddingTop: 9, alignSelf: 'flex-start', color: 'var(--et-mute)', fontSize: 12,
+            }}>取消</button>
+          </div>
+          {media !== 'none' && !report && (
+            <div style={{ fontSize: 11, color: 'var(--et-mute)', paddingLeft: 48, lineHeight: 1.6 }}>
+              带附件时会生成一个文件夹（聊天文件 + media/ 附件 + 导出报告），不走浏览器下载。
+              {media === 'originals' ? '只拷已解密的原图和本机已有的视频。' : '原图缺失时用缩略图顶上。'}
+              ChatLab 格式没有附件字段，附件只会放在 media/ 里。
+            </div>
+          )}
+          {exportError && (
+            <div style={{ fontSize: 12, color: 'var(--et-rose)', paddingLeft: 48 }}>{maskText(exportError)}</div>
+          )}
+          {report && <ExportReportCard report={report} />}
         </div>
       )}
+    </div>
+  );
+}
+
+const EXPORT_FORMATS: { id: ExportFormat; label: string; sub: string }[] = [
+  { id: 'csv', label: 'CSV', sub: 'Excel 表格' },
+  { id: 'md', label: 'Markdown', sub: '笔记 / 给 AI' },
+  { id: 'chatlab', label: 'ChatLab', sub: '导入 ChatLab' },
+  { id: 'html', label: 'HTML', sub: '离线网页' },
+  { id: 'json', label: 'JSON', sub: '给脚本' },
+  { id: 'txt', label: 'TXT', sub: '纯文本' },
+];
+
+const MEDIA_OPTIONS: { id: MediaPolicy; label: string; sub: string }[] = [
+  { id: 'none', label: '不带附件', sub: '只导出文字，最快' },
+  { id: 'originals', label: '仅原图', sub: '已解密的原图 / 视频' },
+  { id: 'best', label: '尽可能', sub: '没有原图就用缩略图' },
+];
+
+function ExportReportCard({ report }: { report: ExportReport }) {
+  const m = report.media;
+  const reasons = Object.entries(m.missing_reasons || {});
+  return (
+    <div style={{
+      marginLeft: 48, marginRight: 46, padding: '10px 12px',
+      background: 'var(--et-paper-2)', border: '0.5px solid var(--et-line-2)',
+      borderRadius: 8, fontSize: 12, color: 'var(--et-ink)', lineHeight: 1.7,
+    }}>
+      <div style={{ fontWeight: 600 }}>
+        已导出 <span className="et-num">{report.messages}</span> 条消息
+      </div>
+      <div style={{ color: 'var(--et-ink-soft)' }}>
+        图片 / 视频消息 <span className="et-num">{m.media_messages}</span> 条：
+        附件成功 <span className="et-num" style={{ color: 'var(--et-sage)' }}>{m.exported_total}</span> 个
+        {m.exported_thumbnail > 0 && <>（其中缩略图 <span className="et-num">{m.exported_thumbnail}</span>）</>}
+        ，缺失 <span className="et-num" style={{ color: m.missing_total ? 'var(--et-rose)' : undefined }}>{m.missing_total}</span> 个
+      </div>
+      {reasons.length > 0 && (
+        <ul style={{ margin: '4px 0 0', paddingLeft: 18, color: 'var(--et-mute)' }}>
+          {reasons.map(([code, n]) => (
+            <li key={code}>{m.missing_reason_labels?.[code] || code}：<span className="et-num">{n}</span></li>
+          ))}
+        </ul>
+      )}
+      {m.thumbnail_skipped > 0 && (
+        <div style={{ color: 'var(--et-mute)' }}>其中 {m.thumbnail_skipped} 个有缩略图，换「尽可能」可以导出缩略图。</div>
+      )}
+      <div style={{ display: 'flex', gap: 14, marginTop: 6, alignItems: 'baseline' }}>
+        <button onClick={() => { void openFolder(report.file); }} style={{
+          all: 'unset', cursor: 'pointer', color: 'var(--et-orange-2)', fontWeight: 600, flexShrink: 0,
+        }}>打开文件夹</button>
+        <span className="et-meta" style={{ color: 'var(--et-faint)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>
+          {maskText(report.dir)}
+        </span>
+      </div>
     </div>
   );
 }
@@ -803,17 +919,14 @@ export function FriendPage({ friendId, onBack, onOpenFriend }: Props) {
     };
   }, [friendId]);
 
-  async function handleExportChat(fmt: ExportFormat) {
-    if (!friend) return;
-    try {
-      // Routes through cli/exporters.py — full history (no 5000-cap), preserves
-      // compress_content text bodies, picks the right Content-Disposition name.
-      // Exports always carry the raw display name; privacy mode in the UI doesn't
-      // mask file contents, by design — the file is a personal local archive.
-      await exportFriendChat(friend.id, fmt);
-    } catch (e: any) {
-      alert('导出失败：' + maskText(e?.message || String(e)));
-    }
+  async function handleExportChat(fmt: ExportFormat, media: MediaPolicy): Promise<ExportReport | null> {
+    if (!friend) return null;
+    // Routes through cli/exporters.py — full history (no 5000-cap), preserves
+    // compress_content text bodies, picks the right Content-Disposition name.
+    // Exports always carry the raw display name; privacy mode in the UI doesn't
+    // mask file contents, by design — the file is a personal local archive.
+    // Errors propagate to ActionDock, which shows them inline.
+    return exportFriendChat(friend.id, fmt, media);
   }
 
   if (error) {

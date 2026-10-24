@@ -216,7 +216,7 @@ def _load_per_db_keys() -> dict | None:
         return None
     try:
         d = __import__("json").loads(p.read_text(encoding="utf-8"))
-        if isinstance(d, dict) and (d.get("keys_by_db") or d.get("keys_by_salt")):
+        if isinstance(d, dict) and (d.get("keys_by_db") or d.get("keys_by_salt") or d.get("passphrase")):
             return d
     except Exception:
         pass
@@ -311,6 +311,17 @@ def _decrypt_per_db(profile: WeChatProfile, per_db: dict, *, force: bool = False
                 with open(src, "rb") as f:
                     salt_hex = f.read(16).hex()
                 key_hex = keys_by_salt.get(salt_hex)
+            except OSError:
+                pass
+        if not key_hex and per_db.get("passphrase"):
+            # Live capture saved the account passphrase: derive keys for DBs
+            # that appeared after the capture (new message shards etc.).
+            try:
+                from live_key import derive_from_passphrase  # noqa: E402
+                with open(src, "rb") as f:
+                    key_hex = derive_from_passphrase(per_db["passphrase"], f.read(4096))
+                if key_hex:
+                    keys_by_name[rel] = key_hex
             except OSError:
                 pass
         if not key_hex:
