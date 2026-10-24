@@ -90,7 +90,10 @@
 - 同一个会话里相邻的消息合成一个片段：最多 8 条、约 400 字，两条消息间隔超过 1 小时就断开。单条消息超过 200 字会截断。
 - 每个片段用嵌入模型编码成 512 维向量，以 float16 BLOB 存在 `~/Documents/Murmur/semantic/index/<platform>-<account>.sqlite`（可用 `MURMUR_SEMANTIC_DIR` 改目录）。不写入微信 / QQ 的解密库。
 - 查询时把问题也编码成向量，对所有片段算余弦相似度（装了 numpy 用矩阵乘法，并按索引版本缓存在内存里，默认上限 512MB，可用 `MURMUR_SEMANTIC_CACHE_MB` 调；没有 numpy 时走纯 Python）。
-- 增量：每个会话记住已编码的最后一条消息；会话最后一个片段是「开放」的，有新消息时连同新消息重新编码。关键词索引被重建（行 id 变了）时，对应会话的语义片段会自动重建。已编码消息被撤回 / 编辑需要全量重建。
+- 增量：每个会话记住已编码的最后一条消息；会话最后一个片段是「开放」的，有新消息时连同新消息重新编码。已编码消息被撤回 / 编辑需要全量重建。
+- 片段里记的是每条消息的定位 `(db, table, local_id)`，不是关键词索引的行 id，取结果时按定位回查并核对会话，所以关键词索引重建（行 id 全部重编号）后结果也不会串到别的会话。关键词索引每次重建会换一个 `build_id`；语义索引发现它变了，下一次增量会把所有片段重新编码，在那之前 status 的 `index.stale` 为 `true`。
+- 内存里的向量矩阵按 `(build_id, generation)` 缓存；全量重建会换 `build_id`，`generation` 也只增不减，不会复用旧矩阵。
+- 加载模型前会再校验一次文件的 SHA-256（每个文件按路径 + 大小 + 修改时间只算一次），校验不过时语义搜索返回 409，提示重新下载。
 
 ### 选型
 
@@ -126,9 +129,13 @@ python3.12 -m pip install -r requirements-semantic.txt   # onnxruntime, tokenize
   "model": {"id", "name", "repo", "revision", "license", "homepage", "size_bytes", "files": [{"path", "size", "sha256"}], "downloaded", "dir"},
   "download": {"state": "idle|downloading|done|error", "mirror", "file", "done_bytes", "total_bytes", "error"},
   "local_only": true,
-  "index": {"state", "phase", "done", "total", "percent", "chunks", "indexed_messages", "last_built_at", "last_error"}
+  "index": {"state", "phase", "done", "total", "percent", "chunks", "indexed_messages", "last_built_at", "last_error", "stale"}
 }
 ```
+
+旧版本（schema 不同）留下的语义索引会显示为 `empty`，搜索返回空结果，建一次索引即可。
+
+下面三个 POST 接口都要求 `Content-Type: application/json`，否则返回 415（防止跨站的表单 / text/plain 请求绕过 CORS 预检）。
 
 状态的先后顺序：`not_installed` → `disabled` → `model_missing` / `downloading` → `empty` / `building` / `ready` / `error`。
 
@@ -140,7 +147,7 @@ python3.12 -m pip install -r requirements-semantic.txt   # onnxruntime, tokenize
 
 ## POST /api/search/semantic/download
 
-`{"mirror": "hf-mirror"}`（可选，默认用设置里的）。后台下载并校验，进度看 status 的 `download`。界面必须先把 `model.size_bytes` 和 `model.repo` / 下载源告诉用户，用户点了才调这个接口。依赖没装时返回 409。
+`{"mirror": "hf-mirror"}`（可选，默认用设置里的）。后台下载并校验（单个文件超过固定大小就立即停止并删掉临时文件），进度看 status 的 `download`。界面必须先把 `model.size_bytes` 和 `model.repo` / 下载源告诉用户，用户点了才调这个接口。依赖没装时返回 409。
 
 ## POST /api/search/semantic/build
 

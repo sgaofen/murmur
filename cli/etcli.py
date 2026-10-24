@@ -4298,6 +4298,17 @@ def _kick_semantic_index(store) -> None:
         sys.stderr.write(f"[semantic] kick failed: {type(e).__name__}: {e}\n")
 
 
+def _is_json_request(handler) -> bool:
+    """True when the POST declares a JSON body.
+
+    Browsers can send text/plain / form posts cross-site without a CORS
+    preflight; insisting on application/json makes every state-changing
+    semantic endpoint preflighted, so the origin allow-list applies.
+    """
+    ctype = (handler.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+    return ctype == "application/json"
+
+
 def _read_json_body(handler) -> dict:
     length = int(handler.headers.get("Content-Length") or 0)
     body = handler.rfile.read(length) if length else b"{}"
@@ -4703,9 +4714,14 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     return self._send_json({"error": "semantic_unavailable",
                                             "message": blocked["message"], "status": blocked}, 409)
                 sidx = _semantic_index_for(self.store)
-                payload = sidx.search(q, chat=qs.get("chat"), sender=qs.get("sender"),
-                                      ts_from=ts_from, ts_to=ts_to, limit=limit,
-                                      offset=offset, min_score=min_score)
+                try:
+                    payload = sidx.search(q, chat=qs.get("chat"), sender=qs.get("sender"),
+                                          ts_from=ts_from, ts_to=ts_to, limit=limit,
+                                          offset=offset, min_score=min_score)
+                except _sem.ModelIntegrityError as e:
+                    st = _sem.availability()
+                    return self._send_json({"error": "semantic_unavailable", "message": str(e),
+                                            "status": st}, 409)
                 payload["index"] = sidx.status()
                 return self._send_json(payload)
             idx = _search_index_for(self.store)
@@ -5156,6 +5172,9 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         if path in ("/api/search/semantic/settings", "/api/search/semantic/download"):
             # Account-independent: work before decrypted data exists too.
             import semantic_index as _sem
+            if not _is_json_request(self):
+                return self._send_json({"error": "unsupported_media_type",
+                                        "message": "需要 Content-Type: application/json"}, 415)
             opts = _read_json_body(self)
             try:
                 if path == "/api/search/semantic/settings":
@@ -5189,6 +5208,9 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
 
         if path == "/api/search/semantic/build":
             import semantic_index as _sem
+            if not _is_json_request(self):
+                return self._send_json({"error": "unsupported_media_type",
+                                        "message": "需要 Content-Type: application/json"}, 415)
             blocked = _sem.ensure_usable()
             if blocked is not None:
                 return self._send_json({"error": "semantic_unavailable",

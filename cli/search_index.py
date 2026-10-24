@@ -39,6 +39,7 @@ import sqlite3
 import sys
 import threading
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator, Optional
@@ -447,7 +448,24 @@ class SearchIndex:
         for k, v in (("schema_version", str(SCHEMA_VERSION)), ("mode", self.mode),
                      ("platform", self.platform), ("source_dir", self._source_dir())):
             c.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", (k, v))
+        # Row ids are only stable within one build; a fresh file / full rebuild
+        # gets a new build_id so layered indexes (semantic_index) notice.
+        c.execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('build_id', ?)",
+                  (uuid.uuid4().hex,))
         c.commit()
+
+    def build_id(self) -> Optional[str]:
+        """Identity of the current build of this index file (None if absent)."""
+        if not self.path.exists():
+            return None
+        try:
+            c = sqlite3.connect(str(self.path), timeout=5)
+        except sqlite3.Error:
+            return None
+        try:
+            return self._meta(c).get("build_id")
+        finally:
+            c.close()
 
     def _meta(self, c: sqlite3.Connection) -> dict:
         try:

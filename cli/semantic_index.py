@@ -33,6 +33,12 @@ was embedded (plus its locator, to detect a rebuilt keyword index). New rows
 are appended; the chat's last chunk is "open" (it may still grow), so it's
 re-embedded together with the new rows. Rows edited/revoked after indexing
 need a rebuild, same as the keyword index.
+
+Stable references: keyword-index row ids are renumbered by a keyword rebuild,
+so chunks store each message's locator (src, tbl, local_id) — the keyword
+index's UNIQUE key — and results are hydrated through it, never through row
+ids. The keyword index's `build_id` is remembered too; when it changes, every
+chunk is re-embedded on the next pass.
 """
 from __future__ import annotations
 
@@ -49,12 +55,13 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Sequence
 
 import search_index as _si
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # 2: chunks.msg_locs (locators) replace keyword row ids
 
 # Chunking: adjacent messages of one chat, cut at whichever comes first.
 CHUNK_MAX_MSGS = 8
@@ -207,6 +214,38 @@ def model_size_bytes() -> int:
     return sum(f["size"] for f in MODEL["files"])
 
 
+class ModelIntegrityError(ValueError):
+    """Model files on disk don't match the pinned SHA-256."""
+
+
+_VERIFIED: dict = {}   # (path, size, mtime_ns) -> sha256, so each file is hashed once
+_VERIFIED_LOCK = threading.Lock()
+
+
+def verify_model_files(d: Optional[Path] = None) -> None:
+    """Raise ModelIntegrityError unless every model file matches its SHA-256.
+
+    Runs before onnxruntime / tokenizers ever parse the files: the download
+    is verified too, but files can be swapped or corrupted on disk later.
+    """
+    d = Path(d or model_dir())
+    for f in MODEL["files"]:
+        p = d / f["local"]
+        try:
+            st = p.stat()
+        except OSError:
+            raise ModelIntegrityError(f"模型文件缺失：{f['local']}，请重新下载模型")
+        key = (str(p), st.st_size, st.st_mtime_ns)
+        with _VERIFIED_LOCK:
+            if _VERIFIED.get(key) == f["sha256"]:
+                continue
+        if st.st_size != f["size"] or _sha256(p) != f["sha256"]:
+            raise ModelIntegrityError(f"模型文件 {f['local']} 校验失败（SHA-256 不一致），"
+                                      "可能已损坏或被替换，请重新下载模型")
+        with _VERIFIED_LOCK:
+            _VERIFIED[key] = f["sha256"]
+
+
 # ---------------------------------------------------------------------------
 # Model download (explicit, background, verified)
 # ---------------------------------------------------------------------------
@@ -271,18 +310,29 @@ class ModelDownloader:
                     self.state["file"] = f["path"]
                 part = target.with_name(target.name + ".part")
 
-                def on_bytes(n: int, _base=base) -> None:
+                def on_bytes(n: int, _base=base, _f=f) -> None:
+                    # Hard cap: a mirror serving more than the pinned size is
+                    # wrong (or hostile) — stop instead of filling the disk.
+                    if n > _f["size"]:
+                        raise ValueError(f"{_f['path']} 超过预期大小（{_f['size']} 字节），"
+                                         "已停止下载，请换一个下载源重试")
                     with self._lock:
                         self.state["done_bytes"] = _base + n
 
-                self.fetch(url, part, on_bytes)
-                digest = _sha256(part)
-                if digest != f["sha256"]:
+                try:
+                    self.fetch(url, part, on_bytes)
+                    size = part.stat().st_size
+                    if size != f["size"]:
+                        raise ValueError(f"{f['path']} 大小不对（{size} / {f['size']} 字节），"
+                                         "请换一个下载源重试")
+                    if _sha256(part) != f["sha256"]:
+                        raise ValueError(f"{f['path']} 校验失败（SHA-256 不一致），请换一个下载源重试")
+                except BaseException:
                     try:
                         part.unlink()
                     except OSError:
                         pass
-                    raise ValueError(f"{f['path']} 校验失败（SHA-256 不一致），请换一个下载源重试")
+                    raise
                 os.replace(str(part), str(target))
                 base += f["size"]
                 with self._lock:
@@ -350,10 +400,11 @@ class OnnxBgeEmbedder(Embedder):
     dim = MODEL["dim"]
 
     def __init__(self, d: Optional[Path] = None, max_tokens: int = MODEL["max_tokens"]) -> None:
+        d = Path(d or model_dir())
+        verify_model_files(d)  # before any parser touches the files
         import numpy as np  # noqa: F401  (fail fast if missing)
         import onnxruntime as ort
         from tokenizers import Tokenizer
-        d = Path(d or model_dir())
         self._tok = Tokenizer.from_file(str(d / "tokenizer.json"))
         self._tok.enable_truncation(max_length=max_tokens)
         self._tok.enable_padding()
@@ -524,7 +575,7 @@ class SemanticIndex:
         self._progress = {"phase": "", "done": 0, "total": 0, "full": False,
                           "started_at": None, "finished_at": None, "last_error": None,
                           "added_chunks": 0}
-        self._cache = None  # (generation, ids, chat_keys, ts_start, ts_end, matrix)
+        self._cache = None  # ((build_id, generation), ids, matrix)
 
     @property
     def embedder(self) -> Embedder:
@@ -551,7 +602,7 @@ class SemanticIndex:
                 ts_start INTEGER NOT NULL,
                 ts_end INTEGER NOT NULL,
                 n_msgs INTEGER NOT NULL,
-                msg_ids TEXT NOT NULL,
+                msg_locs TEXT NOT NULL,
                 senders TEXT NOT NULL,
                 is_open INTEGER NOT NULL DEFAULT 0,
                 vec BLOB NOT NULL);
@@ -563,6 +614,10 @@ class SemanticIndex:
         for k, v in (("schema_version", str(SCHEMA_VERSION)), ("model_id", model_id),
                      ("dim", str(dim)), ("kw_index", str(self.kw.path))):
             c.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", (k, v))
+        # New identity whenever the tables are (re)created; part of the
+        # in-memory matrix cache key together with `generation`.
+        c.execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('build_id', ?)",
+                  (uuid.uuid4().hex,))
         c.commit()
 
     @staticmethod
@@ -578,15 +633,44 @@ class SemanticIndex:
         compatible = (meta.get("schema_version") == str(SCHEMA_VERSION)
                       and meta.get("model_id") == model_id and meta.get("dim") == str(dim))
         if full or (meta and not compatible):
+            # `generation` must keep growing across a reset: restarting it at 0
+            # let a rebuilt index land on the cached generation and serve the
+            # old in-memory matrix. The fresh build_id makes that doubly sure.
+            prev_gen = _int(meta.get("generation"))
+            self._cache = None
             c.executescript("DROP TABLE IF EXISTS chunks; DROP TABLE IF EXISTS marks; "
                             "DROP TABLE IF EXISTS meta;")
             c.commit()
-        self._create_schema(c, model_id, dim)
+            self._create_schema(c, model_id, dim)
+            c.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('generation', ?)",
+                      (str(prev_gen + 1),))
+            c.commit()
+        else:
+            self._create_schema(c, model_id, dim)
         return c
 
     def _bump_generation(self, c: sqlite3.Connection) -> None:
-        g = int(self._meta(c).get("generation") or 0) + 1
+        g = _int(self._meta(c).get("generation")) + 1
         c.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('generation', ?)", (str(g),))
+
+    def _sync_kw_build(self, c: sqlite3.Connection) -> None:
+        """Forget every chunk when the keyword index was rebuilt under us.
+
+        Chunks reference messages by locator, so they'd still hydrate
+        correctly, but marks are keyword row ids and a rebuild reorders rows
+        across files — re-embedding is the only way to be sure nothing is
+        skipped or doubled. An unknown id on either side is adopted as is.
+        """
+        cur = self.kw.build_id()
+        if not cur:
+            return
+        seen = self._meta(c).get("kw_build_id")
+        if seen and seen != cur:
+            c.execute("DELETE FROM chunks")
+            c.execute("DELETE FROM marks")
+            self._bump_generation(c)
+        c.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('kw_build_id', ?)", (cur,))
+        c.commit()
 
     # --- building ---
 
@@ -595,6 +679,7 @@ class SemanticIndex:
             raise _Cancelled()
 
     _KEY_SQL = "COALESCE(NULLIF(chat, ''), tbl)"
+    _KEY_SQL_M = "COALESCE(NULLIF(m.chat, ''), m.tbl)"
 
     def update(self, full: bool = False) -> dict:
         """Synchronously embed everything new in the keyword index."""
@@ -616,6 +701,7 @@ class SemanticIndex:
         c = self._open_for_write(full, emb.model_id, emb.dim)
         added = 0
         try:
+            self._sync_kw_build(c)
             if not self.kw.path.exists():
                 p["phase"] = "done"
                 return {"added_chunks": 0, "total": 0}
@@ -675,15 +761,13 @@ class SemanticIndex:
         p = self._progress
         # Re-open the chat's trailing chunk so new messages can join it.
         carry: list = []
-        open_row = c.execute("SELECT id, msg_ids FROM chunks WHERE chat_key = ? AND is_open = 1",
+        open_row = c.execute("SELECT id, msg_locs FROM chunks WHERE chat_key = ? AND is_open = 1",
                              (key,)).fetchone()
         if open_row is not None:
-            ids = json.loads(open_row[1])
-            if ids:
-                q = ",".join("?" * len(ids))
-                carry = [self._msg(r) for r in kc.execute(
-                    f"SELECT id, ts, sender, text, src, tbl, local_id FROM messages "
-                    f"WHERE id IN ({q}) ORDER BY ts, id", ids).fetchall()]
+            found = _rows_by_locators(kc, json.loads(open_row[1]),
+                                      "m.id, m.ts, m.sender, m.text, m.src, m.tbl, m.local_id")
+            carry = sorted((self._msg(r) for r in found.values()),
+                           key=lambda m: (m["ts"], m["id"]))
             open_chunk_id = open_row[0]
         else:
             open_chunk_id = None
@@ -723,7 +807,7 @@ class SemanticIndex:
     @staticmethod
     def _msg(r) -> dict:
         return {"id": int(r[0]), "ts": int(r[1]), "sender": r[2] or "", "text": r[3] or "",
-                "locator": _locator_str(r[4:7])}
+                "locator": _locator_str(r[4:7]), "loc": [r[4], r[5], int(r[6])]}
 
     def _insert_chunks(self, c, key: str, chunks: list) -> tuple:
         """Embed + insert; the last chunk is marked open. Returns (n, open id)."""
@@ -737,9 +821,10 @@ class SemanticIndex:
                 is_last = (i + j == len(chunks) - 1)
                 senders = sorted({m["sender"] for m in ch if m["sender"]})
                 c.execute(
-                    "INSERT INTO chunks(chat_key, ts_start, ts_end, n_msgs, msg_ids, senders, "
+                    "INSERT INTO chunks(chat_key, ts_start, ts_end, n_msgs, msg_locs, senders, "
                     "is_open, vec) VALUES (?,?,?,?,?,?,?,?)",
-                    (key, ch[0]["ts"], ch[-1]["ts"], len(ch), json.dumps([m["id"] for m in ch]),
+                    (key, ch[0]["ts"], ch[-1]["ts"], len(ch),
+                     json.dumps([m["loc"] for m in ch], ensure_ascii=False),
                      "\x1f".join(senders), 1 if is_last else 0,
                      sqlite3.Binary(pack_vector(vec))))
                 last_id = c.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -808,14 +893,23 @@ class SemanticIndex:
         chunks = 0
         messages = 0
         last_built = None
+        stale = False
         if self.path.exists():
             try:
                 c = sqlite3.connect(str(self.path), timeout=5)
                 try:
-                    lb = self._meta(c).get("last_built_at")
-                    last_built = float(lb) if lb else None
-                    row = c.execute("SELECT COUNT(*), COALESCE(SUM(n_msgs), 0) FROM chunks").fetchone()
-                    chunks, messages = int(row[0]), int(row[1])
+                    meta = self._meta(c)
+                    # An index from an older schema can't be searched: report
+                    # it as empty so the UI offers to (re)build it.
+                    if meta.get("schema_version") == str(SCHEMA_VERSION):
+                        lb = meta.get("last_built_at")
+                        last_built = float(lb) if lb else None
+                        row = c.execute(
+                            "SELECT COUNT(*), COALESCE(SUM(n_msgs), 0) FROM chunks").fetchone()
+                        chunks, messages = int(row[0]), int(row[1])
+                        kw_now = self.kw.build_id()
+                        stale = bool(meta.get("kw_build_id") and kw_now
+                                     and meta["kw_build_id"] != kw_now)
                 finally:
                     c.close()
             except sqlite3.Error:
@@ -842,6 +936,9 @@ class SemanticIndex:
             "indexed_messages": messages,
             "last_built_at": last_built,
             "last_error": p.get("last_error"),
+            # Keyword index rebuilt since the last pass: results stay correct
+            # (locators), but new / changed messages need an incremental pass.
+            "stale": stale,
         }
 
     # --- search ---
@@ -855,7 +952,8 @@ class SemanticIndex:
         np = _numpy()
         if np is None:
             return None
-        gen = self._meta(c).get("generation")
+        meta = self._meta(c)
+        gen = (meta.get("build_id"), meta.get("generation"))
         if self._cache is not None and self._cache[0] == gen:
             return self._cache[1], self._cache[2]
         n, dim = c.execute("SELECT COUNT(*), MAX(length(vec)) FROM chunks").fetchone()
@@ -905,7 +1003,12 @@ class SemanticIndex:
             c = sqlite3.connect(str(self.path), timeout=10)
             try:
                 try:
-                    scored = self._score(c, qv, where_sql, params, senders, bool(wheres))
+                    meta = self._meta(c)
+                    # Old schema / other model: vectors aren't comparable —
+                    # nothing to return until the index is rebuilt.
+                    if (meta.get("schema_version") == str(SCHEMA_VERSION)
+                            and meta.get("model_id") == self.embedder.model_id):
+                        scored = self._score(c, qv, where_sql, params, senders, bool(wheres))
                 except sqlite3.OperationalError as e:
                     if "no such table" not in str(e):
                         raise
@@ -947,23 +1050,26 @@ class SemanticIndex:
         c = sqlite3.connect(str(self.path), timeout=10)
         try:
             meta = {r[0]: r for r in c.execute(
-                f"SELECT id, chat_key, ts_start, ts_end, n_msgs, msg_ids FROM chunks "
+                f"SELECT id, chat_key, ts_start, ts_end, n_msgs, msg_locs FROM chunks "
                 f"WHERE id IN ({','.join('?' * len(top))})", [cid for _, cid in top]).fetchall()}
         finally:
             c.close()
-        all_ids = []
+        all_locs = []
         for _, cid in top:
             if cid in meta:
-                all_ids.extend(json.loads(meta[cid][5]))
-        rows_by_id: dict = {}
-        if all_ids:
+                all_locs.extend(json.loads(meta[cid][5]))
+        # Looked up by (src, tbl, local_id) — stable across keyword rebuilds,
+        # unlike keyword row ids. Each row also carries its chat key so a
+        # chunk can only ever show messages of its own chat.
+        rows_by_loc: dict = {}
+        if all_locs and self.kw.path.exists():
             kc = sqlite3.connect(str(self.kw.path), timeout=10)
             try:
-                for i in range(0, len(all_ids), 500):
-                    part = all_ids[i:i + 500]
-                    for r in kc.execute(f"SELECT m.id, {_si.ROW_COLUMNS} FROM messages m "
-                                        f"WHERE m.id IN ({','.join('?' * len(part))})", part):
-                        rows_by_id[int(r[0])] = r[1:]
+                rows_by_loc = _rows_by_locators(
+                    kc, all_locs, f"{self._KEY_SQL_M}, {_si.ROW_COLUMNS}")
+            except sqlite3.OperationalError as e:
+                if "no such table" not in str(e):
+                    raise
             finally:
                 kc.close()
         terms = _si.split_terms(q)
@@ -973,10 +1079,14 @@ class SemanticIndex:
             m = meta.get(cid)
             if m is None:
                 continue
-            ids = [i for i in json.loads(m[5]) if i in rows_by_id]
-            if not ids:
+            rows = []
+            for loc in json.loads(m[5]):
+                r = rows_by_loc.get(_loc_key(loc))
+                if r is not None and r[0] == m[1]:
+                    rows.append(r[1:])
+            if not rows:
                 continue
-            formatted = self.kw.format_rows([rows_by_id[i] for i in ids])
+            formatted = self.kw.format_rows(rows)
             # Anchor = the message sharing the most character bigrams with the
             # query (first message when nothing overlaps): that's what the hit
             # "points at"; the whole chunk rides along as context.
@@ -994,7 +1104,7 @@ class SemanticIndex:
                 "id": int(cid),
                 "ts_start": int(m[2]),
                 "ts_end": int(m[3]),
-                "message_count": len(ids),
+                "message_count": len(rows),
                 "anchor_index": best,
                 "messages": [
                     {"sender": it["sender"], "sender_name": it["sender_name"], "ts": it["ts"],
@@ -1010,6 +1120,38 @@ class SemanticIndex:
 def _locator_str(row) -> str:
     src, tbl, local_id = row
     return f"{src}|{tbl}|{int(local_id)}"
+
+
+def _int(v) -> int:
+    try:
+        return int(v or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _loc_key(loc) -> tuple:
+    return (str(loc[0]), str(loc[1]), int(loc[2]))
+
+
+def _rows_by_locators(kc: sqlite3.Connection, locs: Iterable, cols_sql: str) -> dict:
+    """{(src, tbl, local_id): row} from the keyword index, via its UNIQUE key.
+
+    `cols_sql` selects from `messages m`. Missing messages are simply absent.
+    """
+    groups: dict = {}
+    for loc in locs:
+        k = _loc_key(loc)
+        groups.setdefault((k[0], k[1]), set()).add(k[2])
+    out: dict = {}
+    for (src, tbl), ids in groups.items():
+        ids_l = sorted(ids)
+        for i in range(0, len(ids_l), 500):
+            part = ids_l[i:i + 500]
+            for r in kc.execute(
+                    f"SELECT m.local_id, {cols_sql} FROM messages m WHERE m.src = ? AND m.tbl = ? "
+                    f"AND m.local_id IN ({','.join('?' * len(part))})", [src, tbl] + part):
+                out[(src, tbl, int(r[0]))] = tuple(r[1:])
+    return out
 
 
 # ---------------------------------------------------------------------------

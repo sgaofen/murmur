@@ -379,6 +379,7 @@ export interface SemanticIndexStatus {
   indexed_messages: number;
   last_built_at: number | null;   // unix seconds
   last_error: string | null;
+  stale: boolean;                 // keyword index rebuilt since; next incremental pass re-embeds
 }
 
 export interface SemanticStatus {

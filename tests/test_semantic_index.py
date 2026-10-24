@@ -111,15 +111,23 @@ class _Base(unittest.TestCase):
     def chunk_rows(self):
         c = sqlite3.connect(str(self.idx.path))
         try:
-            return c.execute("SELECT id, chat_key, msg_ids, is_open FROM chunks ORDER BY id").fetchall()
+            return c.execute("SELECT id, chat_key, msg_locs, is_open FROM chunks ORDER BY id").fetchall()
         finally:
             c.close()
 
     def covered_ids(self):
-        ids = []
-        for _, _, msg_ids, _ in self.chunk_rows():
-            ids.extend(json.loads(msg_ids))
-        return ids
+        """Keyword-index row ids of every message the chunks reference."""
+        c = sqlite3.connect(str(self.kw.path))
+        try:
+            ids = []
+            for _, _, msg_locs, _ in self.chunk_rows():
+                for src, tbl, local_id in json.loads(msg_locs):
+                    row = c.execute("SELECT id FROM messages WHERE src = ? AND tbl = ? "
+                                    "AND local_id = ?", (src, tbl, local_id)).fetchone()
+                    ids.append(row[0] if row else None)
+            return ids
+        finally:
+            c.close()
 
     def kw_ids(self):
         c = sqlite3.connect(str(self.kw.path))
@@ -382,6 +390,86 @@ class RebuildRegressionTest(_Base):
         self.assertTrue(any("后来补进来" in m["text"]
                             for x in r["results"] for m in x["chunk"]["messages"]))
 
+    def test_status_flags_stale_after_keyword_rebuild(self):
+        self.idx.update()
+        self.assertFalse(self.idx.status()["stale"])
+        self.kw.update(full=True)
+        self.assertTrue(self.idx.status()["stale"])
+        self.idx.update()
+        self.assertFalse(self.idx.status()["stale"])
+
+    def test_keyword_build_id_changes_only_on_rebuild(self):
+        self.kw.update()
+        a = self.kw.build_id()
+        self.assertTrue(a)
+        add_alice_msgs(self.data, [(base.ts("2024-09-09"), base.ALICE, "增量不换 build_id")])
+        self.kw.update()
+        self.assertEqual(self.kw.build_id(), a)
+        self.kw.update(full=True)
+        self.assertNotEqual(self.kw.build_id(), a)
+
+    def test_old_schema_index_is_empty_until_rebuilt(self):
+        self.idx.path.parent.mkdir(parents=True, exist_ok=True)
+        c = sqlite3.connect(str(self.idx.path))
+        c.executescript("""
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+            CREATE TABLE chunks (id INTEGER PRIMARY KEY, chat_key TEXT, ts_start INTEGER,
+                ts_end INTEGER, n_msgs INTEGER, msg_ids TEXT, senders TEXT, is_open INTEGER,
+                vec BLOB);
+        """)
+        c.executemany("INSERT INTO meta VALUES (?, ?)", [
+            ("schema_version", "1"), ("model_id", self.emb.model_id), ("dim", "64"),
+            ("generation", "7")])
+        c.execute("INSERT INTO chunks VALUES (1, ?, 0, 0, 1, '[1]', '', 1, ?)",
+                  (base.ALICE, sqlite3.Binary(sem.pack_vector([0.125] * 64))))
+        c.commit()
+        c.close()
+        self.assertEqual(self.idx.status()["state"], "empty")
+        self.assertEqual(self.idx.search("火锅")["total"], 0)
+        self.idx.update()
+        self.assertEqual(self._meta()["schema_version"], str(sem.SCHEMA_VERSION))
+        self.assertGreater(int(self._meta()["generation"]), 7)
+        self.assertEqual(sorted(self.covered_ids()), self.kw_ids())
+
+
+class ModelIntegrityTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="murmur-semantic-model-"))
+        self.payloads = {"model_quantized.onnx": b"M" * 300, "tokenizer.json": b"{}"}
+        files = [{"path": "x/" + k, "local": k, "size": len(v),
+                  "sha256": hashlib.sha256(v).hexdigest()} for k, v in self.payloads.items()]
+        self._patch = mock.patch.object(sem, "MODEL", dict(sem.MODEL, files=files))
+        self._patch.start()
+        for k, v in self.payloads.items():
+            (self.tmp / k).write_bytes(v)
+
+    def tearDown(self):
+        self._patch.stop()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_good_files_pass(self):
+        sem.verify_model_files(self.tmp)
+        sem.verify_model_files(self.tmp)  # memoized path
+
+    def test_tampered_file_rejected_before_loading(self):
+        sem.verify_model_files(self.tmp)
+        p = self.tmp / "model_quantized.onnx"
+        p.write_bytes(b"X" * 300)          # same size, different content
+        st = p.stat()
+        os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+        with self.assertRaises(sem.ModelIntegrityError) as cm:
+            sem.verify_model_files(self.tmp)
+        self.assertIn("SHA-256", str(cm.exception))
+        # The embedder checks before importing onnxruntime / tokenizers, so this
+        # raises the integrity error even where those packages aren't installed.
+        with self.assertRaises(sem.ModelIntegrityError):
+            sem.OnnxBgeEmbedder(self.tmp)
+
+    def test_missing_file_rejected(self):
+        (self.tmp / "tokenizer.json").unlink()
+        with self.assertRaises(sem.ModelIntegrityError):
+            sem.verify_model_files(self.tmp)
+
 
 class SearchTest(_Base):
     def setUp(self):
@@ -551,6 +639,51 @@ class AvailabilityTest(unittest.TestCase):
             self.assertFalse((sem.model_dir() / "a.bin").exists())
             self.assertFalse((sem.model_dir() / "a.bin.part").exists())
 
+    def test_download_size_cap(self):
+        payloads = [("a.bin", b"A" * 1000)]
+        fake_model = self._fake_model(payloads)
+        got = []
+
+        def fetch(url, dest, on_bytes):
+            # A mirror that keeps streaming past the pinned size.
+            with open(dest, "wb") as out:
+                n = 0
+                for _ in range(100):
+                    out.write(b"A" * 256)
+                    n += 256
+                    got.append(n)
+                    on_bytes(n)
+
+        dl = sem.ModelDownloader()
+        dl.fetch = fetch
+        with mock.patch.object(sem, "MODEL", fake_model):
+            dl.start("huggingface")
+            dl.wait(10)
+            st = dl.status()
+            self.assertEqual(st["state"], "error")
+            self.assertIn("超过预期大小", st["error"])
+            self.assertLessEqual(max(got), 1000 + 256)   # stopped at the first overrun
+            self.assertFalse((sem.model_dir() / "a.bin").exists())
+            self.assertFalse((sem.model_dir() / "a.bin.part").exists())
+
+    def test_download_short_file_rejected(self):
+        payloads = [("a.bin", b"A" * 1000)]
+        fake_model = self._fake_model(payloads)
+
+        def fetch(url, dest, on_bytes):
+            Path(dest).write_bytes(b"A" * 10)
+            on_bytes(10)
+
+        dl = sem.ModelDownloader()
+        dl.fetch = fetch
+        with mock.patch.object(sem, "MODEL", fake_model):
+            dl.start("huggingface")
+            dl.wait(10)
+            st = dl.status()
+            self.assertEqual(st["state"], "error")
+            self.assertIn("大小不对", st["error"])
+            self.assertFalse((sem.model_dir() / "a.bin.part").exists())
+
     def test_download_unknown_mirror(self):
         with self.assertRaises(ValueError):
             sem.ModelDownloader().start("nope")
@@ -602,11 +735,11 @@ class HttpTest(unittest.TestCase):
                 os.environ[k] = v
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def _req(self, path, body=None):
+    def _req(self, path, body=None, ctype="application/json"):
         data = None if body is None else json.dumps(body).encode("utf-8")
         req = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}", data=data,
                                      method="GET" if body is None else "POST",
-                                     headers={"Content-Type": "application/json"})
+                                     headers={"Content-Type": ctype})
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 return resp.status, json.loads(resp.read().decode("utf-8"))
@@ -631,6 +764,42 @@ class HttpTest(unittest.TestCase):
             # Keyword search is unaffected.
             code, r = self._req(f"/api/search?q={q}")
             self.assertEqual(code, 200)
+
+    def test_posts_require_json_content_type(self):
+        with mock.patch.object(sem, "missing_deps", lambda: []), \
+                mock.patch.object(sem, "model_files_present", lambda d=None: True):
+            for ctype in ("text/plain", "application/x-www-form-urlencoded", ""):
+                for path, body in (("/api/search/semantic/settings", {"enabled": True}),
+                                   ("/api/search/semantic/download", {"mirror": "hf-mirror"}),
+                                   ("/api/search/semantic/build", {"full": True})):
+                    code, r = self._req(path, body, ctype=ctype)
+                    self.assertEqual(code, 415, (path, ctype))
+                    self.assertEqual(r["error"], "unsupported_media_type")
+            self.assertFalse(sem.load_settings()["enabled"])
+            self.assertEqual(sem.downloader().status()["state"], "idle")
+            code, st = self._req("/api/search/semantic/settings", {"enabled": True},
+                                 ctype="application/json; charset=utf-8")
+            self.assertEqual(code, 200)
+            self.assertTrue(st["enabled"])
+
+    def test_search_reports_tampered_model_as_unavailable(self):
+        def boom():
+            raise sem.ModelIntegrityError("模型文件 model_quantized.onnx 校验失败（SHA-256 不一致）")
+        sem.embedder_factory = boom
+        sem.reset_embedder()
+        sem.save_settings(enabled=True)
+        kw = si.get_index(self.store, "wechat")
+        sidx = sem.get_semantic_index(kw)
+        sidx._embedder = self.emb
+        sidx.update()
+        sidx._embedder = None
+        with mock.patch.object(sem, "missing_deps", lambda: []), \
+                mock.patch.object(sem, "model_files_present", lambda d=None: True):
+            q = urllib.parse.quote("火锅")
+            code, r = self._req(f"/api/search?q={q}&mode=semantic")
+        self.assertEqual(code, 409)
+        self.assertEqual(r["error"], "semantic_unavailable")
+        self.assertIn("SHA-256", r["message"])
 
     def test_enable_build_search(self):
         def present(d=None):
