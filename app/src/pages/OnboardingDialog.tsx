@@ -396,7 +396,7 @@ function Welcome({ onNext, onPickQQ }: { onNext: () => void; onPickQQ?: () => vo
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 18 }}>
         {[
           ['🔒', '完全本地', '从读取密钥到分析，一切在你的电脑上完成。'],
-          ['🤖', '可选 AI 分析', '检测到本机的 Claude Code / Codex，可以让 AI 直接读你的关系档案。'],
+          ['🤖', '可选 AI 分析', '检测到本机的 Claude Code / Codex / Gemini / Kimi / OpenCode，可以让 AI 直接读你的关系档案。'],
           ['📓', '杂志风回顾', '不是冰冷的统计，是你和老朋友之间故事的体面整理。'],
         ].map(([icon, title, body]) => (
           <div key={title} style={{ display: 'flex', gap: 14, padding: '12px 14px',

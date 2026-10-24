@@ -110,7 +110,7 @@ _RULES = (
     (PLATFORM_UNSUPPORTED, r"macos only|windows-only|只支持 windows"),
     (TIMEOUT, r"超时|timed out|timeoutexpired"),
     (LIVE_KEY_FAILED, r"^exit-\d+$"),
-    (AGENT_NOT_INSTALLED, r"(claude|codex|gemini|kimi)\b.* not installed|需要同时安装"),
+    (AGENT_NOT_INSTALLED, r"(claude|codex|gemini|kimi|opencode)\b.* not installed|需要同时安装"),
 )
 _COMPILED = tuple((code, re.compile(pat, re.IGNORECASE | re.MULTILINE)) for code, pat in _RULES)
 

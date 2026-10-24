@@ -19,6 +19,7 @@ import type { Friend } from '../../data/types';
 import { displayName, isPrivacyMode, maskText } from '../../utils/privacy';
 import { usePrivacy } from '../../utils/usePrivacy';
 import { ArrowLeft, Copy, Refresh, Close, Quote } from '../../utils/icons';
+import { agentDisplayName as agentNameFor } from '../../utils/agents';
 
 interface Props {
   friend: Friend;
@@ -150,7 +151,7 @@ export function RelationshipReportView({ friend, cli, onClose }: Props) {
   }, [cli, friend.id]);
 
   const chapters = useMemo(() => (output ? parseChapters(output) : []), [output]);
-  const agentDisplayName = cli === 'claude' ? 'Claude Code' : cli === 'codex' ? 'Codex CLI' : cli;
+  const agentDisplayName = agentNameFor(cli);
   const friendName = displayName(friend.id, friend.name);
   const evidence = deriveEvidence(year);
 

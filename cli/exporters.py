@@ -300,8 +300,18 @@ def write_csv(meta: ChatMeta, records: list[dict], out: IO) -> int:
 _MD_BLOCK_START = re.compile(r"^(\s*)([#>*+\-|]|\d+[.)]|```|~~~)")
 
 
+# `![alt](url)` / `![alt][ref]` in message text would make a Markdown viewer
+# fetch a remote image (read-tracking pixel). `!\[` renders as a literal
+# "![" and is neither an image nor a link.
+_MD_IMAGE_RE = re.compile(r"!(?=\[)")
+
+
+def neutralize_md_images(text: str) -> str:
+    return _MD_IMAGE_RE.sub(lambda m: "!\\", text)
+
+
 def _md_escape_line(line: str) -> str:
-    line = line.replace("<", "&lt;")
+    line = neutralize_md_images(line.replace("<", "&lt;"))
     m = _MD_BLOCK_START.match(line)
     if m:
         line = line[:m.end(1)] + "\\" + line[m.end(1):]
@@ -585,7 +595,8 @@ def export_pair_json(wxid_a: str, wxid_b: str, out: IO, store_dir: Path | None =
 def export_pair_txt(wxid_a: str, wxid_b: str, out: IO, store_dir: Path | None = None) -> int:
     """Pair export as plain markdown — same content the AI agents see."""
     meta = _pair_meta(wxid_a, wxid_b, store_dir=store_dir)
-    out.write(meta["pack_md"])
+    # The pack quotes chat samples verbatim; keep them from loading remote images.
+    out.write(neutralize_md_images(meta["pack_md"]))
     return 1
 
 
