@@ -13,6 +13,7 @@ import { TaskCenterBell, TaskCenterDrawer, useTaskCenter } from '../components/e
 import { displayName, maskText } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
 import { ProfileSwitcher } from '../components/ProfileSwitcher';
+import { LiveSyncToggle } from '../components/LiveSyncToggle';
 
 interface Props {
   dark?: boolean;
@@ -23,9 +24,9 @@ interface Props {
 
 type Tab = 'private' | 'group' | 'time';
 
-function HomeChromeBar({ onRefresh, refreshing, refreshMsg, onExtractKey, onToggleTaskCenter, taskCenterActive }: {
+function HomeChromeBar({ onRefresh, refreshing, refreshMsg, onExtractKey, onToggleTaskCenter, taskCenterActive, onLiveSynced }: {
   onRefresh: () => void; refreshing: boolean; refreshMsg: string; onExtractKey: () => void;
-  onToggleTaskCenter: () => void; taskCenterActive: boolean;
+  onToggleTaskCenter: () => void; taskCenterActive: boolean; onLiveSynced: () => void;
 }) {
   return (
     <div style={{
@@ -77,6 +78,7 @@ function HomeChromeBar({ onRefresh, refreshing, refreshMsg, onExtractKey, onTogg
           </svg>
           密钥
         </button>
+        <LiveSyncToggle onSynced={onLiveSynced} disabled={refreshing} />
         <button onClick={onRefresh} disabled={refreshing} style={{
           all: 'unset', cursor: refreshing ? 'wait' : 'pointer',
           display: 'flex', alignItems: 'center', gap: 6,
@@ -329,6 +331,20 @@ export function HomePage({ dark = false, onOpenFriend, onOpenOnboarding }: Props
     return () => { cancelled = true; };
   }, [summary, tab, searchDebounced]);
 
+  // Live sync swapped in new DB files: quietly re-fetch what the page shows.
+  async function handleLiveSynced() {
+    try {
+      const [s, fs] = await Promise.all([
+        getHomeSummary(),
+        getAllFriends({ kind: tab === 'time' ? 'all' : tab, q: searchDebounced }),
+      ]);
+      setSummary(s);
+      setAllFriends(fs);
+    } catch {
+      // transient (e.g. a DB mid-swap) — the next sync or a manual refresh catches up
+    }
+  }
+
   async function handleRefresh() {
     setRefreshing(true);
     setRefreshMsg('');
@@ -456,7 +472,8 @@ export function HomePage({ dark = false, onOpenFriend, onOpenOnboarding }: Props
       <HomeChromeBar onRefresh={handleRefresh} refreshing={refreshing} refreshMsg={refreshMsg}
         onExtractKey={() => setExtractOpen(true)}
         onToggleTaskCenter={() => setTaskCenterOpen(o => !o)}
-        taskCenterActive={taskCenterOpen} />
+        taskCenterActive={taskCenterOpen}
+        onLiveSynced={handleLiveSynced} />
       <HeroFrame summary={summary} onOpen={onOpenFriend} />
       <Timeline summary={summary} />
       <FilterBar tab={tab} setTab={setTab} search={search} setSearch={setSearch} count={allFriends.length} />

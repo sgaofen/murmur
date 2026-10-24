@@ -550,6 +550,40 @@ export async function refreshData(opts: RefreshOpts = {}): Promise<RefreshResult
   });
 }
 
+// 实时同步 (WeChat only): backend polls the encrypted DBs and re-decrypts
+// the ones whose .db / -wal changed. Off by default.
+export interface LiveSyncStatus {
+  enabled: boolean;
+  interval: number;           // seconds between polls
+  min_interval: number;
+  max_interval: number;
+  running: boolean;
+  syncing: boolean;
+  last_check_ts: number | null;
+  last_sync_ts: number | null;   // last time a changed DB was re-decrypted
+  last_new_messages: number;
+  last_synced_dbs: string[];
+  last_duration_ms: number | null;
+  last_error: string | null;
+  total_new_messages: number;
+  sync_count: number;
+  platforms: string[];
+  active_platform: 'wechat' | 'qq';
+  available: boolean;            // a decrypted WeChat store exists
+}
+
+export async function getLiveSyncStatus(): Promise<LiveSyncStatus> {
+  return j('/api/live-sync/status');
+}
+
+export async function setLiveSync(opts: { enabled?: boolean; interval?: number }): Promise<LiveSyncStatus & { ok: boolean }> {
+  return j('/api/live-sync', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(opts),
+  });
+}
+
 export async function generateAIPack(id: string, opts: { sample?: number } = {}): Promise<{
   ok: boolean; path: string; size: number; name: string; content: string;
 }> {
