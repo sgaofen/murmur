@@ -9,11 +9,55 @@ import type { Friend, FriendStats, HomeSummary, Moment } from './types';
 // Fixes "Could not connect to the server" / "Load failed" in production .app builds.
 export const API_BASE = (import.meta.env?.VITE_ETCLI_URL as string) || 'http://127.0.0.1:9100';
 
+/** Error thrown for non-2xx responses (and unreachable backend). `message`
+ * keeps the historical `API <path>: <status> <body>` shape so existing
+ * string checks keep working; `code` is the stable backend error code
+ * (cli/error_codes.py → data/errorCatalog.ts) when the body carried one. */
+export class ApiError extends Error {
+  code: string | null;
+  status: number;
+  /** Original `error` text from the JSON body, if any. */
+  raw: string | null;
+  constructor(message: string, opts: { code?: string | null; status?: number; raw?: string | null } = {}) {
+    super(message);
+    this.name = 'ApiError';
+    this.code = opts.code ?? null;
+    this.status = opts.status ?? 0;
+    this.raw = opts.raw ?? null;
+  }
+}
+
+/** Stable error code from anything a request can throw or return:
+ * ApiError, a JSON payload with `code`, or null when unknown. */
+export function errorCode(e: unknown): string | null {
+  if (!e || typeof e !== 'object') return null;
+  const c = (e as { code?: unknown }).code;
+  return typeof c === 'string' && c ? c : null;
+}
+
 async function j<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(API_BASE + path, init);
+  let res: Response;
+  try {
+    res = await fetch(API_BASE + path, init);
+  } catch (e) {
+    // Network-level failure (backend not running / connection refused).
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new ApiError(`API ${path}: ${msg}`, { code: 'BACKEND_UNREACHABLE', raw: msg });
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => '');
-    throw new Error(`API ${path}: ${res.status} ${text.slice(0, 200)}`);
+    let code: string | null = null;
+    let raw: string | null = null;
+    try {
+      const body = JSON.parse(text);
+      if (body && typeof body === 'object') {
+        code = typeof body.code === 'string' ? body.code : null;
+        raw = typeof body.error === 'string' ? body.error : null;
+      }
+    } catch {
+      // Non-JSON body — leave code/raw empty.
+    }
+    throw new ApiError(`API ${path}: ${res.status} ${text.slice(0, 200)}`, { code, status: res.status, raw });
   }
   return res.json();
 }
@@ -31,6 +75,8 @@ export interface InfoResponse {
   // Last EchoStore/QQStore init exception, surfaced so OnboardingDialog
   // shows the real cause instead of silently looping back to extract-key.
   init_error?: string | null;
+  /** Stable code for init_error (see data/errorCatalog.ts). */
+  init_error_code?: string | null;
 }
 
 // Cross-platform profile listing — drives the ProfileSwitcher.
@@ -208,6 +254,99 @@ export async function getMessages(id: string, opts: { limit?: number } = {}): Pr
   return j(`/api/friend/${encodeURIComponent(id)}/messages${params.toString() ? '?' + params : ''}`);
 }
 
+// ---- Global message search (backend: cli/search_index.py, docs/API_SEARCH.md) ----
+// Results carry raw names/text: the backend does not apply privacy mode, so
+// callers must run names and snippet segments through utils/privacy.
+
+export type SearchIndexMode = 'fts5_trigram' | 'like';
+
+export interface SearchIndexStatus {
+  platform: 'wechat' | 'qq';
+  account: string;
+  mode: SearchIndexMode;
+  state: 'empty' | 'building' | 'ready' | 'error';
+  phase: '' | 'scanning' | 'indexing' | 'done';
+  full_rebuild: boolean;
+  done: number;
+  total: number;
+  percent: number;
+  indexed_messages: number;
+  sources: number;
+  last_built_at: number | null;   // unix seconds
+  last_error: string | null;
+  short_query_note: string;
+  auto_started?: boolean;         // only on GET /api/search/status
+}
+
+export interface SearchHit {
+  platform: 'wechat' | 'qq';
+  chat: string;                   // session username (wxid / xxx@chatroom / QQ uid)
+  chat_name: string;
+  is_group: boolean;
+  sender: string;                 // "self" or wxid / QQ uid
+  sender_name: string;
+  ts: number;
+  time: string;                   // ISO, China time
+  type: string;                   // label: text / share / ...
+  type_code: number;
+  snippet: string;
+  segments: { text: string; hit: boolean }[];
+  highlights: [number, number][]; // UTF-16 offsets into snippet
+  locator: {
+    db: string;                   // message_N.db / nt_msg.db
+    table: string;                // Msg_<md5> / c2c_msg_table / group_msg_table
+    local_id: number;             // WeChat local_id, QQ rowid
+    server_id: string | null;     // string to keep int64 precision
+  };
+}
+
+export interface SearchResponse {
+  query: string;
+  terms: string[];
+  mode: SearchIndexMode;
+  match: 'fts' | 'like' | 'fts+like';
+  total: number;
+  limit: number;
+  offset: number;
+  results: SearchHit[];
+  index: SearchIndexStatus;
+}
+
+export interface SearchParams {
+  q: string;
+  chat?: string | string[];
+  sender?: string | string[];
+  from?: string | number;         // unix seconds or YYYY-MM-DD
+  to?: string | number;           // date-only means end of that day
+  type?: string | string[];       // labels (text, share, ...) or numeric codes
+  limit?: number;                 // 1..200, default 50
+  offset?: number;
+}
+
+export async function searchMessages(p: SearchParams): Promise<SearchResponse> {
+  const params = new URLSearchParams({ q: p.q });
+  const list = (v?: string | string[]) => (Array.isArray(v) ? v.join(',') : v);
+  const chat = list(p.chat);
+  const sender = list(p.sender);
+  const type = list(p.type);
+  if (chat) params.set('chat', chat);
+  if (sender) params.set('sender', sender);
+  if (type) params.set('type', type);
+  if (p.from !== undefined && p.from !== '') params.set('from', String(p.from));
+  if (p.to !== undefined && p.to !== '') params.set('to', String(p.to));
+  if (p.limit) params.set('limit', String(p.limit));
+  if (p.offset) params.set('offset', String(p.offset));
+  return j(`/api/search?${params}`);
+}
+
+export async function getSearchStatus(): Promise<SearchIndexStatus> {
+  return j('/api/search/status');
+}
+
+export async function rebuildSearchIndex(): Promise<SearchIndexStatus & { ok: boolean; started: boolean; queued: boolean }> {
+  return j('/api/search/rebuild', { method: 'POST' });
+}
+
 export async function indexMedia(): Promise<{
   ok: boolean; total?: number; indexed?: number; existing?: number; ms?: number; details?: string; error?: string;
 }> {
@@ -221,6 +360,8 @@ export interface RefreshResult {
   // Set when the decrypt subprocess returned 0 but the post-decrypt store
   // re-init still threw — caller should treat success+init_error as failure.
   init_error?: string | null;
+  /** Stable error code when !ok or init_error is set (data/errorCatalog.ts). */
+  code?: string | null;
 }
 
 export interface RefreshOpts {
@@ -249,6 +390,8 @@ export async function generateAIPack(id: string, opts: { sample?: number } = {})
 
 export async function extractKey(opts: { autoRestart?: boolean; timeout?: number } = {}): Promise<{
   ok: boolean; key?: string; mac_keys_count?: number; ms?: number; log?: string;
+  /** Stable error code when !ok (data/errorCatalog.ts). */
+  code?: string | null;
   /** macOS: number of encrypted DBs found on disk. */
   total_dbs?: number;
   /** macOS: memory scan missed some/all DBs — offer live capture (Frida). */
@@ -274,7 +417,7 @@ export interface FridaStatus {
   frozen: boolean;
 }
 
-export type LiveKeyPhase = 'idle' | 'starting' | 'auth' | 'attaching' | 'capturing' | 'done' | 'error';
+export type LiveKeyPhase = 'idle' | 'starting' | 'auth' | 'attaching' | 'capturing' | 'waiting-wechat' | 'done' | 'error';
 
 export interface LiveKeyJob {
   running: boolean;
@@ -290,9 +433,13 @@ export interface LiveKeyJob {
   /** DBs matched this round (relative paths) */
   new: string[];
   hits: number;
+  /** account passphrase seen in CCKeyDerivationPBKDF — every DB key derived from it */
+  passphrase_found: boolean;
   elevated: boolean;
   /** 'frida-missing' | 'attach-denied' | 'auth-cancelled' | 'exit-N' | free text */
   error: string | null;
+  /** Stable code for `error` (data/errorCatalog.ts). */
+  code?: string | null;
   log: string;
   round: number;
 }
@@ -311,7 +458,7 @@ export async function getLiveKeyStatus(opts: { coverage?: boolean } = {}): Promi
 }
 
 export async function startLiveKey(seconds: number): Promise<{
-  ok: boolean; started?: boolean; complete?: boolean; already_running?: boolean; error?: string;
+  ok: boolean; started?: boolean; complete?: boolean; already_running?: boolean; error?: string; code?: string;
 }> {
   return j('/api/live-key/start', {
     method: 'POST',
@@ -324,11 +471,11 @@ export async function cancelLiveKey(): Promise<{ ok: boolean }> {
   return j('/api/live-key/cancel', { method: 'POST' });
 }
 
-export async function installFrida(): Promise<{ ok: boolean; started?: boolean; already_running?: boolean; error?: string }> {
+export async function installFrida(): Promise<{ ok: boolean; started?: boolean; already_running?: boolean; error?: string; code?: string }> {
   return j('/api/live-key/install-frida', { method: 'POST' });
 }
 
-export async function saveKey(key: string): Promise<{ ok: boolean; path?: string; error?: string }> {
+export async function saveKey(key: string): Promise<{ ok: boolean; path?: string; error?: string; code?: string }> {
   return j('/api/save-key', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -446,11 +593,11 @@ export async function cancelQQScan(): Promise<{ ok: boolean; cancelled: boolean 
   return j('/api/qq/scan-disks/cancel', { method: 'POST' });
 }
 
-export async function extractQQKey(timeout = 240): Promise<{ ok: boolean; key: string | null; log: string; error: string | null }> {
+export async function extractQQKey(timeout = 240, qq?: string): Promise<{ ok: boolean; key: string | null; qq?: string | null; log: string; error: string | null }> {
   return j('/api/qq/extract-key', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ timeout }),
+    body: JSON.stringify({ timeout, qq }),
   });
 }
 
@@ -471,7 +618,7 @@ export async function decryptQQ(qq: string, key?: string): Promise<{ ok: boolean
 }
 
 export async function resignWechat(opts: { relaunch?: boolean } = {}): Promise<{
-  ok: boolean; ms?: number; log?: string[]; error?: string; stderr?: string; next_steps?: string;
+  ok: boolean; ms?: number; log?: string[]; error?: string; stderr?: string; next_steps?: string; code?: string;
 }> {
   return j('/api/resign-wechat', {
     method: 'POST',
@@ -650,22 +797,47 @@ export async function getAvailableReportYears(): Promise<{
   return j('/api/annual-report/years');
 }
 
-export type ExportFormat = 'json' | 'html' | 'txt';
+export type ExportFormat = 'json' | 'html' | 'txt' | 'csv' | 'md' | 'chatlab';
+/** Pair export supports a subset: the relationship pack as md/json/html, and
+ *  the evidence edges as csv. 'txt' is kept as a legacy alias of 'md'. */
+export type PairExportFormat = 'json' | 'html' | 'md' | 'csv' | 'txt';
+/** none = text only; originals = only decrypted full-size images / videos;
+ *  best = originals, falling back to thumbnails. */
+export type MediaPolicy = 'none' | 'originals' | 'best';
 
-/** Trigger a download of the chat with `wxid` in the requested format.
- *  Drives the export buttons in Friend.tsx — no JSON parsing here, this is
- *  a binary file the browser saves directly via the Content-Disposition header. */
-export async function exportFriendChat(wxid: string, format: ExportFormat): Promise<void> {
-  const url = `${API_BASE}/api/export?wxid=${encodeURIComponent(wxid)}&format=${format}`;
-  const res = await fetch(url);
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`导出失败：${res.status} ${text.slice(0, 200)}`);
-  }
+export interface ExportMediaSummary {
+  policy: MediaPolicy;
+  media_messages: number;
+  exported_original: number;
+  exported_thumbnail: number;
+  exported_total: number;
+  missing_total: number;
+  missing_by_kind: Record<string, number>;
+  missing_reasons: Record<string, number>;
+  missing_reason_labels: Record<string, string>;
+  thumbnail_skipped: number;
+}
+
+/** Returned when exporting with attachments (media !== 'none'): the backend
+ *  writes a folder (chat file + media/ + 导出报告.md) instead of a download. */
+export interface ExportReport {
+  ok: boolean;
+  chat_id: string;
+  name: string;
+  format: ExportFormat;
+  messages: number;
+  exported_at: string;
+  dir: string;
+  file: string;
+  report_file: string;
+  media: ExportMediaSummary;
+}
+
+async function downloadResponse(res: Response, fallbackName: string): Promise<void> {
   const blob = await res.blob();
   const dispo = res.headers.get('Content-Disposition') || '';
   const m = /filename="([^"]+)"/.exec(dispo);
-  const filename = m ? m[1] : `murmur_${wxid}.${format}`;
+  const filename = m ? m[1] : fallbackName;
   const link = document.createElement('a');
   link.href = URL.createObjectURL(blob);
   link.download = filename;
@@ -673,6 +845,28 @@ export async function exportFriendChat(wxid: string, format: ExportFormat): Prom
   link.click();
   document.body.removeChild(link);
   setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+}
+
+/** Export the chat with `wxid`.
+ *  media === 'none' → the browser downloads one file (Content-Disposition), returns null.
+ *  otherwise        → the backend writes a folder next to the other exports and
+ *                     returns its report (counts + missing-attachment reasons). */
+export async function exportFriendChat(
+  wxid: string,
+  format: ExportFormat,
+  media: MediaPolicy = 'none',
+): Promise<ExportReport | null> {
+  const url = `${API_BASE}/api/export?wxid=${encodeURIComponent(wxid)}&format=${format}&media=${media}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`导出失败：${res.status} ${text.slice(0, 200)}`);
+  }
+  if (media !== 'none') {
+    return (await res.json()) as ExportReport;
+  }
+  await downloadResponse(res, `murmur_${wxid}.${format === 'chatlab' ? 'chatlab.json' : format}`);
+  return null;
 }
 
 export interface VoiceItem {
@@ -689,25 +883,16 @@ export async function getFriendVoices(wxid: string): Promise<VoiceItem[]> {
 /** Murmur's signature feature (issue #10): export how friend A and friend B
  *  know each other from your vantage point. Bundles direct evidence (mentions
  *  / mutual replies / sns cross-likes) + group co-presence + chat samples.
- *  txt yields markdown the user can paste straight into ChatGPT/Claude. */
-export async function exportPairChat(a: string, b: string, format: ExportFormat): Promise<void> {
+ *  md yields markdown the user can paste straight into ChatGPT/Claude; csv
+ *  lists the evidence edges for spreadsheets. */
+export async function exportPairChat(a: string, b: string, format: PairExportFormat): Promise<void> {
   const url = `${API_BASE}/api/pair-export?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}&format=${format}`;
   const res = await fetch(url);
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     throw new Error(`双人导出失败：${res.status} ${text.slice(0, 200)}`);
   }
-  const blob = await res.blob();
-  const dispo = res.headers.get('Content-Disposition') || '';
-  const m = /filename="([^"]+)"/.exec(dispo);
-  const filename = m ? m[1] : `murmur_pair_${a}__${b}.${format}`;
-  const link = document.createElement('a');
-  link.href = URL.createObjectURL(blob);
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+  await downloadResponse(res, `murmur_pair_${a}__${b}.${format === 'txt' ? 'md' : format}`);
 }
 
 export interface BatchStartReq {
