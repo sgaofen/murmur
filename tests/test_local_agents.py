@@ -378,7 +378,10 @@ class ProcessTreeTest(unittest.TestCase):
 
     def test_run_captured_ok(self) -> None:
         r = local_agents.run_captured(
-            [sys.executable, "-c", "import sys; d = sys.stdin.read(); print(len(d))"],
+            # Decode explicitly: the child's own stdin encoding is the locale
+            # one (cp1252 on Windows runners) and text pipes use CRLF there.
+            [sys.executable, "-c",
+             "import sys; d = sys.stdin.buffer.read().decode('utf-8'); print(len(d.replace('\\r\\n', '\\n')))"],
             input=PROMPT, timeout=30, cwd=str(self.tmp), env=None)
         self.assertEqual(r.returncode, 0)
         self.assertEqual(r.stdout.strip(), str(len(PROMPT)))
