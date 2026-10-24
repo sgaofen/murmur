@@ -306,15 +306,20 @@ def list_source_dbs(encrypted_root: Path) -> list:
 
 
 def per_db_fingerprint(per_db: dict) -> bytes:
-    """Stable bytes identifying a decrypted_keys.json key set, used as the
-    DecryptCache key fingerprint on the macOS per-DB path (any key change
-    invalidates the whole cache, same as a global-key change on Windows)."""
-    import json
-    payload = {
-        "keys_by_db": per_db.get("keys_by_db") or {},
-        "keys_by_salt": per_db.get("keys_by_salt") or {},
-    }
-    return json.dumps(payload, sort_keys=True).encode("utf-8")
+    """DecryptCache fingerprint for the macOS per-DB key mode.
+
+    Deliberately constant: decrypted_keys.json grows over time (live key
+    capture merges newly seen DB keys into it via live_key.merge_keys), and
+    hashing the whole file would throw away every cached DB each time one
+    new key lands. Key changes are tracked per DB instead (`key_tag`).
+    """
+    return b"murmur-per-db-keys-v1"
+
+
+def key_tag(key_hex: str) -> str:
+    """Short non-reversible fingerprint of one per-DB key for the cache."""
+    import hashlib
+    return hashlib.sha256(key_hex.encode("utf-8")).hexdigest()[:16]
 
 
 def key_for_db(src: Path, encrypted_root: Path, per_db: dict) -> Optional[str]:
@@ -480,12 +485,12 @@ def _decrypt_per_db(profile: WeChatProfile, per_db: dict, *, force: bool = False
         for i, src in enumerate(src_dbs, 1):
             size_mb = src.stat().st_size / 1e6
             rel = str(src.relative_to(profile.encrypted_root)).replace("\\", "/")
-            if not force and cache.is_fresh(src):
+            key_hex = key_for_db(src, profile.encrypted_root, per_db)
+            if key_hex and not force and cache.is_fresh(src, key_tag(key_hex)):
                 print(f"  [{i:2d}/{len(src_dbs)}] CACHE ({size_mb:6.1f} MB) {src.name}")
                 skipped_cached += 1
                 present.add(src.name)
                 continue
-            key_hex = key_for_db(src, profile.encrypted_root, per_db)
             if not key_hex:
                 print(f"  [{i:2d}/{len(src_dbs)}] SKIP ({size_mb:6.1f} MB) {rel}: 这个 DB 在 WCDB 缓存里没找到，请在微信里点开它对应的对话/页面后重抓 key")
                 n_fail += 1
@@ -509,7 +514,7 @@ def _decrypt_per_db(profile: WeChatProfile, per_db: dict, *, force: bool = False
             n_ok += 1
             present.add(src.name)
             if res.signature is not None:
-                cache.mark_done(src, res.signature)
+                cache.mark_done(src, res.signature, key_tag=key_tag(key_hex))
             else:
                 cache.forget(src)
     finally:

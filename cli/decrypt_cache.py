@@ -130,11 +130,17 @@ class DecryptCache:
                 pass
         return src.name
 
-    def is_fresh(self, src: Path) -> bool:
-        """Whether `src` is unchanged since the last successful decrypt."""
+    def is_fresh(self, src: Path, key_tag: Optional[str] = None) -> bool:
+        """Whether `src` is unchanged since the last successful decrypt.
+
+        `key_tag` (macOS per-DB keys): fingerprint of the key used for this
+        one DB; the entry only counts if it was written with the same key.
+        """
         rel = self._rel_key(src)
         entry = self._loaded["entries"].get(rel)
         if not entry:
+            return False
+        if key_tag is not None and entry.get("key_tag") != key_tag:
             return False
         if entry.get("sig") is not None:
             if entry["sig"] != _sig_jsonable(db_signature(src)):
@@ -156,7 +162,8 @@ class DecryptCache:
             return False
         return True
 
-    def mark_done(self, src: Path, sig: Optional[tuple] = None) -> None:
+    def mark_done(self, src: Path, sig: Optional[tuple] = None,
+                  key_tag: Optional[str] = None) -> None:
         """Record that `src` was successfully decrypted with the current key.
 
         `sig` is the `db_signature()` of the source *as it was snapshotted*.
@@ -175,6 +182,8 @@ class DecryptCache:
             "sig": _sig_jsonable(sig),
             "decrypted_at": int(time.time()),
         }
+        if key_tag is not None:
+            self._loaded["entries"][rel]["key_tag"] = key_tag
 
     def forget(self, src: Path) -> None:
         rel = self._rel_key(src)

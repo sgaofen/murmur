@@ -217,6 +217,20 @@ class ChangeDetectionTest(LiveSyncTestBase):
         self.fake.calls.clear()
         self.assertEqual(ls.tick()["changed"], [])
 
+        # Live key capture (live_key.merge_keys) later adds message_1's key to
+        # decrypted_keys.json: only that DB syncs, the cached ones stay put.
+        per_db["keys_by_db"]["message/message_1.db"] = "e" * 64
+        r = ls.tick()
+        self.assertEqual(r["synced"], ["message_1.db"])
+        self.assertEqual(self.fake.names(), ["message_1.db"])
+        # ...and a restarted poller still treats everything as fresh.
+        self.fake.calls.clear()
+        ls2 = self.make_sync(plan=refresh.KeyPlan("per_db", per_db, None))
+        self.assertEqual(ls2.tick()["synced"], [])
+        # A re-keyed DB (new key for the same file) is re-decrypted.
+        per_db["keys_by_db"]["contact/contact.db"] = "f" * 64
+        self.assertEqual(ls2.tick()["synced"], ["contact.db"])
+
     def test_no_profile_or_key_idles(self):
         ls = self.make_sync(profile=False)
         self.assertEqual(ls.tick(), {"skipped": "no_profile"})

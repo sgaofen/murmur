@@ -291,15 +291,24 @@ class LiveSync:
         changed = []
         for src in _refresh.list_source_dbs(src_root):
             rel = _rel(src, src_root)
-            sig = db_signature(src)
+            # Per-DB mode: the key is part of the state. decrypted_keys.json is
+            # re-read every tick and grows as live key capture finds more DBs,
+            # so a DB whose key just appeared (or changed) gets synced even if
+            # its file did not change.
+            if plan.mode == "per_db":
+                key_hex = _refresh.key_for_db(src, src_root, plan.per_db or {})
+                tag = _refresh.key_tag(key_hex) if key_hex else None
+            else:
+                key_hex, tag = plan.key_hex, None
+            state = (db_signature(src), tag)
             prev = self._sigs.get(rel)
-            if prev == sig:
+            if prev == state:
                 continue
-            if prev is None and cache.is_fresh(src):
+            if prev is None and key_hex and cache.is_fresh(src, tag):
                 # First sight after start: the decrypted copy already matches.
-                self._sigs[rel] = sig
+                self._sigs[rel] = state
                 continue
-            changed.append((src, rel, sig))
+            changed.append((src, rel, state, key_hex, tag))
 
         if not changed:
             with self._state:
@@ -311,15 +320,11 @@ class LiveSync:
         new_msgs = 0
         staging = Path(tempfile.mkdtemp(prefix="murmur_live_"))
         try:
-            for src, rel, sig in changed:
-                if plan.mode == "per_db":
-                    key_hex = _refresh.key_for_db(src, src_root, plan.per_db or {})
-                else:
-                    key_hex = plan.key_hex
+            for src, rel, state, key_hex, tag in changed:
                 if not key_hex:
-                    # macOS: no WCDB key captured for this DB. Don't retry
-                    # every tick; wait until it changes again.
-                    self._sigs[rel] = sig
+                    # macOS: no WCDB key captured for this DB yet. Don't retry
+                    # every tick; wait until the file or the key set changes.
+                    self._sigs[rel] = state
                     continue
                 dst_f = dst_dir / src.name
                 before = message_marks(dst_f) if (_MSG_DB_RE.match(src.name) and dst_f.exists()) else None
@@ -328,8 +333,8 @@ class LiveSync:
                 if res.ok:
                     synced.append(src.name)
                     if res.signature is not None:
-                        cache.mark_done(src, res.signature)
-                        self._sigs[rel] = res.signature
+                        cache.mark_done(src, res.signature, key_tag=tag)
+                        self._sigs[rel] = (res.signature, tag)
                     else:
                         # WeChat kept writing during the snapshot: leave it
                         # unmarked so the next tick picks it up again.
@@ -346,7 +351,7 @@ class LiveSync:
                 else:
                     errors.append(f"{src.name}: {_refresh.friendly_error(res.error or '')}")
                     cache.forget(src)
-                    self._sigs[rel] = sig  # retry once the source changes again
+                    self._sigs[rel] = state  # retry once the source/key changes again
         finally:
             shutil.rmtree(staging, ignore_errors=True)
             try:
