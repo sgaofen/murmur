@@ -25,6 +25,14 @@ if sys.platform.startswith("win") and native_dir.is_dir():
         if f.is_file():
             native_files.append((str(f), "native"))
 
+# macOS: ship the Frida-free capture dylib (cli/native/murmur_keycap.c, built
+# by build_keycap.sh in release CI) → _internal/native/murmur_keycap.dylib.
+# Only this one file, not the Windows DLL/EXE payloads.
+if sys.platform == "darwin":
+    _keycap = native_dir / "murmur_keycap.dylib"
+    if _keycap.is_file():
+        native_files.append((str(_keycap), "native"))
+
 a = Analysis(
     ["etcli.py"],
     pathex=[str(HERE)],
@@ -61,6 +69,7 @@ a = Analysis(
         "qq_decrypt",
         "qq_store",
         "search_index",
+        "semantic_index",
         "media",
         "sns",
         "voice",
@@ -72,9 +81,11 @@ a = Analysis(
         "live_sync",
         "decrypted_media_index",
         "batch_analyze",
+        "local_agents",
         "mcp_server",
         "live_key",
         "hook_cc_key_frida",
+        "mac_private_copy",
         # macOS live key capture (WeChat 4.1.9+). frida is optional: bundled
         # when the build env has it (release CI installs it on macOS);
         # without it the App shows the CLI fallback instead.
