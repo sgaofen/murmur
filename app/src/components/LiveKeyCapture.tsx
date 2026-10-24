@@ -29,6 +29,7 @@ const DURATIONS = [60, 90, 180];
 const CORE_DBS = ['session/session.db', 'contact/contact.db'];
 
 const TODO: Array<[string, string]> = [
+  ['最快：退出微信（⌘Q）再重新打开并登录', '登录时微信会重新派生全部密钥，通常一次就能全部抓到'],
   ['给任意好友或文件传输助手发一条消息', '解锁会话库和消息库'],
   ['点开几个这次登录后还没点开过的对话，往上翻一翻', '每个消息分库要单独触发'],
   ['打开「通讯录」，点进一两个联系人', '联系人库'],
@@ -225,12 +226,13 @@ function Running({ status, matched, total, onStop }: {
   const head =
     job.phase === 'auth' ? '请在系统弹窗里输入开机密码…' :
     job.phase === 'capturing' ? '正在抓取 —— 现在去微信里操作' :
+    job.phase === 'waiting-wechat' ? '微信已退出 —— 重新打开并登录，我会自动接上' :
     '正在挂钩微信…';
   return (
     <div style={{ padding: '8px 0 4px' }}>
       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12 }}>
         <div className="et-h3">{head}</div>
-        {job.phase === 'capturing' && job.remaining != null && (
+        {(job.phase === 'capturing' || job.phase === 'waiting-wechat') && job.remaining != null && (
           <div style={{ fontFamily: 'var(--et-mono)', fontSize: 34, fontWeight: 600, color: 'var(--et-orange)' }}>
             {job.remaining}s
           </div>
@@ -244,12 +246,17 @@ function Running({ status, matched, total, onStop }: {
         {job.new.length > 0 && <>（这轮新增 {job.new.length} 个）</>}
         {job.phase === 'capturing' && <> · 已截获 {job.hits} 次加解密调用</>}
       </div>
+      {job.passphrase_found && (
+        <div className="et-meta" style={{ marginBottom: 10, color: 'var(--et-sage)' }}>
+          ✓ 已截获账号口令，其余数据库的密钥直接推算出来了
+        </div>
+      )}
       {job.new.length > 0 && (
         <div style={{ fontFamily: 'var(--et-mono)', fontSize: 11, color: 'var(--et-ink-soft)', lineHeight: 1.6, marginBottom: 10 }}>
           {job.new.slice(-6).map(n => <div key={n}>✓ {n}</div>)}
         </div>
       )}
-      {job.phase === 'capturing' && <TodoList />}
+      {(job.phase === 'capturing' || job.phase === 'waiting-wechat') && <TodoList />}
       <button onClick={onStop} style={secondaryBtn}>提前结束这一轮</button>
     </div>
   );
