@@ -105,6 +105,9 @@ export function useActivePlatform(): 'wechat' | 'qq' | null {
   return platform;
 }
 
+const PROFILE_RETRY_ATTEMPTS = 40;
+const PROFILE_RETRY_DELAY_MS = 1500;
+
 export function useProfiles(): {
   profiles: ProfileEntry[] | null;
   active: ActiveProfile | null;
@@ -129,11 +132,40 @@ export function useProfiles(): {
     }
   };
 
+  // The sidebar mounts this once at startup, often before etcli is listening
+  // (same boot race as Home.tsx), so keep retrying quietly for about a minute:
+  // `loading` stays true and `error` is only reported once we give up.
   useEffect(() => {
-    refresh();
-    const onChange = () => refresh();
+    let disposed = false;
+    let timer: number | undefined;
+    let attempt = 0;
+    const load = async () => {
+      setLoading(true);
+      try {
+        const d = await getProfiles();
+        if (disposed) return;
+        attempt = 0;
+        setData(d);
+        setError(null);
+        setLoading(false);
+      } catch (e: any) {
+        if (disposed) return;
+        if (++attempt < PROFILE_RETRY_ATTEMPTS) {
+          timer = window.setTimeout(load, PROFILE_RETRY_DELAY_MS);
+          return;
+        }
+        setError(e?.message || String(e));
+        setLoading(false);
+      }
+    };
+    load();
+    const onChange = () => { window.clearTimeout(timer); attempt = 0; load(); };
     window.addEventListener(CHANGE_EVENT, onChange);
-    return () => window.removeEventListener(CHANGE_EVENT, onChange);
+    return () => {
+      disposed = true;
+      window.clearTimeout(timer);
+      window.removeEventListener(CHANGE_EVENT, onChange);
+    };
   }, []);
 
   const visibleProfiles = data?.profiles

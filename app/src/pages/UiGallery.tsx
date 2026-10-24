@@ -257,7 +257,7 @@ function FilterChips() {
       <Chip onClick={() => setOn('private')} selected={on === 'private'}>私聊朋友</Chip>
       <Chip onClick={() => setOn('group')} selected={on === 'group'}>群聊</Chip>
       <Chip onClick={() => setOn('all')} selected={on === 'all'}>全部</Chip>
-      <span className="ui-dock__sep" />
+      <span className="ui-vsep" />
       {tags.map(t => (
         <Chip key={t} tone="accent" onRemove={() => setTags(ts => ts.filter(x => x !== t))} removeLabel={`移除「${t}」`}>{t}</Chip>
       ))}

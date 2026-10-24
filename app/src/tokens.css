@@ -201,7 +201,6 @@
 
   /* layers */
   --z-dialog: 1200;
-  --z-dock:   9999;
 
   /* —— legacy (--et-*) —— */
   --et-serif: var(--font-serif);
@@ -290,11 +289,14 @@
   padding: 3px 9px; border-radius: 999px;
   font-family: var(--font-sans); font-size: 11px; font-weight: 500;
   letter-spacing: 0.04em;
+  /* A tag is one word; never break it (absolutely positioned chips, e.g. the
+     friend hero's avatar badge, otherwise shrink-wrap onto two lines). */
+  white-space: nowrap;
   background: var(--accent-soft);
   color: var(--accent-strong);
   border: 0.5px solid var(--accent-border);
 }
-.et-chip.ink   { background: var(--surface-hover); color: var(--text-primary); border-color: var(--border-subtle); }
+.et-chip.ink  { background: var(--surface-hover); color: var(--text-primary); border-color: var(--border-subtle); }
 .et-chip.sage  { background: var(--success-bg); color: var(--success-fg); border-color: var(--success-border); }
 .et-chip.amber { background: var(--warning-bg); color: var(--warning-fg); border-color: var(--warning-border); }
 .et-chip.faint { background: transparent; color: var(--text-muted); border: 0.5px dashed var(--border-default); }

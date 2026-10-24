@@ -13,7 +13,7 @@ import { PairAnalysisPanel } from './extras/PairAnalysisPanel';
 import { mdToHtml, MURMUR_MD_CSS } from '../utils/markdown';
 import { displayName, maskedWxid, maskText } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
-import { ProfileSwitcher } from '../components/ProfileSwitcher';
+import { PageHeader } from '../shell/PageHeader';
 import { useActivePlatform } from '../utils/activeProfile';
 
 interface Props {
@@ -27,25 +27,11 @@ type FriendTab = 'story' | 'media' | 'chat';
 function FriendChromeBar({ onBack, friend }: { onBack: () => void; friend: Friend }) {
   const name = displayName(friend.id, friend.name);
   return (
-    <div style={{
-      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-      padding: '14px 28px', borderBottom: '0.5px solid var(--et-line)',
-    }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-        <button onClick={onBack} style={{
-          all: 'unset', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6,
-          color: 'var(--et-mute)', fontSize: 13, fontWeight: 500,
-        }}>
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5">
-            <path d="M8 2L3 7l5 5" strokeLinecap="round" />
-          </svg>
-          回到年代记
-        </button>
-        <ProfileSwitcher />
-      </div>
-      <div className="et-serif" style={{ fontSize: 14, color: 'var(--et-mute)' }}>和 {name} 的故事</div>
-      <span className="et-meta" style={{ fontFamily: 'var(--et-mono)', fontSize: 11, color: 'var(--et-faint)' }}>{maskedWxid(friend.id)}</span>
-    </div>
+    <PageHeader
+      back={{ label: '首页', onClick: onBack }}
+      title={`和 ${name} 的故事`}
+      subtitle={<span className="et-mono">{maskedWxid(friend.id)}</span>}
+    />
   );
 }
 
@@ -352,8 +338,11 @@ function PairExportModal({
         boxShadow: 'var(--et-shadow-3)',
         position: 'relative', overflow: 'hidden',
       }}>
-        <button onClick={onClose} style={{
-          position: 'absolute', top: 14, right: 14, all: 'unset', cursor: 'pointer',
+        <button onClick={onClose} aria-label="关闭" style={{
+          // `all: 'unset'` must come first — after `position` it would reset it
+          // and drop the × into the top-left corner. top: 30 centres it on the
+          // panel's title row, below the "MURMUR / PAIR EXPORT" eyebrow.
+          all: 'unset', position: 'absolute', top: 30, right: 14, cursor: 'pointer',
           width: 28, height: 28, borderRadius: 8, color: 'var(--et-mute)',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           fontSize: 16, zIndex: 1,
@@ -898,7 +887,7 @@ export function FriendPage({ friendId, onBack, onOpenFriend }: Props) {
         onLocalAgent={(cli) => { setExportOpen(false); setAgentInvoke(cli); }}
       />
       {readyPack && (
-        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, zIndex: 40 }}>
+        <div style={{ position: 'fixed', top: 'var(--shell-top, 0px)', left: 'var(--shell-left, 0px)', right: 0, zIndex: 40 }}>
           <ReportReadyBanner
             pack={readyPack}
             friend={friend}

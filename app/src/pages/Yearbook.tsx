@@ -3,7 +3,7 @@ import { getYearbook } from '../data/api';
 import type { Yearbook, YearData } from '../data/api';
 import { displayName, maskedWxid, maskText } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
-import { ProfileSwitcher } from '../components/ProfileSwitcher';
+import { PageHeader } from '../shell/PageHeader';
 import { useActivePlatform } from '../utils/activeProfile';
 import { YearbookCover } from './extras/YearbookCover';
 
@@ -48,20 +48,13 @@ export function YearbookPage({ friendId, onBack }: Props) {
   const friendName = displayName(data.wxid, data.name);
 
   return (
-    <div className="et-root" style={{ background: 'var(--et-bg)', minHeight: '100vh' }}>
+    <div className="et-root" style={{ background: 'var(--et-bg)', minHeight: 'var(--shell-vh, 100vh)' }}>
       <style>{YEARBOOK_KEYWORDS_CSS}</style>
-      {/* Top bar */}
-      <div style={{
-        padding: '14px 28px', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        borderBottom: '0.5px solid var(--et-line)',
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-          <button onClick={onBack} style={{ all: 'unset', cursor: 'pointer', color: 'var(--et-mute)', fontSize: 13 }}>← 返回</button>
-          <ProfileSwitcher />
-        </div>
-        <div className="et-serif" style={{ fontSize: 14, color: 'var(--et-mute)' }}>双人年代记 · 你 ↔ {friendName}</div>
-        <span style={{ fontFamily: 'var(--et-mono)', fontSize: 11, color: 'var(--et-faint)' }}>{maskedWxid(data.wxid)}</span>
-      </div>
+      <PageHeader
+        back={{ label: '朋友页', onClick: onBack }}
+        title={`双人年代记 · 你 ↔ ${friendName}`}
+        subtitle={<span className="et-mono">{maskedWxid(data.wxid)}</span>}
+      />
 
       {/* Cover */}
       <div className="et-paper-grain" style={{

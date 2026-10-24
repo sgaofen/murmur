@@ -12,9 +12,9 @@ import { ExtractKeyDialog } from './ExtractKeyDialog';
 import { TaskCenterBell, TaskCenterDrawer, useTaskCenter } from '../components/extras/TaskCenter';
 import { displayName, maskText } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
-import { ProfileSwitcher } from '../components/ProfileSwitcher';
 import { Button, EmptyState, ErrorState } from '../ui';
 import { IconKey } from '../ui/icons';
+import { PageHeader } from '../shell/PageHeader';
 
 interface Props {
   onOpenFriend: (id: string) => void;
@@ -28,46 +28,14 @@ function HomeChromeBar({ onRefresh, refreshing, refreshMsg, onExtractKey, onTogg
   onRefresh: () => void; refreshing: boolean; refreshMsg: string; onExtractKey: () => void;
   onToggleTaskCenter: () => void; taskCenterActive: boolean;
 }) {
+  // Logo, account switcher and the 年度 / 关系网 / 报告 / 表格 links moved to
+  // the app shell's left nav; only Home's own actions stay here.
   return (
-    <div style={{
-      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-      padding: '14px 28px', borderBottom: '0.5px solid var(--et-line)', background: 'transparent',
-    }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        <svg width="22" height="22" viewBox="0 0 22 22">
-          <circle cx="11" cy="11" r="9.5" fill="none" stroke="var(--et-orange)" strokeWidth="1.2" />
-          <circle cx="11" cy="11" r="5.5" fill="none" stroke="var(--et-orange)" strokeWidth="1.2" />
-          <circle cx="11" cy="11" r="1.6" fill="var(--et-orange)" />
-        </svg>
-        <div className="et-serif" style={{ fontSize: 17, fontWeight: 600, color: 'var(--et-ink)', letterSpacing: '0.04em' }}>Murmur 微语</div>
-        <div style={{ width: 1, height: 14, background: 'var(--et-line-2)', margin: '0 4px' }} />
-        <ProfileSwitcher />
-      </div>
+    <PageHeader title="首页" subtitle="年代记 · 你和朋友们的这些年">
       <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
         {refreshMsg && (
           <span className="et-meta" style={{ color: 'var(--et-orange)', fontSize: 11 }}>{maskText(refreshMsg)}</span>
         )}
-        <a href="#annual" title="年度总览 — 所有朋友 + 所有聊天" style={{
-          padding: '5px 10px', borderRadius: 999, fontSize: 11, fontWeight: 500,
-          color: 'var(--et-orange-2)', background: 'var(--et-orange-soft)',
-          textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 4,
-        }}>📅 年度</a>
-        <a href="#graph" title="3D 关系网络" style={{
-          padding: '5px 10px', borderRadius: 999, fontSize: 11, fontWeight: 500,
-          color: 'var(--et-orange-2)', background: 'var(--et-orange-soft)',
-          textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 4,
-        }}>🌌 关系网</a>
-        <a href="#reports" title="AI 关系档案" style={{
-          padding: '5px 10px', borderRadius: 999, fontSize: 11, fontWeight: 500,
-          color: 'var(--et-orange-2)', background: 'var(--et-orange-soft)',
-          textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 4,
-        }}>📑 报告</a>
-        <a href="#table" title="信号表格（无需 AI）" style={{
-          padding: '5px 10px', borderRadius: 999, fontSize: 11, fontWeight: 500,
-          color: 'var(--et-mute)', background: 'transparent',
-          textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 4,
-          border: '0.5px solid var(--et-line-2)',
-        }}>📊 表格</a>
         <TaskCenterBell onClick={onToggleTaskCenter} active={taskCenterActive} />
         <button onClick={onExtractKey} title="重新读取微信密钥，按引导操作" style={{
           all: 'unset', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6,
@@ -91,7 +59,7 @@ function HomeChromeBar({ onRefresh, refreshing, refreshMsg, onExtractKey, onTogg
         </button>
       </div>
       <style>{`@keyframes spin { from { transform: rotate(0); } to { transform: rotate(360deg); } }`}</style>
-    </div>
+    </PageHeader>
   );
 }
 
@@ -422,7 +390,7 @@ export function HomePage({ onOpenFriend, onOpenOnboarding }: Props) {
 
   if (!summary) {
     return (
-      <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10 }}>
+      <div style={{ minHeight: 'var(--shell-vh, 100vh)', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10 }}>
         <div className="et-meta">正在启动本地服务…</div>
         <div className="et-meta" style={{ color: 'var(--et-faint)', fontSize: 11 }}>
           {bootWaitSec >= 8
