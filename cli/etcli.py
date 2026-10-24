@@ -4425,7 +4425,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         # Bootstrap mode: only a small allowlist works without decrypted data.
         _NO_STORE_GET = {"/api/info", "/api/agents", "/api/diagnose", "/api/reports", "/api/log-tail",
                           "/api/scan-disks/status", "/api/profiles", "/api/diag-bundle",
-                          "/api/live-key/status"}
+                          "/api/live-key/status", "/api/live-sync/status"}
         # QQ endpoints have their own data lifecycle (separate stores keyed by
         # qq number) so they bypass the WeChat-store bootstrap gate entirely.
         if path.startswith("/api/qq/"):
@@ -4512,6 +4512,9 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
 
         if path == "/api/profiles":
             return self._send_json(self.__class__._build_profiles_payload())
+
+        if path == "/api/live-sync/status":
+            return self._send_json(self._live_sync_payload())
 
         if path == "/api/log-tail":
             try:
@@ -5094,7 +5097,8 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         BOOTSTRAP_POSTS = {"/api/refresh", "/api/save-key", "/api/extract-key", "/api/wechat-root",
                            "/api/open-folder", "/api/resign-wechat", "/api/open-fda",
                            "/api/scan-disks", "/api/scan-disks/cancel", "/api/active-profile",
-                           "/api/live-key/start", "/api/live-key/cancel", "/api/live-key/install-frida"}
+                           "/api/live-key/start", "/api/live-key/cancel", "/api/live-key/install-frida",
+                           "/api/live-sync"}
         if path == "/api/active-profile":
             length = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(length) if length else b"{}"
@@ -5183,6 +5187,25 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             _paths.cancel_scan()
             return self._send_json({"ok": True, **_paths.get_scan_state()})
 
+        if path == "/api/live-sync":
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length) if length else b"{}"
+            try:
+                opts = json.loads(body.decode("utf-8") or "{}")
+            except json.JSONDecodeError:
+                return self._send_json({"ok": False, "error": "invalid json"}, 400)
+            if not isinstance(opts, dict):
+                return self._send_json({"ok": False, "error": "body must be an object"}, 400)
+            enabled = opts.get("enabled")
+            if enabled is not None and not isinstance(enabled, bool):
+                return self._send_json({"ok": False, "error": "enabled must be a boolean"}, 400)
+            interval = opts.get("interval")
+            if interval is not None and (isinstance(interval, bool)
+                                         or not isinstance(interval, (int, float))):
+                return self._send_json({"ok": False, "error": "interval must be a number (seconds)"}, 400)
+            _LIVE_SYNC.configure(enabled=enabled, interval=interval)
+            return self._send_json({"ok": True, **self._live_sync_payload()})
+
         if path == "/api/refresh":
             # Run the decrypt pipeline; dispatches via etcli sub-task helper (frozen vs dev aware)
             t0 = _time.time()
@@ -5203,8 +5226,22 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 extra_args += ["--wxid", req_wxid]
             if opts.get("force"):
                 extra_args += ["--force"]
-            r = subprocess.run(_spawn_etcli_args("refresh", *extra_args),
-                               capture_output=True, text=True, encoding="utf-8", errors="replace")
+            # Serialise with the live-sync poller: both swap files in the same
+            # decrypted dir. A live-sync tick only holds this for one or two
+            # DBs, so waiting is short; the poller itself skips ticks while a
+            # manual refresh holds the lock.
+            if not _live_sync.DECRYPT_LOCK.acquire(timeout=_REFRESH_LOCK_TIMEOUT_S):
+                return self._send_json({
+                    "ok": False,
+                    "ms": round((_time.time() - t0) * 1000),
+                    "details": "实时同步正在写入数据库，请稍后再点「更新数据」",
+                    "init_error": None,
+                }, 409)
+            try:
+                r = subprocess.run(_spawn_etcli_args("refresh", *extra_args),
+                                   capture_output=True, text=True, encoding="utf-8", errors="replace")
+            finally:
+                _live_sync.DECRYPT_LOCK.release()
             dt = round((_time.time() - t0) * 1000)
             ok = r.returncode == 0
             # Echo a tail of the subprocess output to serve.log so multi-account /
@@ -6333,6 +6370,16 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         return store.me
 
     @classmethod
+    def _live_sync_payload(cls) -> dict:
+        return {
+            **_LIVE_SYNC.status(),
+            "active_platform": cls._active_platform,
+            # Live sync needs a decrypted WeChat store to know which account
+            # to follow; before the first manual decrypt it just idles.
+            "available": cls._wechat_store is not None,
+        }
+
+    @classmethod
     def _flush_analysis_caches(cls) -> None:
         """Drop every memoized analysis layer so the next request reflects the new store.
 
@@ -6742,6 +6789,76 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         self._send_cors_headers()
         self.end_headers()
         self.wfile.write(data)
+
+
+# ---------- live sync (实时同步, WeChat only) ----------
+# Background poller in cli/live_sync.py. It reuses refresh.py's per-DB
+# pipeline in-process; here we only tell it which account to sync and how to
+# invalidate caches once new data landed.
+
+import live_sync as _live_sync  # noqa: E402
+
+# How long a manual /api/refresh waits for an in-flight live-sync tick.
+_REFRESH_LOCK_TIMEOUT_S = 180.0
+_LIVE_SYNC_PROFILE_MEMO: dict = {"dir": None, "profile": None, "ts": 0.0}
+
+
+def _live_sync_profile():
+    """WeChatProfile backing the currently loaded WeChat store, or None.
+
+    discover_wechat_profiles() can be slow (Windows Everything / registry
+    probes), so the answer is memoised per decrypted dir; a miss is retried
+    at most once a minute.
+    """
+    ws = _MurmurAPIHandler._wechat_store
+    if ws is None:
+        return None
+    try:
+        d = str(Path(ws.dir).resolve())
+    except OSError:
+        return None
+    memo = _LIVE_SYNC_PROFILE_MEMO
+    if memo["dir"] == d and (memo["profile"] is not None or _time.time() - memo["ts"] < 60):
+        return memo["profile"]
+    prof = None
+    try:
+        for cand in _paths.discover_wechat_profiles():
+            dec = _paths.decrypted_root_for(cand, must_exist=True)
+            if dec and str(Path(dec).resolve()) == d:
+                prof = cand
+                break
+    except Exception as e:
+        sys.stderr.write(f"[live-sync] profile discovery failed: {e}\n")
+    memo.update({"dir": d, "profile": prof, "ts": _time.time()})
+    return prof
+
+
+def _live_sync_invalidate(changed_dbs: list) -> None:
+    """Same flush as a successful /api/refresh, plus the data-derived caches
+    refresh leaves to the disk wipe, so the next request re-reads the
+    freshly swapped DB files."""
+    ws = _MurmurAPIHandler._wechat_store
+    if ws is not None:
+        ws._contacts = None
+        ws._sessions = None
+        ws._msg_db_for_session.clear()
+        ws._known_malformed.clear()
+    _MurmurAPIHandler._flush_analysis_caches()
+    for cache in (_MENTIONS_CACHE, _PAIR_PACK_CACHE, _ANNUAL_REPORT_CACHE):
+        try:
+            cache.clear()
+        except Exception:
+            pass
+    # Persisted caches live under the *active* account's slug; only wipe them
+    # when that account is the WeChat one we just synced (not a QQ profile).
+    if _MurmurAPIHandler._active_platform == "wechat":
+        _disk_clear()
+
+
+_LIVE_SYNC = _live_sync.LiveSync(
+    profile_resolver=_live_sync_profile,
+    on_synced=_live_sync_invalidate,
+)
 
 
 def _which(cli: str) -> str | None:
@@ -7919,6 +8036,12 @@ def _run_server(args) -> int:
 
     import threading
     threading.Thread(target=_prewarm, daemon=True).start()
+
+    # Live sync is opt-in (off by default); resume it if the user left it on.
+    _LIVE_SYNC.load_config()
+    if _LIVE_SYNC.enabled:
+        sys.stderr.write(f"[etcli serve] live sync on (every {_LIVE_SYNC.interval:g}s)\n")
+        _LIVE_SYNC.start()
 
     try:
         httpd.serve_forever()
