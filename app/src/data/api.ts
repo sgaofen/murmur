@@ -168,6 +168,9 @@ export interface Diagnose {
   wechat_version?: string | null;
   /** macOS only: whether live capture (Frida) is the recommended key path. */
   live_key?: { recommended: boolean; frida: FridaStatus } | null;
+  /** macOS only: Frida-free private-copy capture — `available` once the
+   * capture dylib (murmur_keycap.dylib) is built / bundled. */
+  private_copy?: { available: boolean; copy_exists: boolean } | null;
 }
 
 export async function getDiagnose(): Promise<Diagnose> {
@@ -746,6 +749,8 @@ export async function saveKey(key: string): Promise<{ ok: boolean; path?: string
 
 export async function saveWeChatRoot(path: string): Promise<{
   ok: boolean; saved?: string; error?: string; profiles?: Diagnose['profiles']; wechat_search_roots?: string[];
+  /** Stable error code when !ok (data/errorCatalog.ts). */
+  code?: string | null;
 }> {
   return j('/api/wechat-root', {
     method: 'POST',

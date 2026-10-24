@@ -17,6 +17,9 @@ export interface DialogProps {
   size?: 'sm' | 'md' | 'lg';
   /** Esc / scrim click / × close it. Turn off while a step must finish. */
   dismissible?: boolean;
+  /** Scrim click closes it (default true). Turn off for long flows where a
+   * stray click outside would throw away progress; Esc and × still work. */
+  closeOnScrim?: boolean;
   /** Coral bar on the left edge (onboarding look). */
   accent?: boolean;
   closeLabel?: string;
@@ -31,7 +34,7 @@ const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), selec
 
 export function Dialog({
   open, onClose, title, eyebrow, description, children, footer,
-  size = 'md', dismissible = true, accent = false, closeLabel = '关闭', className,
+  size = 'md', dismissible = true, closeOnScrim = true, accent = false, closeLabel = '关闭', className,
 }: DialogProps) {
   const panelRef = useRef<HTMLDivElement>(null);
   const pressStartedOnScrim = useRef(false);
@@ -92,7 +95,7 @@ export function Dialog({
       className="ui-dialog-scrim"
       onMouseDown={(e) => { pressStartedOnScrim.current = e.target === e.currentTarget; }}
       onClick={(e) => {
-        if (dismissible && pressStartedOnScrim.current && e.target === e.currentTarget) onClose();
+        if (dismissible && closeOnScrim && pressStartedOnScrim.current && e.target === e.currentTarget) onClose();
       }}
     >
       <div

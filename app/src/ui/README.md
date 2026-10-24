@@ -136,6 +136,7 @@ const { mode, resolved, setMode, toggle } = useTheme();
 - 遮罩 + 卡片，通过 portal 挂在 `body` 上，打开时锁定页面滚动
 - `Esc` 关闭（多层对话框只关最上面那个）；点遮罩关闭；`Tab` 焦点圈在对话框内；关闭后焦点回到打开前的元素
 - `dismissible={false}`：禁用 Esc / 点遮罩 / 右上角 ×，用于必须走完的流程
+- `closeOnScrim={false}`：只禁用「点遮罩关闭」，Esc 和 × 照常可用；用于步骤多、误点外面会丢进度的流程（如初始化引导）
 - `size`：`sm` 440 / `md` 560（默认）/ `lg` 720
 - `accent`：左侧珊瑚色竖条（和引导对话框同款）
 - 想让某个元素打开时自动获得焦点：给它加 `data-autofocus`
