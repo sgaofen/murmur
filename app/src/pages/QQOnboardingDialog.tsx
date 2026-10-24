@@ -16,8 +16,8 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   cancelQQMacExtract, cancelQQScan, decryptQQ, extractQQKey, getQQMacExtractStatus,
-  getQQProfiles, getQQScanStatus, openFullDiskAccess, resignQQ, saveQQKey, saveQQRoot,
-  setActiveProfile, startQQMacExtract, startQQScan,
+  getQQProfiles, getQQScanStatus, openFullDiskAccess, resignQQ, restoreQQSignature, saveQQKey,
+  saveQQRoot, setActiveProfile, startQQMacExtract, startQQScan,
 } from '../data/api';
 import type { QQMacExtractState, QQProfile, QQProfilesResponse, QQScanState } from '../data/api';
 
@@ -39,6 +39,7 @@ const MAC_STAGE_TEXT: Record<string, string> = {
   hit: 'QQ 正在打开数据库，收集候选 key…',
   key_seen: '抓到候选 key，再多收集几秒…',
   finishing: '收尾中，调试器正在从 QQ 分离…',
+  cancelling: '正在取消，调试器正在从 QQ 分离…',
   done: '正在校验 key…',
 };
 
@@ -83,7 +84,13 @@ export function QQOnboardingDialog({ open, onClose, onDone }: Props) {
   const [resignBusy, setResignBusy] = useState(false);
   const [resignLog, setResignLog] = useState<string[]>([]);
   const [errStep, setErrStep] = useState(0);
+  const [macNotice, setMacNotice] = useState<string | null>(null);
+  const [restoreBusy, setRestoreBusy] = useState(false);
+  const [restoreMsg, setRestoreMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const capturePollRef = useRef<number | null>(null);
+  // The backend hands the verified key out only once, so never let two
+  // status polls overlap.
+  const pollBusyRef = useRef(false);
   const isMac = data?.os === 'macos';
 
   // Next phase once an account is chosen: Mac needs QQ.app re-signed first.
@@ -95,7 +102,7 @@ export function QQOnboardingDialog({ open, onClose, onDone }: Props) {
   useEffect(() => {
     if (!open) return;
     setPhase('detect'); setErrMsg(null); setActiveQQ(null);
-    setMacCapture(null); setResignLog([]);
+    setMacCapture(null); setResignLog([]); setMacNotice(null); setRestoreMsg(null);
     (async () => {
       try {
         const d = await getQQProfiles();
@@ -289,11 +296,20 @@ export function QQOnboardingDialog({ open, onClose, onDone }: Props) {
   async function doResign() {
     setResignBusy(true);
     setErrMsg(null);
-    setResignLog(['正在退出 QQ 并重签名，稍后会弹出 macOS 授权窗口…']);
+    setRestoreMsg(null);
+    setResignLog(['正在退出 QQ、备份原签名并重签名，稍后会弹出 macOS 授权窗口…']);
     try {
       const r = await resignQQ();
       setResignLog(r.log || []);
+      if (r.backup_dir) {
+        setData(d => (d && d.mac
+          ? { ...d, mac: { ...d.mac, backup: { ...(d.mac.backup || {}), exists: true, dir: r.backup_dir } } }
+          : d));
+      }
       if (!r.ok) {
+        if (r.rolled_back) {
+          setData(d => (d && d.mac ? { ...d, mac: { ...d.mac, debuggable: false } } : d));
+        }
         setErrMsg([r.error || '重签名失败', r.stderr].filter(Boolean).join('\n\n'));
         return;
       }
@@ -304,6 +320,27 @@ export function QQOnboardingDialog({ open, onClose, onDone }: Props) {
       setErrMsg(e?.message || String(e));
     } finally {
       setResignBusy(false);
+    }
+  }
+
+  async function doRestore() {
+    setRestoreBusy(true);
+    setRestoreMsg(null);
+    try {
+      const r = await restoreQQSignature();
+      if (r.ok) {
+        setRestoreMsg({ ok: true, text: r.message || '已恢复腾讯原签名，QQ 可以照常使用。' });
+        setData(d => (d && d.mac ? { ...d, mac: { ...d.mac, debuggable: false } } : d));
+        setMacCapture(null);
+        setErrMsg(null);
+        setPhase('resign');
+      } else {
+        setRestoreMsg({ ok: false, text: [r.error || '恢复失败', r.stderr].filter(Boolean).join('\n\n') });
+      }
+    } catch (e: any) {
+      setRestoreMsg({ ok: false, text: e?.message || String(e) });
+    } finally {
+      setRestoreBusy(false);
     }
   }
 
@@ -318,6 +355,8 @@ export function QQOnboardingDialog({ open, onClose, onDone }: Props) {
     if (!activeQQ) return;
     const qq = activeQQ;
     setErrMsg(null);
+    setMacNotice(null);
+    setRestoreMsg(null);
     setMacCapture({ running: true, stage: 'starting', hits: 0, started_at: null, finished_at: null, result: null });
     try {
       const r = await startQQMacExtract(qq, 240);
@@ -330,17 +369,31 @@ export function QQOnboardingDialog({ open, onClose, onDone }: Props) {
       return;
     }
     stopCapturePoll();
+    pollBusyRef.current = false;
     capturePollRef.current = window.setInterval(async () => {
+      if (pollBusyRef.current) return;
+      pollBusyRef.current = true;
       let s: QQMacExtractState;
       try {
         s = await getQQMacExtractStatus();
       } catch {
+        pollBusyRef.current = false;
         return; // transient — keep polling
       }
-      setMacCapture(s);
-      if (s.running || !s.result) return;
+      if (s.running || !s.result) {
+        setMacCapture(s);
+        pollBusyRef.current = false;
+        return;
+      }
       stopCapturePoll();
+      pollBusyRef.current = false;
       const res = s.result;
+      if (res.cancelled) {
+        setMacCapture(null);
+        setMacNotice('已取消。调试器已经从 QQ 分离，可以随时重新开始抓 key。');
+        return;
+      }
+      setMacCapture(s);
       if (!res.ok || !res.key) {
         fail(res.error || '抓 key 失败', 3);
         return;
@@ -354,6 +407,7 @@ export function QQOnboardingDialog({ open, onClose, onDone }: Props) {
   }
 
   async function cancelMacExtract() {
+    setMacCapture(c => (c ? { ...c, stage: 'cancelling' } : c));
     try { await cancelQQMacExtract(); } catch {/* ignore — poll picks up the final state */}
   }
 
@@ -550,13 +604,17 @@ export function QQOnboardingDialog({ open, onClose, onDone }: Props) {
           {phase === 'resign' && activeQQ && (
             <QQMacResignStep data={data} busy={resignBusy} log={resignLog} errMsg={errMsg}
               onResign={doResign}
-              onSkip={() => { setErrMsg(null); setPhase('extract-key'); }} />
+              onSkip={() => { setErrMsg(null); setPhase('extract-key'); }}
+              restore={<RestoreSignature data={data} busy={restoreBusy || resignBusy}
+                msg={restoreMsg} onRestore={doRestore} />} />
           )}
 
           {phase === 'extract-key' && activeQQ && isMac && (
-            <QQMacExtractStep qq={activeQQ} data={data} capture={macCapture}
+            <QQMacExtractStep qq={activeQQ} data={data} capture={macCapture} notice={macNotice}
               onStart={startMacExtract} onCancel={cancelMacExtract}
-              onResign={() => { setErrMsg(null); setPhase('resign'); }} />
+              onResign={() => { setErrMsg(null); setMacNotice(null); setPhase('resign'); }}
+              restore={<RestoreSignature data={data} busy={restoreBusy}
+                msg={restoreMsg} onRestore={doRestore} />} />
           )}
 
           {phase === 'extract-key' && activeQQ && !isMac && (
@@ -598,6 +656,9 @@ export function QQOnboardingDialog({ open, onClose, onDone }: Props) {
                   style={{ ...secondaryBtn, marginTop: 8 }}>
                   回到「重签 QQ」（QQ 更新后需要重签）
                 </button>
+              )}
+              {isMac && (
+                <RestoreSignature data={data} busy={restoreBusy} msg={restoreMsg} onRestore={doRestore} />
               )}
             </>
           )}
@@ -699,14 +760,39 @@ function MacRiskNotice() {
       ⚠️ <strong>先了解风险再继续：</strong>Murmur 会给 <code>QQ.app</code> 重新做一个本机签名（去掉 hardened runtime、加上允许调试的 <code>get-task-allow</code>），
       再用系统自带的 lldb 调试器在 QQ 打开数据库的一瞬间读出密钥。改签名和调试 QQ 进程<strong>有被腾讯安全机制检测到的可能</strong>（理论上存在账号风控风险），
       QQ 也可能提示「已被修改」。<strong>只用来处理这台 Mac 上、你本人的 QQ 数据。</strong>
-      想恢复原签名：从 QQ 官网重新安装 QQ 即可。
+      <br />
+      改之前 Murmur 会把腾讯原签名备份到 <code>~/.murmur/qq-backup/</code>，之后随时可以点「恢复原签名」还原；
+      重签后会先试启动一次 QQ，起不来就自动还原。
     </div>
   );
 }
 
-function QQMacResignStep({ data, busy, log, errMsg, onResign, onSkip }: {
+/** "恢复原签名" — only shown once a backup of the Tencent signature exists. */
+function RestoreSignature({ data, busy, msg, onRestore }: {
+  data: QQProfilesResponse | null; busy: boolean;
+  msg: { ok: boolean; text: string } | null; onRestore: () => void;
+}) {
+  const backup = data?.mac?.backup;
+  if (!backup?.exists && !msg) return null;
+  return (
+    <div style={{ marginTop: 8 }}>
+      {msg && (
+        <div role="status" style={msg.ok ? { ...okBox } : { ...errBox, marginBottom: 8 }}>{msg.text}</div>
+      )}
+      {backup?.exists && (
+        <button onClick={onRestore} disabled={busy} style={{
+          ...secondaryBtn, opacity: busy ? 0.6 : 1, cursor: busy ? 'wait' : 'pointer',
+        }} title={backup.dir ? `备份位置：${backup.dir}` : undefined}>
+          {busy ? '正在恢复，请留意系统授权窗口…' : '恢复 QQ 原签名（需要开机密码）'}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function QQMacResignStep({ data, busy, log, errMsg, onResign, onSkip, restore }: {
   data: QQProfilesResponse | null; busy: boolean; log: string[]; errMsg: string | null;
-  onResign: () => void; onSkip: () => void;
+  onResign: () => void; onSkip: () => void; restore: React.ReactNode;
 }) {
   const mac = data?.mac;
   const noApp = !mac?.qq_app;
@@ -716,8 +802,10 @@ function QQMacResignStep({ data, busy, log, errMsg, onResign, onSkip }: {
       <div style={stepBox}>
         <ol style={{ margin: 0, paddingLeft: 20 }}>
           <li>Murmur <strong>先退出 QQ</strong>（正在聊天的话先收个尾）</li>
+          <li>把 QQ 主程序和原签名<strong>备份</strong>到 <code>~/.murmur/qq-backup/&lt;QQ 版本&gt;/</code></li>
           <li>只重签 QQ 的主程序 <code>QQ.app/Contents/MacOS/QQ</code>，不需要关闭 SIP</li>
           <li>macOS 会弹出授权窗口，输入<strong>这台 Mac 的开机密码</strong>（不是 Apple ID）</li>
+          <li>在后台<strong>试启动一次 QQ</strong>再退出；起不来就自动恢复原签名（会再弹一次授权窗口）</li>
           <li>QQ 更新后签名会被覆盖，到时候回来再点一次就行</li>
         </ol>
       </div>
@@ -741,17 +829,20 @@ function QQMacResignStep({ data, busy, log, errMsg, onResign, onSkip }: {
           我已经重签过了，直接去抓 key
         </button>
       )}
+      {restore}
     </>
   );
 }
 
-function QQMacExtractStep({ qq, data, capture, onStart, onCancel, onResign }: {
+function QQMacExtractStep({ qq, data, capture, notice, onStart, onCancel, onResign, restore }: {
   qq: string; data: QQProfilesResponse | null; capture: QQMacExtractState | null;
-  onStart: () => void; onCancel: () => void; onResign: () => void;
+  notice: string | null; onStart: () => void; onCancel: () => void; onResign: () => void;
+  restore: React.ReactNode;
 }) {
   const running = !!capture?.running;
   const stage = capture?.stage || '';
   const waitingLogin = stage === 'bp_set' || stage === 'ready';
+  const cancelling = stage === 'cancelling';
   const lldbErr = data?.mac?.lldb_error;
   return (
     <>
@@ -770,6 +861,7 @@ function QQMacExtractStep({ qq, data, capture, onStart, onCancel, onResign }: {
         💡 如果 QQ 自动登录了却一直没抓到：在 QQ 里点头像 →「退出账号」再重新登录。不要用菜单栏的「切换账号」，它会重启 QQ 进程。
       </div>
       {lldbErr && <div style={errBox}>{lldbErr}</div>}
+      {notice && !running && <div role="status" style={okBox}>{notice}</div>}
       {running ? (
         <div style={{ ...stepBox, borderColor: waitingLogin ? 'var(--et-orange)' : 'var(--et-line-2)' }} role="status">
           <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--et-ink)' }}>
@@ -778,7 +870,11 @@ function QQMacExtractStep({ qq, data, capture, onStart, onCancel, onResign }: {
           <div className="et-meta" style={{ marginTop: 4, color: 'var(--et-mute)' }}>
             断点命中 {capture?.hits ?? 0} 次 · 最长等 4 分钟
           </div>
-          <button onClick={onCancel} style={{ ...secondaryBtn, marginTop: 10 }}>取消</button>
+          <button onClick={onCancel} disabled={cancelling} style={{
+            ...secondaryBtn, marginTop: 10, opacity: cancelling ? 0.6 : 1, cursor: cancelling ? 'wait' : 'pointer',
+          }}>
+            {cancelling ? '正在取消…' : '取消'}
+          </button>
         </div>
       ) : (
         <>
@@ -790,6 +886,7 @@ function QQMacExtractStep({ qq, data, capture, onStart, onCancel, onResign }: {
           <button onClick={onResign} style={{ ...secondaryBtn, marginTop: 8 }}>
             回到「重签 QQ」
           </button>
+          {restore}
         </>
       )}
     </>
@@ -807,6 +904,8 @@ const modal: React.CSSProperties = {
   width: 640, maxWidth: '94%', background: 'var(--et-paper)',
   borderRadius: 'var(--et-r-lg)', boxShadow: 'var(--et-shadow-3)',
   border: '0.5px solid var(--et-line-2)', overflow: 'hidden', position: 'relative',
+  // Tall Mac steps (risk notice + log + restore button) must stay reachable.
+  maxHeight: 'calc(100vh - 48px)', overflowY: 'auto',
 };
 const accentBar: React.CSSProperties = {
   position: 'absolute', left: 0, top: 0, bottom: 0, width: 6, background: 'var(--et-orange)',
@@ -839,6 +938,12 @@ const errBox: React.CSSProperties = {
   fontSize: 12.5, color: 'var(--et-rose)', marginBottom: 14,
   whiteSpace: 'pre-wrap',
 };
+const okBox: React.CSSProperties = {
+  padding: '10px 14px', marginBottom: 12, fontSize: 12.5, lineHeight: 1.6,
+  background: 'color-mix(in srgb, var(--et-sage) 14%, transparent)',
+  border: '0.5px solid color-mix(in srgb, var(--et-sage) 45%, transparent)',
+  borderRadius: 8, color: 'var(--et-ink)', whiteSpace: 'pre-wrap',
+};
 const riskBox: React.CSSProperties = {
   padding: '10px 14px', marginBottom: 12, lineHeight: 1.65, fontSize: 12.5,
   background: 'color-mix(in srgb, var(--et-rose) 10%, transparent)',
@@ -854,6 +959,7 @@ const logBox: React.CSSProperties = {
   padding: '8px 12px', background: 'var(--et-paper-2)',
   border: '0.5px solid var(--et-line-2)', borderRadius: 8, marginBottom: 12,
   fontFamily: 'var(--et-mono)', fontSize: 11, lineHeight: 1.6, color: 'var(--et-mute)',
+  whiteSpace: 'pre-wrap',
 };
 const secondaryBtn: React.CSSProperties = {
   all: 'unset', cursor: 'pointer', display: 'block', width: '100%', boxSizing: 'border-box',

@@ -580,6 +580,8 @@ export interface QQMacStatus {
   get_task_allow: boolean | null;
   lldb: string | null;
   lldb_error: string | null;
+  // Original Tencent signature backed up in ~/.murmur/qq-backup/<version>/
+  backup?: { exists: boolean; version?: string; dir?: string; created_at?: number };
 }
 export interface QQProfilesResponse {
   platform: 'qq';
@@ -650,8 +652,21 @@ export async function extractQQKey(timeout = 240, qq?: string): Promise<{ ok: bo
 
 export async function resignQQ(): Promise<{
   ok: boolean; ms?: number; log?: string[]; error?: string; stderr?: string;
+  backup_dir?: string;
+  rolled_back?: boolean;   // trial launch failed and the original signature was put back
 }> {
   return j('/api/qq/resign', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  });
+}
+
+export async function restoreQQSignature(): Promise<{
+  ok: boolean; log?: string[]; error?: string; stderr?: string;
+  restored?: boolean; already_original?: boolean; message?: string;
+}> {
+  return j('/api/qq/restore-signature', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: '{}',
@@ -668,12 +683,17 @@ export async function startQQMacExtract(qq: string, timeout = 240): Promise<{ ok
 
 export interface QQMacExtractState {
   running: boolean;
-  // quitting | waiting | launched | attached | module | bp_set | ready | hit | key_seen | finishing | done | …
+  // quitting | waiting | launched | attached | module | bp_set | ready | hit | key_seen | finishing
+  // | cancelling | cancelled | done | …
   stage: string | null;
   hits: number;
   started_at: number | null;
   finished_at: number | null;
-  result: { ok: boolean; key: string | null; qq?: string | null; error: string | null } | null;
+  // `key` is only present in the first status read after the job finishes.
+  result: {
+    ok: boolean; key: string | null; qq?: string | null; error: string | null;
+    cancelled?: boolean; n_candidates?: number;
+  } | null;
 }
 
 export async function getQQMacExtractStatus(): Promise<QQMacExtractState> {
