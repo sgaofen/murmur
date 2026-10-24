@@ -633,8 +633,115 @@ class PassphraseTest(unittest.TestCase):
         pp = {"hex": self.pw.hex(), "prf": 5, "rounds": self.ROUNDS}
         live_key.merge_keys({"a.db": "aa"}, {}, "wxid_x", path, passphrase=pp)
         live_key.merge_keys({"b.db": "bb"}, {}, None, path)  # later round without passphrase
-        self.assertEqual(json.loads(path.read_text())["passphrase"], pp)
+        self.assertEqual(json.loads(path.read_text())["passphrases"], {"wxid_x": pp})
 
+
+class PerAccountPassphraseTest(unittest.TestCase):
+    """Review follow-up for #32: passphrases are stored per wxid so another
+    account's passphrase never burns a PBKDF2 per DB on every poll."""
+
+    ROUNDS = 1000
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.d = Path(self.tmp.name)
+        self.path = self.d / "keys.json"
+        self.pw_a, self.pw_b = os.urandom(32), os.urandom(32)
+        self.pp_a = {"hex": self.pw_a.hex(), "prf": 5, "rounds": self.ROUNDS}
+        self.pp_b = {"hex": self.pw_b.hex(), "prf": 5, "rounds": self.ROUNDS}
+        salt = os.urandom(16)
+        key_b = hashlib.pbkdf2_hmac("sha512", self.pw_b, salt, self.ROUNDS, 32)
+        self.page_b = make_page1(key_b, salt)
+        self.salt_map = {salt.hex(): {"name": "message/message_1.db", "page1": self.page_b}}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_merge_stores_each_accounts_passphrase(self):
+        live_key.merge_keys({}, {}, "wxid_a", self.path, passphrase=self.pp_a)
+        live_key.merge_keys({}, {}, "wxid_b", self.path, passphrase=self.pp_b)
+        saved = json.loads(self.path.read_text())
+        self.assertEqual(saved["passphrases"], {"wxid_a": self.pp_a, "wxid_b": self.pp_b})
+        self.assertNotIn("passphrase", saved)
+        self.assertEqual(live_key.passphrase_for(saved, "wxid_a"), self.pp_a)
+        self.assertEqual(live_key.passphrase_for(saved, "wxid_b"), self.pp_b)
+        self.assertIsNone(live_key.passphrase_for(saved, "wxid_c"))
+
+    def test_other_accounts_passphrase_is_never_tried(self):
+        existing = {"wxid": "wxid_a", "passphrases": {"wxid_a": self.pp_a}}
+        with mock.patch.object(live_key, "derive_from_passphrase") as derive:
+            pending, known = live_key.split_pending(self.salt_map, existing, "wxid_b")
+        derive.assert_not_called()
+        self.assertEqual(set(pending), {"message/message_1.db"})
+        self.assertEqual(known, {})
+
+    def test_own_passphrase_derives(self):
+        existing = {"passphrases": {"wxid_a": self.pp_a, "wxid_b": self.pp_b}}
+        pending, known = live_key.split_pending(self.salt_map, existing, "wxid_b")
+        self.assertEqual(pending, {})
+        self.assertEqual(set(known), {"message/message_1.db"})
+
+    def test_legacy_top_level_passphrase_belongs_to_file_wxid(self):
+        legacy = {"wxid": "wxid_a", "keys_by_db": {}, "passphrase": self.pp_a}
+        self.assertEqual(live_key.passphrase_for(legacy, "wxid_a"), self.pp_a)
+        self.assertIsNone(live_key.passphrase_for(legacy, "wxid_b"))
+        # no owner recorded: still usable (old single-account files)
+        self.assertEqual(live_key.passphrase_for({"passphrase": self.pp_a}, "wxid_b"), self.pp_a)
+        # callers that don't know the wxid keep the old behaviour
+        self.assertEqual(live_key.passphrase_for(legacy), self.pp_a)
+        self.assertEqual(live_key.passphrase_for({"passphrases": {"wxid_a": self.pp_a}}), self.pp_a)
+        self.assertIsNone(live_key.passphrase_for(
+            {"passphrases": {"wxid_a": self.pp_a, "wxid_b": self.pp_b}}))
+
+    def test_merge_migrates_legacy_passphrase_to_its_account(self):
+        self.path.write_text(json.dumps({"wxid": "wxid_a", "keys_by_db": {"a.db": "aa"},
+                                         "passphrase": self.pp_a}))
+        live_key.merge_keys({}, {}, "wxid_b", self.path, passphrase=self.pp_b)
+        saved = json.loads(self.path.read_text())
+        self.assertNotIn("passphrase", saved)
+        self.assertEqual(saved["passphrases"], {"wxid_a": self.pp_a, "wxid_b": self.pp_b})
+        self.assertEqual(saved["wxid"], "wxid_b")
+        self.assertEqual(saved["keys_by_db"], {"a.db": "aa"})
+
+    def test_job_coverage_passes_profile_wxid(self):
+        class Prof:
+            wxid = "wxid_b"
+        self.path.write_text(json.dumps({"passphrases": {"wxid_a": self.pp_a}}))
+        job = live_key.LiveKeyJob(discover_profiles=lambda: [Prof()], collect_salts=lambda p: self.salt_map,
+                                  keys_file=self.path)
+        with mock.patch.object(live_key, "derive_from_passphrase") as derive:
+            cov = job.coverage()
+        derive.assert_not_called()
+        self.assertEqual(cov["known"], 0)
+
+    def test_refresh_key_for_db_only_uses_this_accounts_passphrase(self):
+        import refresh
+        enc = self.d / "db_storage"
+        (enc / "message").mkdir(parents=True)
+        db = enc / "message" / "message_1.db"
+        db.write_bytes(self.page_b)
+        refresh._PASSPHRASE_KEYS.clear()
+        self.addCleanup(refresh._PASSPHRASE_KEYS.clear)
+        per_db = {"wxid": "wxid_a", "passphrases": {"wxid_a": self.pp_a}}
+        with mock.patch.object(live_key, "derive_from_passphrase") as derive:
+            self.assertIsNone(refresh.key_for_db(db, enc, per_db, "wxid_b"))
+        derive.assert_not_called()
+        per_db = {"passphrases": {"wxid_a": self.pp_a, "wxid_b": self.pp_b}}
+        key = refresh.key_for_db(db, enc, per_db, "wxid_b")  # real PBKDF2 (1000 rounds)
+        self.assertEqual(key, hashlib.pbkdf2_hmac("sha512", self.pw_b, self.page_b[:16],
+                                                  self.ROUNDS, 32).hex())
+
+    def test_decrypt_per_db_passes_profile_wxid(self):
+        import types
+        import refresh
+        enc = self.d / "db_storage"
+        enc.mkdir()
+        (enc / "session.db").write_bytes(self.page_b)
+        prof = types.SimpleNamespace(wxid="wxid_b", encrypted_root=enc)
+        with mock.patch.object(refresh, "decrypted_root_for", return_value=self.d / "out"), \
+                mock.patch.object(refresh, "key_for_db", return_value=None) as kfd:
+            refresh._decrypt_per_db(prof, {"passphrases": {"wxid_a": self.pp_a}})
+        self.assertEqual(kfd.call_args[0][3], "wxid_b")
 
 class ReattachTest(unittest.TestCase):
     def setUp(self):

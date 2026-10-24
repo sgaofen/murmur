@@ -6,9 +6,15 @@ Covered (see tests/test_diag_redact.py):
   * WeChat ids: ``wxid_…`` and custom account folder names under
     ``xwechat_files`` / ``WeChat Files``
   * group ids ``123456@chatroom``
-  * QQ numbers (``qq:123…``, ``Tencent Files/<qq>``, ``QQ 123…``)
+  * QQ numbers (``qq:123…``, ``Tencent Files/<qq>``, ``QQ 123…``,
+    ``uin=``/``QQ号:`` fields, ``<qq>/nt_qq`` paths) and caller-supplied bare
+    numbers (known QQ numbers), matched on digit boundaries
+  * e-mail addresses
   * mainland China mobile numbers
   * long hex strings (keys, salts, md5s) — 32+ hex chars
+  * secrets: caller-supplied literals (saved QQ keys), values of
+    ``key=``/``passphrase:``/``密钥:`` style fields, and free-standing
+    16-char printable tokens that look random (QQ NT passphrases)
   * nicknames: values of ``nick_name=``/``昵称:`` style fields, plus any
     caller-supplied names (e.g. the account's own nickname)
 
@@ -39,6 +45,19 @@ _CHATROOM_RE = re.compile(r"\b\d{5,}@chatroom\b")
 _ACCT_DIR_RE = re.compile(r"((?:xwechat_files|WeChat Files)[\\/]+)([^\\/\s`'\"]+)")
 _TENCENT_QQ_RE = re.compile(r"(Tencent Files[\\/]+)(\d{5,12})")
 _QQ_PREFIX_RE = re.compile(r"\b(qq[:_ ]?|QQ ?)(\d{5,12})\b", re.IGNORECASE)
+_QQ_FIELD_RE = re.compile(
+    r"""((?:\buin|\bqq_?(?:number|num|no)|QQ号|QQ 号|qq号)["']?\s*[:=：]\s*["']?)(\d{5,12})(?!\d)""",
+    re.IGNORECASE)
+_QQ_NT_DIR_RE = re.compile(r"(?<![\d<#])(\d{5,12})(?=[\\/]+nt_qq\b)")
+_EMAIL_RE = re.compile(r"(?<![\w.+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b")
+# key=…, "passphrase": "…", 密钥: … — value masked whatever its shape.
+_SECRET_FIELD_RE = re.compile(
+    r"""(?P<k>(?<![A-Za-z0-9])(?:key|passphrase|password|passwd|pwd|secret|token|密钥|口令)["']?\s*[:=：]\s*)"""
+    r"""(?P<q>["']?)(?P<v>[^\s"',;}\]<]{8,})""",
+    re.IGNORECASE)
+# Free-standing 16-char printable token (QQ NT passphrase shape).
+_TOKEN16_RE = re.compile(r"""(?<![^\s"'`=:(\[,])([!-~]{16})(?![^\s"'`,)\]])""")
+_IDENT_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*[=:]")
 # CN mobile: 1[3-9]x xxxx xxxx, optional +86 / 86 prefix and separators.
 _PHONE_RE = re.compile(r"(?<!\d)(?:\+?86[- ]?)?1[3-9]\d[- ]?\d{4}[- ]?\d{4}(?!\d)")
 # Field-style nicknames in logs/JSON: nick_name=foo, "nickname": "foo", 昵称: foo, 备注：foo
@@ -65,12 +84,27 @@ def _home_variants(home: Optional[str]) -> list[str]:
     return sorted((h for h in out if len(h) > 3), key=len, reverse=True)
 
 
+def _looks_random16(tok: str) -> bool:
+    """A 16-char token with lowercase + digits + (uppercase or a symbol other
+    than ._-:/\\), and not an ``ident=value`` pair or a placeholder. Keeps
+    timestamps (no lowercase), dotted identifiers (no digit) and the like."""
+    if "<" in tok or ">" in tok or _IDENT_ASSIGN_RE.match(tok):
+        return False
+    has_lower = any(c.islower() for c in tok)
+    has_digit = any(c.isdigit() for c in tok)
+    has_upper = any(c.isupper() for c in tok)
+    has_sym = any(not c.isalnum() and c not in "._-:/\\" for c in tok)
+    return has_lower and has_digit and (has_upper or has_sym)
+
+
 def redact(text: Optional[str], *, home: Optional[str] = None,
-           names: Iterable[str] = ()) -> Optional[str]:
+           names: Iterable[str] = (), secrets: Iterable[str] = ()) -> Optional[str]:
     """Return ``text`` with personal identifiers replaced by placeholders.
 
     ``home`` defaults to the current user's home dir; ``names`` are extra
-    literal strings (nicknames, remarks) to blank out wherever they appear.
+    literal strings (nicknames, remarks, QQ numbers) to blank out wherever
+    they appear (all-digit names only on digit boundaries); ``secrets`` are
+    literal key values to blank out.
     """
     if not text:
         return text
@@ -81,9 +115,26 @@ def redact(text: Optional[str], *, home: Optional[str] = None,
         except Exception:
             home = None
 
+    # 0. Caller-supplied secrets (saved keys), before anything reshapes them.
+    for sec in sorted({str(x).strip() for x in secrets if x and len(str(x).strip()) >= 6},
+                      key=len, reverse=True):
+        out = out.replace(sec, "<secret>")
+
     # 1. Caller-supplied literal names (longest first so substrings don't win).
-    for n in sorted({n.strip() for n in names if n and len(n.strip()) >= 2}, key=len, reverse=True):
-        out = out.replace(n, f"<name#{_h(n)}>")
+    #    Numbers (QQ numbers) only on digit boundaries, so they can't eat part
+    #    of a timestamp.
+    for n in sorted({str(n).strip() for n in names if n and len(str(n).strip()) >= 2},
+                    key=len, reverse=True):
+        if n.isdigit():
+            if len(n) >= 5:
+                out = re.sub(r"(?<!\d)" + n + r"(?!\d)", f"<qq#{_h(n)}>", out)
+        else:
+            out = out.replace(n, f"<name#{_h(n)}>")
+
+    # 1b. Secret-looking fields, e-mail addresses.
+    out = _SECRET_FIELD_RE.sub(lambda m: m.group(0) if m.group("v").startswith("<")
+                               else f"{m.group('k')}{m.group('q')}<secret>", out)
+    out = _EMAIL_RE.sub(lambda m: f"<email#{_h(m.group(0).lower())}>", out)
 
     # 2. Long hex (keys / salts / md5s).
     out = _HEX_RE.sub(lambda m: f"<hex{len(m.group(1))}>", out)
@@ -101,10 +152,15 @@ def redact(text: Optional[str], *, home: Optional[str] = None,
     out = _CHATROOM_RE.sub(lambda m: f"<room#{_h(m.group(0))}>@chatroom", out)
     out = _TENCENT_QQ_RE.sub(lambda m: m.group(1) + f"<qq#{_h(m.group(2))}>", out)
     out = _QQ_PREFIX_RE.sub(lambda m: m.group(1) + f"<qq#{_h(m.group(2))}>", out)
+    out = _QQ_FIELD_RE.sub(lambda m: m.group(1) + f"<qq#{_h(m.group(2))}>", out)
+    out = _QQ_NT_DIR_RE.sub(lambda m: f"<qq#{_h(m.group(1))}>", out)
 
     # 5. Phone numbers, then nickname-ish fields.
     out = _PHONE_RE.sub("<phone>", out)
     out = _NICK_FIELD_RE.sub(_mask_nick_field, out)
+
+    # 6. Free-standing random-looking 16-char tokens (QQ NT passphrases).
+    out = _TOKEN16_RE.sub(lambda m: "<secret16>" if _looks_random16(m.group(1)) else m.group(0), out)
     return out
 
 
