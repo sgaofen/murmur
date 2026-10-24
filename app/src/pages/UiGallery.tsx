@@ -9,9 +9,9 @@ import {
 import { IconArrowLeft, IconArrowRight, IconDownload, IconRefresh, IconSparkle } from '../utils/icons';
 import './UiGallery.css';
 
-const OFL_URL = `${import.meta.env.BASE_URL}licenses/NotoSerifSC-OFL.txt`;
+const OFL_URL = `${import.meta.env.BASE_URL}licenses/JetBrainsMono-OFL.txt`;
 
-/** Noto Serif SC ships inside the app, so its SIL OFL 1.1 text has to ship
+/** JetBrains Mono ships inside the app, so its SIL OFL 1.1 text has to ship
  * and be readable too (app/public/licenses/). Loaded on first open. */
 function FontLicense() {
   const [text, setText] = useState<string | null>(null);
@@ -24,9 +24,9 @@ function FontLicense() {
   }
   return (
     <details className="gal-license" onToggle={e => { if ((e.currentTarget as HTMLDetailsElement).open) load(); }}>
-      <summary>字体许可 · Noto Serif SC 以 SIL Open Font License 1.1 授权，点开查看全文</summary>
+      <summary>字体许可 · JetBrains Mono 以 SIL Open Font License 1.1 授权，点开查看全文</summary>
       {failed
-        ? <p className="gal-license__note">许可文本没能加载，可以在安装目录的 <code>licenses/NotoSerifSC-OFL.txt</code> 找到。</p>
+        ? <p className="gal-license__note">许可文本没能加载，可以在安装目录的 <code>licenses/JetBrainsMono-OFL.txt</code> 找到。</p>
         : <pre className="gal-license__text">{text ?? '加载中…'}</pre>}
     </details>
   );
@@ -94,19 +94,20 @@ export default function UiGalleryPage({ onBack }: { onBack: () => void }) {
           </div>
         </Section>
 
-        <Section no="02" title="字体" desc="标题用内置的 Noto Serif SC（可变字重，按字符分片本地加载）；正文用系统字体 PingFang SC / 微软雅黑。">
+        <Section no="02" title="字体" desc="标签、读数、表格用内置的 JetBrains Mono（SIL OFL，可变字重，本地加载）；大号读数用系统字体 200；正文用系统字体 PingFang SC / 微软雅黑。">
           <div className="gal-type">
-            <span className="gal-type__meta">display · serif 600</span>
-            <span className="gal-type__display">这些年，你遇见了 1,284 个人</span>
-            <span className="gal-type__meta">serif 字重</span>
-            <span className="gal-type__weights">
-              <span style={{ fontWeight: 400 }}>微语 400</span>
-              <span style={{ fontWeight: 500 }}>微语 500</span>
-              <span style={{ fontWeight: 600 }}>微语 600</span>
-              <span style={{ fontWeight: 700 }}>微语 700</span>
-              <span style={{ fontWeight: 900 }}>微语 900</span>
+            <span className="gal-type__meta">display · system 200</span>
+            <span className="ui-big" style={{ fontSize: 72 }}>1,284</span>
+            <span className="gal-type__meta">mono 字重</span>
+            <span className="gal-type__weights" style={{ fontFamily: 'var(--font-mono)' }}>
+              <span style={{ fontWeight: 300 }}>MSG 300</span>
+              <span style={{ fontWeight: 400 }}>MSG 400</span>
+              <span style={{ fontWeight: 500 }}>MSG 500</span>
+              <span style={{ fontWeight: 600 }}>MSG 600</span>
             </span>
-            <span className="gal-type__meta">h2 · serif 500</span>
+            <span className="gal-type__meta">label · mono caps</span>
+            <span className="ui-label">TOTAL<b>聊过天的人</b></span>
+            <span className="gal-type__meta">h2 · sans 500</span>
             <span className="et-h2">一年里你和谁说话最多</span>
             <span className="gal-type__meta">body · sans 400</span>
             <span className="gal-type__body">

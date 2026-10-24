@@ -15,7 +15,7 @@
     "tauri:build:dmg": "npm run backend:bundle && node scripts/tauri-build.mjs app,dmg"
   },
   "dependencies": {
-    "@fontsource-variable/noto-serif-sc": "^5.3.1",
+    "@fontsource-variable/jetbrains-mono": "^5.3.0",
     "html-to-image": "^1.11.13",
     "react": "^19.2.5",
     "react-dom": "^19.2.5"

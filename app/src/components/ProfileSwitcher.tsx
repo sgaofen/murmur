@@ -1,13 +1,12 @@
 /* ProfileSwitcher — trigger + popover for switching the active
- * platform/account. Colors are the semantic tokens in `app/src/tokens.css`
- * (WeChat rows use the accent family, QQ rows the info family), so the
- * popover follows the light / dark theme.
+ * platform/account. Colors are the semantic tokens in `app/src/tokens.css`,
+ * so the popover follows the light / dark theme. Platforms are marked with a
+ * mono code square (WX / QQ), not emoji.
  *
- * Two looks: `variant="sidebar"` is the account row at the bottom of the app
- * shell's left nav (icon-only when the nav is collapsed); the default `chip`
- * is the compact pill the pages' own top bars used before the shell existed.
- * The popover is portaled to <body> so it is never clipped or covered by the
- * nav / page stacking contexts.
+ * Two looks: `variant="bar"` is the account key at the right end of the app
+ * shell's bottom key bar (opens upwards); the default `chip` is a compact
+ * inline trigger. The popover is portaled to <body> so it is never clipped
+ * or covered by the shell's stacking contexts.
  *
  * The backend swaps `_MurmurAPIHandler.store` to a QQStore when the user
  * picks a QQ row, so every page that renders after the reload reads QQ data
@@ -19,7 +18,7 @@ import { supportsQQOnboarding, switchActiveProfile, useProfiles } from '../utils
 import { usePrivacy } from '../utils/usePrivacy';
 import type { ProfileEntry } from '../data/api';
 import { Skeleton, cx } from '../ui';
-import { IconChevronsUpDown, IconPlus } from '../ui/icons';
+import { IconChevronsUpDown } from '../ui/icons';
 
 /** Global signal so any ProfileSwitcher can ask the App-level state to open
  * the right onboarding dialog without prop drilling.
@@ -30,39 +29,39 @@ function requestOnboarding(platform: 'wechat' | 'qq') {
 
 type Placement = 'below' | 'above' | 'right';
 
-export function ProfileSwitcher({ variant = 'chip', collapsed = false }: {
-  variant?: 'chip' | 'sidebar';
-  /** Sidebar only: icon-only rail. */
-  collapsed?: boolean;
+export function ProfileSwitcher({ variant = 'chip', compact = false }: {
+  variant?: 'chip' | 'bar';
+  /** Bar only: code square + caret, no account name (narrow windows). */
+  compact?: boolean;
 } = {}) {
   const { profiles, active, loading, error } = useProfiles();
   const [open, setOpen] = useState(false);
   const anchorRef = useRef<HTMLDivElement>(null);
-  const placement: Placement = variant === 'chip' ? 'below' : collapsed ? 'right' : 'above';
+  const placement: Placement = variant === 'chip' ? 'below' : 'above';
 
-  if (variant === 'sidebar') {
+  if (variant === 'bar') {
     if (loading && !profiles) {
       return (
-        <div className="app-nav__item app-account" aria-busy="true" aria-label="正在读取账号">
-          <Skeleton width={28} height={28} circle />
-          <span className="app-nav__label"><Skeleton width="70%" height={11} /></span>
-        </div>
+        <span className="app-key app-account is-loading" aria-busy="true" aria-label="正在读取账号">
+          <Skeleton width={16} height={16} />
+          {!compact && <Skeleton width={84} height={9} />}
+        </span>
       );
     }
     if (error || !profiles || profiles.length === 0) {
       return (
-        <button type="button" className="app-nav__item" onClick={() => requestOnboarding('wechat')}
-          title={collapsed ? '添加账号' : undefined} aria-label={collapsed ? '添加账号' : undefined}>
-          <span className="app-nav__icon"><IconPlus size={18} /></span>
-          <span className="app-nav__label">添加账号</span>
+        <button type="button" className="app-key" onClick={() => requestOnboarding('wechat')}
+          title="添加账号" aria-label="添加账号">
+          <kbd className="ui-kbd" aria-hidden="true">＋</kbd>
+          {!compact && <span>添加账号</span>}
         </button>
       );
     }
     const current = profiles.find(p => p.is_active) ?? profiles[0];
     return (
       <div ref={anchorRef} className="app-account-anchor">
-        <SidebarAccountButton profile={current} count={profiles.length} open={open}
-          collapsed={collapsed} onClick={() => setOpen(o => !o)} />
+        <BarAccountButton profile={current} count={profiles.length} open={open}
+          compact={compact} onClick={() => setOpen(o => !o)} />
         {open && (
           <Popover
             profiles={profiles}
@@ -111,15 +110,15 @@ export function ProfileSwitcher({ variant = 'chip', collapsed = false }: {
   );
 }
 
-// ---------- sidebar row (app shell) ----------
+// ---------- bottom key bar (app shell) ----------
 
-function SidebarAccountButton({ profile, count, open, collapsed, onClick }: {
-  profile: ProfileEntry; count: number; open: boolean; collapsed: boolean; onClick: () => void;
+function BarAccountButton({ profile, count, open, compact, onClick }: {
+  profile: ProfileEntry; count: number; open: boolean; compact: boolean; onClick: () => void;
 }) {
   const privacyOn = usePrivacy();
   const platformLabel = profile.platform === 'wechat' ? '微信' : 'QQ';
   const display = privacyOn ? profile.display_id : displayPlain(profile);
-  const meta = count > 1 ? `${platformLabel} · 共 ${count} 个账号` : `${platformLabel} · 切换或添加`;
+  const meta = count > 1 ? `共 ${count} 个账号` : '切换或添加账号';
   return (
     <button
       type="button"
@@ -127,17 +126,13 @@ function SidebarAccountButton({ profile, count, open, collapsed, onClick }: {
       aria-expanded={open}
       aria-haspopup="menu"
       aria-label={`当前${platformLabel}账号 ${display}，点击切换`}
-      title={collapsed ? `${platformLabel}：${display} — 点击切换账号` : undefined}
-      className={cx('app-nav__item', 'app-account', open && 'is-open')}
+      title={`${platformLabel}：${display} · ${meta}`}
+      className={cx('app-key', 'app-account', open && 'is-open')}
     >
-      <span className={cx('app-account__avatar', `app-account__avatar--${profile.platform}`)} aria-hidden="true">
-        {profile.platform === 'wechat' ? '💬' : '🐧'}
-      </span>
-      <span className="app-nav__label app-account__text">
-        <span className="app-account__name">{display}</span>
-        <span className="app-account__meta">{meta}</span>
-      </span>
-      <span className="app-nav__trail app-account__caret"><IconChevronsUpDown size={14} /></span>
+      <PlatformGlyph platform={profile.platform} />
+      {!compact && <span className="app-account__name">{display}</span>}
+      {!compact && count > 1 && <span className="app-account__meta">×{count}</span>}
+      <span className="app-account__caret" aria-hidden="true"><IconChevronsUpDown size={12} /></span>
     </button>
   );
 }
@@ -167,12 +162,12 @@ function CollapsedChip({ profile, open, onClick }: {
         padding: '5px 10px',
         height: 26,
         boxSizing: 'border-box',
-        borderRadius: 999,
+        borderRadius: 'var(--radius-md)',
         fontSize: 11,
         fontWeight: 500,
         color: palette.fg,
         background: open ? palette.bgHover : palette.bg,
-        border: `0.5px solid ${palette.border}`,
+        border: `1px solid ${palette.border}`,
         whiteSpace: 'nowrap',
         transition: 'background 120ms ease',
       }}
@@ -186,8 +181,12 @@ function CollapsedChip({ profile, open, onClick }: {
   );
 }
 
-function PlatformGlyph({ platform }: { platform: 'wechat' | 'qq' }) {
-  return <span style={{ fontSize: 12, lineHeight: 1 }}>{platform === 'wechat' ? '💬' : '🐧'}</span>;
+function PlatformGlyph({ platform, solid = false }: { platform: 'wechat' | 'qq'; solid?: boolean }) {
+  return (
+    <span className={cx('ui-tsq', 'app-account__code', solid && 'is-solid')} aria-hidden="true">
+      {platform === 'wechat' ? 'WX' : 'QQ'}
+    </span>
+  );
 }
 
 function Caret({ open, color }: { open: boolean; color: string }) {
@@ -367,7 +366,7 @@ function Popover({ profiles, activeId, onClose, anchorRef, placement }: {
           <button type="button" role="menuitem" onClick={() => setAdding(true)} style={addBtn}
             onMouseEnter={(e) => e.currentTarget.style.background = 'var(--surface-sunken)'}
             onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}>
-            <span style={{ fontSize: 14, lineHeight: 1, color: 'var(--text-faint)' }}>＋</span>
+            <kbd className="ui-kbd" aria-hidden="true">＋</kbd>
             <span>添加新账号</span>
           </button>
         ) : (
@@ -375,12 +374,12 @@ function Popover({ profiles, activeId, onClose, anchorRef, placement }: {
             <div className="et-eyebrow" style={{ marginBottom: 8, fontSize: 9 }}>选择平台</div>
             <div style={{ display: 'grid', gridTemplateColumns: qqSupported ? '1fr 1fr' : '1fr', gap: 8 }}>
               <PlatformPickButton
-                glyph="💬" label="微信"
+                platform="wechat" label="微信"
                 onClick={() => { onClose(); requestOnboarding('wechat'); }}
               />
               {qqSupported && (
                 <PlatformPickButton
-                  glyph="🐧" label="QQ"
+                  platform="qq" label="QQ"
                   onClick={() => { onClose(); requestOnboarding('qq'); }}
                 />
               )}
@@ -424,7 +423,7 @@ function ProfileRow({ p, isActive, isLast, hover, privacyOn, onHover, onClick }:
         display: 'flex',
         gap: 11,
         padding: '10px 14px 11px',
-        borderBottom: isLast ? 'none' : '0.5px solid var(--border-subtle)',
+        borderBottom: isLast ? 'none' : '1px solid var(--border-subtle)',
         cursor: p.state === 'extracting' ? 'wait' : 'pointer',
         opacity: dim ? 0.6 : 1,
         background: isActive ? palette.bg : (hover ? 'var(--surface-sunken)' : 'transparent'),
@@ -433,16 +432,13 @@ function ProfileRow({ p, isActive, isLast, hover, privacyOn, onHover, onClick }:
     >
       {isActive && (
         <div style={{
-          position: 'absolute', left: 0, top: 6, bottom: 6, width: 3,
-          background: palette.fg, borderRadius: '0 2px 2px 0',
+          position: 'absolute', left: 0, top: 0, bottom: 0, width: 2,
+          background: 'var(--signal)',
         }} />
       )}
       <div style={{ flexShrink: 0, width: 22, paddingTop: 2,
                      display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
-        <span style={{ fontSize: 15, lineHeight: 1 }}>{isWeChat ? '💬' : '🐧'}</span>
-        {isActive && (
-          <span style={{ fontSize: 9, color: palette.fg, lineHeight: 1, marginTop: 2 }}>✓</span>
-        )}
+        <PlatformGlyph platform={p.platform} solid={isActive} />
       </div>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 8 }}>
@@ -457,8 +453,8 @@ function ProfileRow({ p, isActive, isLast, hover, privacyOn, onHover, onClick }:
             textOverflow: 'ellipsis',
           }}>{display}</span>
           <span style={{
-            fontSize: 10.5, color: 'var(--text-muted)', flexShrink: 0,
-            fontFamily: 'var(--font-serif)', fontStyle: 'italic',
+            fontSize: 10.5, color: 'var(--text-faint)', flexShrink: 0,
+            fontFamily: 'var(--font-mono)',
           }}>{humaniseLast(p.last_active_ts)}</span>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6,
@@ -469,15 +465,13 @@ function ProfileRow({ p, isActive, isLast, hover, privacyOn, onHover, onClick }:
             </span> 个对话</span>
           )}
           {p.state === 'needs_decrypt' && (
-            <span style={{ color: 'var(--danger-fg)', fontStyle: 'italic',
-                            fontFamily: 'var(--font-serif)' }}>未解密 · 点击设置</span>
+            <span style={{ color: 'var(--danger-fg)', fontFamily: 'var(--font-mono)', fontSize: 10.5 }}>未解密 · 点击设置</span>
           )}
           {p.state === 'needs_key' && (
-            <span style={{ color: 'var(--danger-fg)', fontStyle: 'italic',
-                            fontFamily: 'var(--font-serif)' }}>缺少密钥 · 点击引导</span>
+            <span style={{ color: 'var(--danger-fg)', fontFamily: 'var(--font-mono)', fontSize: 10.5 }}>缺少密钥 · 点击引导</span>
           )}
           {p.state === 'extracting' && (
-            <span style={{ fontStyle: 'italic', fontFamily: 'var(--font-serif)' }}>正在提取密钥…</span>
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5 }}>正在提取密钥…</span>
           )}
         </div>
       </div>
@@ -485,19 +479,19 @@ function ProfileRow({ p, isActive, isLast, hover, privacyOn, onHover, onClick }:
   );
 }
 
-function PlatformPickButton({ glyph, label, onClick }:
-  { glyph: string; label: string; onClick: () => void }) {
+function PlatformPickButton({ platform, label, onClick }:
+  { platform: 'wechat' | 'qq'; label: string; onClick: () => void }) {
   return (
     <button type="button" role="menuitem" onClick={onClick}
       style={{
         all: 'unset', cursor: 'pointer', display: 'flex', alignItems: 'center',
-        gap: 8, padding: '10px 12px', background: 'var(--surface-card)',
-        border: '0.5px solid var(--border-default)', borderRadius: 'var(--radius-sm)',
+        gap: 8, padding: '8px 10px', background: 'var(--surface-card)',
+        border: '1px solid var(--border-default)', borderRadius: 'var(--radius-sm)',
         fontSize: 12, color: 'var(--text-primary)',
       }}
       onMouseEnter={(e) => e.currentTarget.style.background = 'var(--surface-sunken)'}
       onMouseLeave={(e) => e.currentTarget.style.background = 'var(--surface-card)'}>
-      <span style={{ fontSize: 16 }}>{glyph}</span>
+      <PlatformGlyph platform={platform} />
       <span>{label}</span>
     </button>
   );
@@ -536,27 +530,24 @@ function idForBackend(p: ProfileEntry): string {
 
 // ---------- palette + style constants ----------
 
-const monoStack = '"JetBrains Mono", "SF Mono", ui-monospace, "Sarasa Mono SC", monospace';
+const monoStack = 'var(--font-mono)';
 
+// Both platforms share the instrument greys; the active row is marked by the
+// signal rule and the filled code square, not by a platform colour.
 const wechatPalette = {
-  fg: 'var(--accent-text)',
-  bg: 'var(--accent-soft)',
-  bgHover: 'color-mix(in srgb, var(--accent) 18%, transparent)',
-  border: 'var(--accent-border)',
+  fg: 'var(--text-primary)',
+  bg: 'var(--signal-dim)',
+  bgHover: 'var(--surface-pressed)',
+  border: 'var(--border-default)',
 };
-const qqPalette = {
-  fg: 'var(--info-fg)',
-  bg: 'var(--info-bg)',
-  bgHover: 'color-mix(in srgb, var(--info-solid) 20%, transparent)',
-  border: 'var(--info-border)',
-};
+const qqPalette = wechatPalette;
 
 const addOnlyChip: React.CSSProperties = {
   all: 'unset', cursor: 'pointer',
   display: 'inline-flex', alignItems: 'center', gap: 5,
-  padding: '5px 10px', borderRadius: 999,
+  padding: '4px 9px', borderRadius: 'var(--radius-md)',
   fontSize: 11, fontWeight: 500, color: 'var(--text-muted)',
-  background: 'transparent', border: '0.5px solid var(--border-default)',
+  background: 'transparent', border: '1px solid var(--border-default)',
 };
 
 const POPOVER_WIDTH = 270;
@@ -565,17 +556,17 @@ const POPOVER_WIDTH = 270;
 // app shell (nav 40 / top bar 30 / full-bleed pages 45) but below dialogs.
 const popoverShell: React.CSSProperties = {
   position: 'fixed', zIndex: 300,
-  width: POPOVER_WIDTH, maxWidth: 'calc(100vw - 16px)', background: 'var(--surface-card)',
-  border: '0.5px solid var(--border-default)', borderRadius: 'var(--radius-lg)',
+  width: POPOVER_WIDTH, maxWidth: 'calc(100vw - 16px)', background: 'var(--surface-raised)',
+  border: '1px solid var(--border-default)', borderRadius: 'var(--radius-md)',
   boxShadow: 'var(--shadow-md)', overflow: 'hidden',
 };
 const popoverHeader: React.CSSProperties = {
-  padding: '11px 14px 8px',
-  borderBottom: '0.5px solid var(--border-subtle)',
+  padding: '10px 14px 9px',
+  borderBottom: '1px solid var(--border-subtle)',
   display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
 };
 const popoverFooter: React.CSSProperties = {
-  borderTop: '0.5px solid var(--border-default)', background: 'var(--surface-sunken)',
+  borderTop: '1px solid var(--border-subtle)', background: 'var(--surface-sunken)',
 };
 const addBtn: React.CSSProperties = {
   all: 'unset', cursor: 'pointer', display: 'flex', width: '100%',

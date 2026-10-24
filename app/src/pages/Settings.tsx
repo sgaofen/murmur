@@ -115,7 +115,7 @@ function PrivacySection() {
         title="隐私"
         description="开启后，界面上的名字换成「朋友 AB」这样的代号，wxid、本机路径、手机号等也会打码，适合录屏或截图分享。导出的聊天记录文件仍是原文。"
       />
-      <Row label="隐私模式" hint="左侧栏底部也能一键切换">
+      <Row label="隐私模式" hint="顶部状态条的 PRIV 也能一键切换">
         <SegmentedControl
           label="隐私模式"
           value={on ? 'on' : 'off'}

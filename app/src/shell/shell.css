@@ -1,108 +1,154 @@
-/* App shell — left nav + sticky top bar (see AppShell.tsx).
- * Same rules as ui/ui.css: colors, radii and shadows only from tokens.css. */
+/* App shell — status strip + key bar + command palette (see AppShell.tsx).
+ * Same rules as ui/ui.css: colours, radii and shadows only from tokens.css. */
 
 .app-shell {
-  --shell-nav-w: 216px;
-  --shell-top: 56px;
-  /* the content area, for pages and fixed-position page parts */
-  --shell-left: var(--shell-nav-w);
-  --shell-vh: calc(100vh - var(--shell-top));
-  /* layers: in-flow page content < top bar < nav < full-bleed pages < page overlays */
+  --shell-top: 38px;
+  --shell-bottom: 46px;
+  /* no side nav any more; kept for pages that offset fixed parts by it */
+  --shell-left: 0px;
+  --shell-vh: calc(100vh - var(--shell-top) - var(--shell-bottom));
+  /* layers: in-flow page content < strip < key bar < full-bleed pages < page overlays */
   --z-topbar: 30;
   --z-nav: 40;
   --z-page-fill: 45;
-}
-.app-shell.is-collapsed { --shell-nav-w: 64px; }
-
-/* ——— left nav ——— */
-.app-nav {
-  position: fixed; top: 0; left: 0; bottom: 0; z-index: var(--z-nav);
-  width: var(--shell-nav-w);
-  display: flex; flex-direction: column;
-  background: var(--surface-page);
-  border-right: 0.5px solid var(--border-default);
-  transition: width var(--dur-base) var(--ease-out);
+  min-height: 100vh;
 }
 
-.app-nav__brand {
-  flex: none;
+/* ——— status strip ——— */
+.app-strip {
+  position: sticky; top: 0; z-index: var(--z-topbar);
   height: var(--shell-top);
-  display: flex; align-items: center; gap: 10px;
-  padding: 0 20px;
-  border-bottom: 0.5px solid var(--border-subtle);
-  color: var(--text-primary); text-decoration: none;
+  display: flex; align-items: center; gap: 22px;
+  padding: 0 16px;
+  background: var(--surface-page);
+  border-bottom: 1px solid var(--border-subtle);
+  font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.06em;
+  color: var(--text-faint);
+  white-space: nowrap;
 }
-.app-nav__brand:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -3px; border-radius: var(--radius-sm); }
-.app-nav__mark { display: block; flex: none; color: var(--accent); }
-.app-nav__brand-name {
-  font-family: var(--font-serif); font-size: 16px; font-weight: 600;
-  letter-spacing: 0.04em; white-space: nowrap; overflow: hidden;
-}
+.app-strip--inline { position: static; }
 
-.app-nav__list {
-  flex: 1 1 auto; min-height: 0; overflow-y: auto;
-  display: flex; flex-direction: column; gap: 2px;
-  padding: 12px 10px;
-}
-.app-nav__foot {
+.app-strip__brand {
   flex: none;
-  display: flex; flex-direction: column; gap: 2px;
-  padding: 10px;
-  border-top: 0.5px solid var(--border-subtle);
+  display: inline-flex; align-items: baseline;
+  color: var(--text-primary); text-decoration: none;
+  font-weight: 600; letter-spacing: 0.18em;
 }
-.app-nav__row { display: flex; align-items: center; gap: 4px; }
-.app-nav__row > .app-nav__item { flex: 1 1 auto; min-width: 0; }
-.app-nav__toggle { width: 34px; height: 34px; }
+.app-strip__brand span {
+  margin-left: 8px;
+  font-family: var(--font-sans); font-size: 11.5px; font-weight: 600; letter-spacing: 0.1em;
+}
+.app-strip__brand:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 3px; border-radius: var(--radius-xs); }
 
-/* one row: link, account, privacy */
-.app-nav__item {
-  appearance: none; margin: 0; border: 0;
-  width: 100%; min-height: 38px;
-  display: flex; align-items: center; gap: 11px;
-  padding: 0 11px;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--text-secondary);
-  font-family: var(--font-sans); font-size: 13.5px; font-weight: 500; line-height: 1.2;
-  text-align: left; text-decoration: none; white-space: nowrap;
+.app-strip__slot,
+.app-strip__fallback { flex: 1 1 auto; min-width: 0; height: 100%; display: flex; align-items: center; }
+.app-strip__slot:empty { display: none; }
+.app-strip__slot:not(:empty) + .app-strip__fallback { display: none; }
+
+.app-strip__status { flex: none; display: flex; align-items: center; gap: 18px; }
+.app-strip__stat { display: inline-flex; align-items: center; gap: 6px; color: var(--text-faint); }
+.app-strip__stat-v { color: var(--text-faint); }
+.app-strip__toggle {
+  appearance: none; margin: 0; padding: 0; border: 0; background: none;
+  height: 24px;
+  font: inherit; letter-spacing: inherit; color: inherit;
   cursor: pointer;
-  transition: background-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
 }
-.app-nav__item:hover { background: var(--surface-hover); color: var(--text-primary); }
-.app-nav__item:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; border-radius: var(--radius-sm); }
-.app-nav__icon { display: inline-flex; flex: none; color: var(--text-muted); transition: color var(--dur-fast) var(--ease-out); }
-.app-nav__item:hover .app-nav__icon { color: var(--text-secondary); }
-.app-nav__label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.app-nav__trail { flex: none; display: inline-flex; align-items: center; }
-.app-nav__trail .ui-chip { color: var(--text-muted); }
+.app-strip__toggle:hover { color: var(--text-secondary); }
+.app-strip__toggle.is-on,
+.app-strip__toggle.is-on .app-strip__stat-v { color: var(--text-primary); }
+.app-strip__toggle:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; border-radius: var(--radius-xs); }
+.app-strip__clock { display: inline-flex; gap: 1em; font-variant-numeric: tabular-nums; }
 
-.app-nav__item.is-active {
+/* page header inside the strip: ‹ back · CH 01 / title · subtitle ··· actions */
+.app-header { flex: 1 1 auto; min-width: 0; height: 100%; display: flex; align-items: center; gap: 14px; }
+.app-header__back {
+  appearance: none; margin: 0; flex: none;
+  height: 22px; padding: 0 8px 0 6px;
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid var(--border-default); border-radius: var(--radius-md);
   background: var(--surface-card);
-  color: var(--text-primary); font-weight: 600;
-  box-shadow: var(--shadow-sm), inset 0 0 0 0.5px var(--border-subtle);
+  font-family: var(--font-sans); font-size: 11.5px; letter-spacing: 0.02em; color: var(--text-secondary);
+  cursor: pointer;
 }
-.app-nav__item.is-active .app-nav__icon { color: var(--accent); }
+.app-header__back span { font-family: var(--font-mono); font-size: 13px; line-height: 1; color: var(--text-faint); }
+.app-header__back:hover { color: var(--text-primary); border-color: var(--border-strong); }
+.app-header__titles { flex: 0 1 auto; min-width: 60px; display: flex; align-items: baseline; gap: 10px; overflow: hidden; }
+.app-header__ch { flex: none; color: var(--text-secondary); }
+.app-header__ch i { margin-left: 6px; font-style: normal; color: var(--text-faint); }
+.app-header__title {
+  margin: 0; flex: 0 1 auto; min-width: 0;
+  font-family: var(--font-sans); font-size: 12px; font-weight: 500; line-height: 1.3;
+  letter-spacing: 0.04em; color: var(--text-primary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.app-header__subtitle {
+  flex: 0 1 auto; min-width: 0;
+  font-family: var(--font-sans); font-size: 11.5px; letter-spacing: 0.02em; color: var(--text-faint);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* When the window is too narrow for a page's actions they scroll sideways
+ * inside the strip instead of widening the page. The padding/negative margin
+ * pair keeps focus rings from being clipped by the scroll box. */
+.app-header__actions {
+  margin-left: auto;
+  flex: 0 1 auto; min-width: 0;
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px; margin-block: -4px;
+  overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none;
+  font-family: var(--font-sans); font-size: 12px; letter-spacing: normal; color: var(--text-secondary);
+}
+.app-header__actions::-webkit-scrollbar { display: none; }
+.app-header__actions > * { flex: none; }
+.app-header__label { font-size: 11.5px; color: var(--text-muted); white-space: nowrap; }
 
-/* account row */
-.app-account-anchor { display: block; }
-.app-account { min-height: 48px; padding: 6px 8px; gap: 10px; }
-.app-account.is-open { background: var(--surface-hover); }
-.app-account__avatar {
-  width: 30px; height: 30px; flex: none;
-  display: inline-flex; align-items: center; justify-content: center;
-  border-radius: 50%;
-  font-size: 15px; line-height: 1;
-  background: var(--accent-soft);
-  border: 0.5px solid var(--accent-border);
+/* ——— content ——— */
+.app-content { min-width: 0; padding-bottom: var(--shell-bottom); }
+
+/* ——— key bar ——— */
+.app-keys {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: var(--z-nav);
+  height: var(--shell-bottom);
+  display: flex; align-items: center; gap: 6px;
+  padding: 0 12px;
+  background: var(--surface-page);
+  border-top: 1px solid var(--border-subtle);
+  overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
 }
-.app-account__avatar--qq { background: var(--info-bg); border-color: var(--info-border); }
-.app-account__text { display: flex; flex-direction: column; gap: 3px; }
-.app-account__name {
-  font-size: 13px; font-weight: 600; color: var(--text-primary);
-  overflow: hidden; text-overflow: ellipsis;
+.app-keys::-webkit-scrollbar { display: none; }
+.app-keys__group { flex: none; display: flex; align-items: center; gap: 6px; }
+.app-key--cmd { margin-left: 14px; }
+.app-keys__group--more { margin-left: 14px; }
+.app-keys__right { margin-left: auto; padding-left: 14px; flex: none; display: flex; align-items: center; gap: 6px; }
+
+.app-key {
+  appearance: none; margin: 0; flex: none;
+  height: 28px;
+  display: inline-flex; align-items: center; gap: 9px;
+  padding: 0 12px 0 5px;
+  border: 1px solid var(--border-default); border-radius: var(--radius-md);
+  background: var(--surface-card);
+  font-family: var(--font-sans); font-size: 12px; font-weight: 400; letter-spacing: 0.02em;
+  color: var(--text-secondary);
+  text-decoration: none; white-space: nowrap;
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out);
 }
-.app-account__meta { font-size: 11px; font-weight: 500; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; }
-.app-account__caret { color: var(--text-faint); }
+.app-key:hover { color: var(--text-primary); border-color: var(--border-strong); }
+.app-key:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.app-key.is-on,
+.app-key.is-on:hover { background: var(--signal); border-color: var(--signal); color: var(--text-on-signal); font-weight: 600; }
+.app-key.is-on .ui-kbd { border-color: rgba(0, 0, 0, 0.35); color: var(--text-on-signal); }
+.app-key.is-open { color: var(--text-primary); border-color: var(--text-secondary); }
+
+/* account key (ProfileSwitcher variant="bar") */
+.app-account-anchor { display: inline-flex; }
+.app-account { gap: 8px; padding: 0 8px 0 5px; font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.02em; }
+.app-account__name { max-width: 180px; overflow: hidden; text-overflow: ellipsis; color: var(--text-primary); }
+.app-account__meta { color: var(--text-faint); }
+.app-account__caret { display: inline-flex; color: var(--text-faint); }
+.app-account.is-loading { cursor: default; }
+.app-account.is-open { border-color: var(--text-secondary); }
 /* account menu (portaled to <body>): its items use inline `all: unset`, which
    also wipes the focus ring — put a visible one back for keyboard users. */
 .app-account-menu [role="menuitem"]:focus-visible {
@@ -110,103 +156,129 @@
   outline-offset: -2px !important;
 }
 
-/* privacy row — stays tinted while on */
-.app-privacy.is-on { background: var(--accent-soft); color: var(--accent-text); }
-.app-privacy.is-on .app-nav__icon { color: var(--accent-strong); }
-.app-switch {
-  position: relative; display: inline-block; flex: none;
-  width: 26px; height: 15px;
-  border-radius: var(--radius-pill);
-  background: var(--surface-pressed);
-  box-shadow: inset 0 0 0 0.5px var(--border-default);
-  transition: background-color var(--dur-fast) var(--ease-out);
-}
-.app-switch::after {
-  content: ''; position: absolute; top: 2px; left: 2px;
-  width: 11px; height: 11px; border-radius: 50%;
-  background: var(--text-faint);
-  transition: transform var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out);
-}
-.app-switch.is-on { background: var(--accent-solid); box-shadow: none; }
-.app-switch.is-on::after { background: var(--text-on-accent); transform: translateX(11px); }
-
-/* icon rail (collapsed, or always below 900px) */
-.app-shell.is-collapsed .app-nav__brand { justify-content: center; padding: 0; }
-.app-shell.is-collapsed .app-nav__brand-name,
-.app-shell.is-collapsed .app-nav__label,
-.app-shell.is-collapsed .app-nav__trail { display: none; }
-.app-shell.is-collapsed .app-nav__item { justify-content: center; padding: 0; min-height: 40px; }
-.app-shell.is-collapsed .app-account { min-height: 44px; }
-.app-shell.is-collapsed .app-nav__row { flex-direction: column; align-items: stretch; }
-.app-shell.is-collapsed .app-nav__toggle { width: 100%; height: 32px; }
-
-/* ——— main column + top bar ——— */
-.app-main {
-  margin-left: var(--shell-nav-w);
-  min-width: 0; min-height: 100vh;
-  display: flex; flex-direction: column;
-  transition: margin-left var(--dur-base) var(--ease-out);
-}
-.app-content { flex: 1 0 auto; min-width: 0; }
-
-.app-topbar {
-  position: sticky; top: 0; z-index: var(--z-topbar);
-  flex: none;
-  height: var(--shell-top);
-  display: flex; align-items: center;
-  padding: 0 24px;
-  background: var(--surface-page);
-  border-bottom: 0.5px solid var(--border-subtle);
-}
-.app-topbar--inline { position: static; }
-.app-topbar__slot,
-.app-topbar__fallback { flex: 1 1 auto; min-width: 0; height: 100%; display: flex; align-items: center; }
-.app-topbar__slot:empty { display: none; }
-.app-topbar__slot:not(:empty) + .app-topbar__fallback { display: none; }
-
-.app-header { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 12px; }
-.app-header__back { margin-left: -8px; }
-.app-header__divider { flex: none; width: 1px; height: 18px; background: var(--border-default); }
-.app-header__titles { flex: 1 1 auto; min-width: 90px; display: flex; align-items: baseline; gap: 12px; }
-.app-header__title {
-  margin: 0; flex: 0 1 auto; min-width: 0;
-  font-family: var(--font-serif); font-size: 17px; font-weight: 600; line-height: 1.3;
-  letter-spacing: 0.02em; color: var(--text-primary);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-.app-header__subtitle {
-  flex: 0 1 auto; min-width: 0;
-  font-size: 12px; color: var(--text-muted);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-/* When the window is too narrow for a page's actions they scroll sideways
- * inside the bar instead of widening the page. The padding/negative margin
- * pair keeps focus rings from being clipped by the scroll box. */
-.app-header__actions {
-  flex: 0 1 auto; min-width: 0;
-  display: flex; align-items: center; gap: 10px;
-  padding: 4px; margin: -4px;
-  overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none;
-}
-.app-header__actions::-webkit-scrollbar { display: none; }
-.app-header__actions > * { flex: none; }
-.app-header__label { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
-
-@media (max-width: 640px) {
-  .app-topbar { padding: 0 14px; }
-  .app-header { gap: 8px; }
-  .app-header__subtitle, .app-header__label { display: none; }
-}
-
-/* full-bleed pages (关系网, 报告): fill the content area under the top bar.
- * Above the nav in z-order so overlays rendered inside them cover the window. */
+/* full-bleed pages (关系网, 报告, 对话): fill the area between strip and key bar.
+ * Above the key bar in z-order so overlays rendered inside them cover the window. */
 .app-fill {
   position: fixed;
-  top: var(--shell-top, 0px); left: var(--shell-left, 0px); right: 0; bottom: 0;
+  top: var(--shell-top, 0px); left: var(--shell-left, 0px); right: 0; bottom: var(--shell-bottom, 0px);
   z-index: var(--z-page-fill, auto);
-  transition: left var(--dur-base) var(--ease-out);
+}
+
+/* ——— command palette ——— */
+.cmdk-scrim {
+  position: fixed; inset: 0; z-index: var(--z-dialog);
+  display: flex; justify-content: center; align-items: flex-start;
+  padding: 12vh 16px 16px;
+  background: var(--surface-overlay);
+  animation: ui-fade-in var(--dur-fast) var(--ease-out);
+}
+.cmdk {
+  width: min(640px, 100%);
+  max-height: min(580px, 78vh);
+  display: flex; flex-direction: column;
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+.cmdk__head {
+  flex: none; height: 30px;
+  display: flex; align-items: center; gap: 10px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--border-subtle);
+  font-family: var(--font-mono); font-size: var(--label-size); letter-spacing: var(--label-tracking);
+  text-transform: uppercase; color: var(--text-faint);
+  white-space: nowrap;
+}
+.cmdk__count { margin-left: auto; }
+.cmdk__query {
+  flex: none; height: 50px;
+  display: flex; align-items: center; gap: 12px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border-subtle);
+  font-family: var(--font-mono);
+}
+.cmdk__prompt { color: var(--text-faint); font-size: 17px; }
+.cmdk__query input {
+  all: unset; flex: 1 1 auto; min-width: 0; height: 100%;
+  font-family: var(--font-mono); font-size: 15px; color: var(--text-primary);
+  caret-color: var(--focus-ring);
+}
+.cmdk__query input::placeholder { color: var(--text-faint); font-family: var(--font-sans); font-size: 14px; }
+.cmdk__list { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 2px 0 8px; }
+.cmdk__group {
+  padding: 12px 16px 5px;
+  font-family: var(--font-mono); font-size: var(--label-size); letter-spacing: var(--label-tracking);
+  color: var(--text-faint);
+}
+.cmdk__group b {
+  margin-left: 6px;
+  font-family: var(--font-sans); font-size: 11px; font-weight: 400; letter-spacing: 0.04em;
+  color: var(--text-secondary);
+}
+.cmdk__item {
+  display: flex; align-items: center; gap: 10px;
+  height: 34px; padding: 0 16px;
+  font-size: 13px; color: var(--text-primary);
+  cursor: pointer;
+}
+.cmdk__item.is-sel { background: var(--signal-dim); box-shadow: inset 2px 0 0 var(--signal); }
+.cmdk__code { flex: none; width: 34px; display: inline-flex; align-items: center; }
+.cmdk__label { flex: 0 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cmdk__hint {
+  flex: 1 1 auto; min-width: 0;
+  font-size: 11.5px; color: var(--text-faint);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.cmdk__meta {
+  margin-left: auto; flex: none;
+  font-family: var(--font-mono); font-size: 10.5px; color: var(--text-faint);
+}
+.cmdk__note { padding: 14px 16px; font-size: 12px; color: var(--text-muted); }
+.cmdk__foot {
+  flex: none; height: 34px;
+  display: flex; align-items: center; gap: 18px;
+  padding: 0 16px;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--surface-card);
+  font-size: 11px; color: var(--text-faint);
+  white-space: nowrap; overflow: hidden;
+}
+.cmdk__foot span { display: inline-flex; align-items: center; gap: 6px; }
+
+/* ——— narrow windows ——— */
+@media (max-width: 1099px) {
+  .app-strip { gap: 16px; }
+  .app-strip__status { gap: 14px; }
+}
+@media (max-width: 979px) {
+  /* 年度 / 报告 / 证据表 stay one ⌘K away */
+  .app-keys__group--more { display: none; }
+}
+@media (max-width: 899px) {
+  .app-strip { padding: 0 12px; }
+  .app-header { gap: 10px; }
+  .app-header__subtitle, .app-header__label { display: none; }
+  .app-keys { padding: 0 10px; gap: 5px; }
+  .app-keys__group { gap: 5px; }
+  .app-key { gap: 8px; padding-right: 10px; }
+  .app-key--cmd { margin-left: 8px; }
+  .app-keys__right { padding-left: 8px; }
+}
+@media (max-width: 759px) {
+  .app-strip__brand span { display: none; }
+  .app-key--cmd .app-key__label,
+  .app-key--settings .app-key__label { display: none; }
+  .app-key--cmd, .app-key--settings { padding-right: 5px; }
+  .cmdk__hint { display: none; }
+}
+@media (max-width: 639px) {
+  .app-keys__group .app-key:not(.is-on) .app-key__label { display: none; }
+  .app-keys__group .app-key:not(.is-on) { padding-right: 5px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .app-nav, .app-main, .app-fill, .app-switch, .app-switch::after { transition: none; }
+  .app-key, .cmdk-scrim { transition: none; animation: none; }
 }

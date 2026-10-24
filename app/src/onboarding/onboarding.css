@@ -5,7 +5,7 @@
 /* ——— dialog frame ——— */
 .ui-dialog.ob-dialog { max-width: 820px; }
 .ui-dialog.ob-dialog--key { max-width: 600px; }
-.ob-dialog .ui-dialog__title { font-size: 26px; }
+.ob-dialog .ui-dialog__title { font-size: 20px; }
 
 /* left step rail + content; the rail becomes a horizontal bar on narrow windows */
 .ob-layout {
@@ -16,11 +16,8 @@
 }
 .ob-rail {
   position: sticky; top: 0;
-  padding: 6px 18px 6px 0;
-  border-right: 0.5px solid var(--border-subtle);
+  padding: 4px 0;
 }
-.ob-rail .ui-stepper--vertical .ui-step { padding-bottom: 16px; }
-.ob-rail .ui-stepper--vertical .ui-step:last-child { padding-bottom: 0; }
 .ob-rail__hint {
   margin-top: 18px; padding-top: 12px;
   border-top: 0.5px dashed var(--border-default);
@@ -39,7 +36,7 @@
     border-right: 0;
     border-bottom: 0.5px solid var(--border-subtle);
   }
-  .ob-dialog .ui-dialog__title { font-size: 22px; }
+  .ob-dialog .ui-dialog__title { font-size: 18px; }
 }
 /* Phone width: six labels don't fit under the markers, so only the current
  * step keeps its label on screen (the others stay readable to screen readers). */
@@ -49,7 +46,7 @@
     clip-path: inset(50%); white-space: nowrap;
   }
   .ob-rail--h .ui-step__label { white-space: nowrap; }
-  .ob-rail--h .ui-step__hit { padding: 0; }
+  .ob-rail--h .ui-step__hit { padding: 8px 8px 11px; }
 }
 
 /* ——— text ——— */

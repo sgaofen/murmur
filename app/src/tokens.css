@@ -1,197 +1,249 @@
-/* Murmur — Design Tokens
- * Warm cream paper + ink blue + coral. Serif headlines, sans body.
+/* Murmur — Design Tokens · 方向 B「仪器」
  *
- * Three layers:
- *   1. Semantic tokens (--surface-*, --text-*, --border-*, --accent-*,
- *      --success/warning/danger/info-*). Raw values live here, once per theme.
- *      New code should only use these (see app/src/ui/README.md).
+ * A precision instrument for reading twelve years of conversations: 1px grid
+ * modules, monospaced readouts, and ONE signal colour (a yellow-leaning lime)
+ * that only marks what matters most right now — the current page, the peak,
+ * the selected person. Everything else is grey.
+ *
+ *   Light = 铝 (aluminium)   ·   Dark = 石墨 (graphite)
+ *
+ * The two themes are tuned separately, not inverted: the light signal is
+ * slightly deeper (#C9EA3C) and green TEXT on aluminium uses --signal-ink
+ * (#4B5E00) for contrast; the heat scale runs light→dark on aluminium and
+ * dark→light on graphite.
+ *
+ * Layers:
+ *   1. Semantic tokens (--surface-*, --text-*, --border-*, --signal-*,
+ *      --accent-*, --heat-*, --{success|warning|danger|info}-*). Raw values
+ *      live here, once per theme. New code only uses these.
  *   2. Decorative palette (--et-amber / rose / sage / sky / postmark / faint)
- *      for illustrations and tags that have no semantic meaning.
- *   3. Legacy --et-* aliases kept so the existing inline styles keep working;
- *      they point at layer 1, so they are correct in both themes.
+ *      kept for pages not yet rebuilt; now muted to fit the grey system.
+ *   3. Legacy --et-* aliases that point at layer 1.
  *
  * Theme scopes: `:root` / `.et-light` = light, `.et-dark` = dark. The
- * ThemeProvider (app/src/ui/theme.tsx) toggles `.et-dark` on <html>; a nested
- * `.et-light` / `.et-dark` element re-themes its subtree.
+ * ThemeProvider (app/src/ui/theme.tsx) toggles `.et-dark` on <html>.
  *
- * Fonts are bundled locally (no network): the serif is the
- * @fontsource-variable/noto-serif-sc package imported in main.tsx; the sans
- * body uses the OS CJK UI font (PingFang SC / Microsoft YaHei / Noto Sans CJK).
+ * Fonts are bundled locally (no network):
+ *   mono    JetBrains Mono (SIL OFL 1.1, @fontsource-variable/jetbrains-mono,
+ *           imported in main.tsx) — labels, readouts, tables.
+ *   sans    the OS UI font — SF Pro + PingFang SC on macOS, Segoe UI +
+ *           Microsoft YaHei on Windows. Not bundled.
+ *   display large readouts: the OS UI font at weight 200.
  */
 
-/* ———————————————————————— Light (cream paper) ———————————————————————— */
+/* ———————————————————————— Light · 铝 ———————————————————————— */
 :root,
 .et-light {
   color-scheme: light;
 
   /* surfaces */
-  --surface-page:    #F7F1E6;   /* app background, warm cream */
-  --surface-card:    #FBF6EE;   /* cards, lighter paper */
-  --surface-sunken:  #F1E8D7;   /* inset / tinted blocks, code, wells */
-  --surface-raised:  #FDFAF4;   /* dialogs, popovers */
-  --surface-inverse: #1A2B4A;   /* ink pills, selected tabs */
-  --surface-hover:   rgba(26, 43, 74, 0.05);
-  --surface-pressed: rgba(26, 43, 74, 0.09);
-  --surface-overlay: rgba(20, 24, 42, 0.46);   /* modal scrim */
+  --surface-page:    #D6D6D2;   /* chassis — also the colour of the gaps between modules */
+  --surface-card:    #EBEBE7;   /* module panel */
+  --surface-sunken:  #E1E1DC;   /* keys, fields, inset wells */
+  --surface-raised:  #F1F1EE;   /* popovers, dialogs, palette */
+  --surface-inverse: #111213;
+  --surface-hover:   rgba(17, 18, 19, 0.05);
+  --surface-pressed: rgba(17, 18, 19, 0.09);
+  --surface-overlay: rgba(28, 29, 30, 0.44);
 
   /* text */
-  --text-primary:   #1A2B4A;
-  --text-secondary: #3A4862;
-  --text-muted:     #6F6A5C;
-  --text-faint:     #A29885;   /* placeholders, disabled, captions */
-  --text-inverse:   #FBF6EE;   /* on --surface-inverse */
-  --text-on-accent: #FFFFFF;   /* on --accent-solid / --danger-solid */
+  --text-primary:   #111213;
+  --text-secondary: #55575A;
+  --text-muted:     #6B6D70;   /* body-size secondary text (AA on the panel) */
+  --text-faint:     #8C8E8F;   /* mono labels, captions, axis ticks */
+  --text-inverse:   #EBEBE7;
+  --text-on-accent: #111213;   /* on --accent-solid / --signal / --danger-solid */
 
-  /* borders */
-  --border-subtle:  rgba(26, 43, 74, 0.10);
-  --border-default: rgba(26, 43, 74, 0.18);
-  --border-strong:  rgba(26, 43, 74, 0.30);
-  --focus-ring:     #FF6B47;
+  /* lines */
+  --border-subtle:  #C6C6C1;   /* module grid, row rules */
+  --border-default: #ADADA8;   /* control outlines, header underline */
+  --border-strong:  #8C8E8F;
+  --focus-ring:     #4B5E00;
 
-  /* accent (brand coral) */
-  --accent:              #FF6B47;   /* icons, highlights, big numbers */
-  --accent-strong:       #E0532E;   /* hover / pressed, accent text on --accent-soft */
-  --accent-text:         #C2461F;   /* accent-colored body text (AA on paper) */
-  --accent-solid:        #EE5F3A;   /* filled controls carrying white text */
-  --accent-solid-hover:  #DB4E2A;
-  --accent-soft:         #FFE2D6;   /* tinted backgrounds */
-  --accent-border:       rgba(224, 83, 46, 0.28);
+  /* signal — the one accent */
+  --signal:          #C9EA3C;
+  --signal-hover:    #BEDF2E;
+  --signal-ink:      #4B5E00;              /* signal-coloured text / thin strokes */
+  --signal-dim:      rgba(150, 190, 0, 0.16);
+  --signal-line:     rgba(75, 94, 0, 0.38);
+  --text-on-signal:  #111213;
 
-  /* status */
-  --success-bg:     #E7F0E3;
-  --success-fg:     #2F6A44;
-  --success-border: #B9D2BC;
-  --success-solid:  #3E8358;
+  /* accent = signal (aliases for code written against the old coral accent) */
+  --accent:              var(--signal-ink);
+  --accent-strong:       #3B4A00;
+  --accent-text:         var(--signal-ink);
+  --accent-solid:        var(--signal);
+  --accent-solid-hover:  var(--signal-hover);
+  --accent-soft:         var(--signal-dim);
+  --accent-border:       var(--signal-line);
 
-  --warning-bg:     #FBEBD2;
-  --warning-fg:     #85561A;
-  --warning-border: #E9C995;
-  --warning-solid:  #C98A2E;
+  /* heat / level scale (cells, bars, segments) — light → dark on aluminium */
+  --heat-0: #E3E3DF;
+  --heat-1: #D3D3CE;
+  --heat-2: #B9BAB5;
+  --heat-3: #8E8F8B;
+  --heat-4: #5B5C59;
+  --heat-text:      #55575A;   /* number on heat 0–2 */
+  --heat-text-deep: #F2F2EE;   /* number on heat 3–4 */
 
-  --danger-bg:          #F9E3DC;
-  --danger-fg:          #A33A22;
-  --danger-border:      #E9B6A6;
-  --danger-solid:       #C4462B;
-  --danger-solid-hover: #A93A22;
+  /* status — used sparingly; success shares the signal hue */
+  --success-bg:     var(--signal-dim);
+  --success-fg:     #4B5E00;
+  --success-border: rgba(75, 94, 0, 0.30);
+  --success-solid:  #6E8A00;
 
-  --info-bg:     #E4EBF2;
-  --info-fg:     #2D4E72;
-  --info-border: #BACADC;
-  --info-solid:  #4A6C91;
+  --warning-bg:     #E6DDC8;
+  --warning-fg:     #6E4A00;
+  --warning-border: #CBB07A;
+  --warning-solid:  #D99A12;
 
-  /* skeleton shimmer */
-  --skeleton-base:  #EEE5D3;
-  --skeleton-shine: #F8F2E7;
+  --danger-bg:          #EAD6D2;
+  --danger-fg:          #9C2A1E;
+  --danger-border:      #D49C93;
+  --danger-solid:       #EE6450;
+  --danger-solid-hover: #E25541;
 
-  /* elevation */
-  --shadow-sm: 0 1px 0 rgba(26,43,74,0.04), 0 1px 2px rgba(26,43,74,0.05);
-  --shadow-md: 0 1px 0 rgba(26,43,74,0.04), 0 8px 24px rgba(26,43,74,0.08);
-  --shadow-lg: 0 1px 0 rgba(26,43,74,0.04), 0 18px 48px rgba(26,43,74,0.12);
-  --shadow-accent: 0 6px 16px rgba(238, 95, 58, 0.28);
+  --info-bg:     #E1E1DC;
+  --info-fg:     #3E4246;
+  --info-border: #ADADA8;
+  --info-solid:  #6B6F73;
 
-  /* decorative palette (no semantic meaning — illustrations, tags) */
-  --et-faint:    #B6AC97;   /* hairlines, ornaments */
-  --et-amber:    #E8B57A;
-  --et-rose:     #C45A3F;
-  --et-sage:     #8AA48F;
-  --et-sky:      #5A7A99;
-  --et-postmark: #C45A3F;
+  /* skeleton */
+  --skeleton-base:  #DFDFDA;
+  --skeleton-shine: #E9E9E5;
+
+  /* elevation — modules are flat; only floating layers cast a shadow */
+  --shadow-sm: 0 0 0 0 transparent;
+  --shadow-md: 0 1px 0 rgba(17, 18, 19, 0.04), 0 10px 28px rgba(20, 22, 24, 0.14);
+  --shadow-lg: 0 1px 0 rgba(17, 18, 19, 0.05), 0 22px 56px rgba(20, 22, 24, 0.22);
+  --shadow-accent: 0 0 0 0 transparent;
+
+  /* decorative palette (pages not yet rebuilt) */
+  --et-faint:    #ADADA8;
+  --et-amber:    #C99A3A;
+  --et-rose:     #B5624F;
+  --et-sage:     #7F8F55;
+  --et-sky:      #6B747C;
+  --et-postmark: #8C8E8F;
 
   /* relationship graph canvas (components/extras/GraphView.tsx) */
-  --graph-backdrop:  linear-gradient(180deg, #F7F1E6 0%, #EFE5D2 100%);
-  --graph-node-rim:  rgba(255, 255, 255, 0.70);
-  --graph-specular:  rgba(255, 255, 255, 0.45);
-  --graph-star:      transparent;   /* stars are drawn only on the night canvas */
+  --graph-backdrop:  #E1E1DC;
+  --graph-node-rim:  rgba(235, 235, 231, 0.9);
+  --graph-specular:  transparent;
+  --graph-star:      transparent;
 }
 
-/* ———————————————————————— Dark (deep ink, late night) ———————————————————————— */
+/* ———————————————————————— Dark · 石墨 ———————————————————————— */
 .et-dark {
   color-scheme: dark;
 
-  --surface-page:    #14182A;
-  --surface-card:    #1B2138;
-  --surface-sunken:  #232944;
-  --surface-raised:  #20263F;
-  --surface-inverse: #F4ECDA;
-  --surface-hover:   rgba(244, 236, 218, 0.06);
-  --surface-pressed: rgba(244, 236, 218, 0.10);
-  --surface-overlay: rgba(6, 8, 18, 0.62);
+  --surface-page:    #0B0C0D;
+  --surface-card:    #131416;
+  --surface-sunken:  #1A1B1E;
+  --surface-raised:  #18191C;
+  --surface-inverse: #E8E9E5;
+  --surface-hover:   rgba(232, 233, 229, 0.05);
+  --surface-pressed: rgba(232, 233, 229, 0.09);
+  --surface-overlay: rgba(0, 0, 0, 0.62);
 
-  --text-primary:   #F4ECDA;
-  --text-secondary: #DCD3BE;
-  --text-muted:     #A39B86;
-  --text-faint:     #7A735F;
-  --text-inverse:   #1B2138;
-  --text-on-accent: #FFFFFF;
+  --text-primary:   #E8E9E5;
+  --text-secondary: #A0A29E;
+  --text-muted:     #85878A;
+  --text-faint:     #66686A;
+  --text-inverse:   #131416;
+  --text-on-accent: #0B0C0D;
 
-  --border-subtle:  rgba(244, 236, 218, 0.10);
-  --border-default: rgba(244, 236, 218, 0.18);
-  --border-strong:  rgba(244, 236, 218, 0.30);
-  --focus-ring:     #FF8867;
+  --border-subtle:  #26282B;
+  --border-default: #393C40;
+  --border-strong:  #55585C;
+  --focus-ring:     #CDEB45;
 
-  --accent:              #FF8867;
-  --accent-strong:       #FF6B47;
-  --accent-text:         #FF9E80;
-  --accent-solid:        #E8603C;
-  --accent-solid-hover:  #F2714E;
-  --accent-soft:         #3A2519;
-  --accent-border:       rgba(255, 136, 103, 0.34);
+  --signal:          #CDEB45;
+  --signal-hover:    #D9F45E;
+  --signal-ink:      #CDEB45;
+  --signal-dim:      rgba(205, 235, 69, 0.13);
+  --signal-line:     rgba(205, 235, 69, 0.36);
+  --text-on-signal:  #0B0C0D;
 
-  --success-bg:     #1C2E28;
-  --success-fg:     #9DD3AE;
-  --success-border: #2F5244;
-  --success-solid:  #4C9468;
+  --accent:              var(--signal);
+  --accent-strong:       #DDF56A;
+  --accent-text:         var(--signal);
+  --accent-solid:        var(--signal);
+  --accent-solid-hover:  var(--signal-hover);
+  --accent-soft:         var(--signal-dim);
+  --accent-border:       var(--signal-line);
 
-  --warning-bg:     #322919;
-  --warning-fg:     #EEC788;
-  --warning-border: #5B4727;
-  --warning-solid:  #C9913A;
+  /* dark → light on graphite */
+  --heat-0: #18191C;
+  --heat-1: #232528;
+  --heat-2: #34373B;
+  --heat-3: #555A5F;
+  --heat-4: #8C9196;
+  --heat-text:      #8A8D90;
+  --heat-text-deep: #0B0C0D;
 
-  --danger-bg:          #3A201D;
-  --danger-fg:          #F4A48E;
-  --danger-border:      #693430;
-  --danger-solid:       #D2553A;
-  --danger-solid-hover: #DE684D;
+  --success-bg:     var(--signal-dim);
+  --success-fg:     #CDEB45;
+  --success-border: rgba(205, 235, 69, 0.30);
+  --success-solid:  #A9C531;
 
-  --info-bg:     #1B2843;
-  --info-fg:     #A9C4E4;
-  --info-border: #33486C;
-  --info-solid:  #5E80A8;
+  --warning-bg:     #261F12;
+  --warning-fg:     #EDB65A;
+  --warning-border: #57441F;
+  --warning-solid:  #E0A032;
 
-  --skeleton-base:  #232944;
-  --skeleton-shine: #2D3456;
+  --danger-bg:          #2B1714;
+  --danger-fg:          #FF907F;
+  --danger-border:      #5C2B24;
+  --danger-solid:       #F0614E;
+  --danger-solid-hover: #FF7461;
 
-  --shadow-sm: 0 1px 0 rgba(0,0,0,0.20), 0 1px 2px rgba(0,0,0,0.24);
-  --shadow-md: 0 1px 0 rgba(0,0,0,0.20), 0 8px 24px rgba(0,0,0,0.32);
-  --shadow-lg: 0 1px 0 rgba(0,0,0,0.24), 0 18px 48px rgba(0,0,0,0.45);
-  --shadow-accent: 0 6px 18px rgba(0, 0, 0, 0.35);
+  --info-bg:     #1A1B1E;
+  --info-fg:     #B5B7B3;
+  --info-border: #393C40;
+  --info-solid:  #8C9196;
 
-  --et-faint:    #6E6852;
-  --et-amber:    #E8B57A;
-  --et-rose:     #E07659;
-  --et-sage:     #9DBBA1;
-  --et-sky:      #8FA8C4;
-  --et-postmark: #E07659;
+  --skeleton-base:  #1A1B1E;
+  --skeleton-shine: #222428;
 
-  --graph-backdrop:  radial-gradient(ellipse at 50% 40%, #1B2548 0%, #0B0F22 70%, #050714 100%);
-  --graph-node-rim:  rgba(20, 24, 42, 0.60);
-  --graph-specular:  rgba(255, 255, 255, 0.25);
-  --graph-star:      #FFFFFF;
+  --shadow-sm: 0 0 0 0 transparent;
+  --shadow-md: 0 0 0 1px rgba(0, 0, 0, 0.3), 0 12px 32px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 0 0 1px rgba(0, 0, 0, 0.35), 0 24px 64px rgba(0, 0, 0, 0.62);
+  --shadow-accent: 0 0 0 0 transparent;
+
+  --et-faint:    #393C40;
+  --et-amber:    #D8A64A;
+  --et-rose:     #D9806C;
+  --et-sage:     #A7B86E;
+  --et-sky:      #8C9196;
+  --et-postmark: #66686A;
+
+  --graph-backdrop:  #0F1012;
+  --graph-node-rim:  rgba(11, 12, 13, 0.8);
+  --graph-specular:  transparent;
+  --graph-star:      transparent;
 }
 
 /* ———————————————————————— Theme-independent scales ———————————————————————— */
 :root {
   /* type */
-  --font-serif: 'Noto Serif SC Variable', 'Noto Serif SC', 'Source Han Serif SC', 'Songti SC', 'STSong', 'SimSun', serif;
-  --font-sans:  'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei UI', 'Microsoft YaHei', 'Noto Sans CJK SC', 'Noto Sans SC', 'Source Han Sans SC', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', sans-serif;
-  --font-mono:  'SF Mono', ui-monospace, 'JetBrains Mono', Menlo, Consolas, monospace;
+  --font-sans:    -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Segoe UI', 'Microsoft YaHei UI', 'Microsoft YaHei', 'Noto Sans CJK SC', 'Noto Sans SC', 'Helvetica Neue', Arial, sans-serif;
+  --font-mono:    'JetBrains Mono Variable', 'JetBrains Mono', ui-monospace, Menlo, Consolas, 'PingFang SC', 'Microsoft YaHei', monospace;
+  --font-display: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI Variable Display', 'Segoe UI', 'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  /* The B direction has no serif. Old pages that still ask for one get the
+     sans stack, so every page reads as part of the same instrument. */
+  --font-serif:   var(--font-sans);
 
-  /* radius */
-  --radius-xs:   6px;
-  --radius-sm:   8px;
-  --radius-md:   10px;
-  --radius-lg:   14px;
-  --radius-xl:   22px;
+  /* mono label: 10px caps, wide tracking */
+  --label-size: 10px;
+  --label-tracking: 0.1em;
+
+  /* radius — hardware corners: almost square */
+  --radius-xs:   2px;
+  --radius-sm:   2px;
+  --radius-md:   3px;
+  --radius-lg:   3px;
+  --radius-xl:   4px;
   --radius-pill: 999px;
 
   /* spacing (4px grid) */
@@ -207,43 +259,40 @@
 
   /* motion */
   --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
-  --dur-fast: 120ms;
-  --dur-base: 200ms;
+  --dur-fast: 110ms;
+  --dur-base: 180ms;
 
   /* layers */
   --z-dialog: 1200;
 
-  /* media overlays — drawn on top of photos / video, so the same in both
-     themes (a dark scrim with white text reads on any picture) */
-  --media-scrim:        rgba(20, 24, 42, 0.72);
-  --media-scrim-strong: rgba(8, 10, 18, 0.88);
+  /* media overlays — on photos / video; identical in both themes */
+  --media-scrim:        rgba(11, 12, 13, 0.72);
+  --media-scrim-strong: rgba(6, 7, 8, 0.9);
   --media-on-scrim:     #FFFFFF;
-  --media-control:      rgba(255, 255, 255, 0.92);
-  --media-control-ink:  #1A2B4A;
+  --media-control:      rgba(235, 235, 231, 0.94);
+  --media-control-ink:  #111213;
 
-  /* relationship graph: the "you" glow, the hover / selection ring and the
-     core-circle palette (categorical data colors, mid-tones that read on
-     both the cream and the night-sky canvas) */
-  --graph-self:      #FFE6CF;
-  --graph-highlight: #FFC857;
-  --graph-circle-1:  #FF6B47;
-  --graph-circle-2:  #E8B57A;
-  --graph-circle-3:  #5A7A99;
-  --graph-circle-4:  #9E9583;
-  --graph-circle-5:  #7C9885;
-  --graph-circle-6:  #C9A66B;
-  --graph-circle-7:  #A87BA1;
-  --graph-circle-8:  #6B8FA8;
-  --graph-circle-9:  #D17545;
+  /* relationship graph — kept for the not-yet-rebuilt GraphView. */
+  --graph-self:      #E8E9E5;
+  --graph-highlight: #CDEB45;
+  --graph-circle-1:  #A9C531;
+  --graph-circle-2:  #8C9196;
+  --graph-circle-3:  #6B747C;
+  --graph-circle-4:  #B5B7B3;
+  --graph-circle-5:  #7F8F55;
+  --graph-circle-6:  #C99A3A;
+  --graph-circle-7:  #9A8FA6;
+  --graph-circle-8:  #6F8A99;
+  --graph-circle-9:  #B5624F;
 
-    /* —— legacy (--et-*) —— */
+  /* —— legacy (--et-*) —— */
   --et-serif: var(--font-serif);
   --et-sans:  var(--font-sans);
   --et-mono:  var(--font-mono);
-  --et-r-sm: 8px;
-  --et-r:    14px;
-  --et-r-lg: 22px;
-  --et-r-xl: 32px;
+  --et-r-sm: 2px;
+  --et-r:    3px;
+  --et-r-lg: 4px;
+  --et-r-xl: 4px;
   --et-1: 4px;
   --et-2: 8px;
   --et-3: 12px;
@@ -255,8 +304,8 @@
   --et-9: 96px;
 }
 
-/* Legacy color aliases. Declared on every theme scope so a nested
- * `.et-dark` / `.et-light` recomputes them from that scope's semantic values. */
+/* Legacy colour aliases. Declared on every theme scope so a nested
+ * `.et-dark` / `.et-light` recomputes them from that scope's values. */
 :root,
 .et-light,
 .et-dark {
@@ -282,55 +331,38 @@
   color: var(--text-primary);
   background: var(--surface-page);
   -webkit-font-smoothing: antialiased;
-  font-feature-settings: 'palt' 1;
-  letter-spacing: 0.005em;
 }
-.et-serif { font-family: var(--font-serif); letter-spacing: 0.01em; }
-.et-mono  { font-family: var(--font-mono); }
+.et-serif { font-family: var(--font-sans); }
+.et-mono  { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 
-/* type scale */
-.et-display { font-family: var(--font-serif); font-weight: 600; font-size: 56px; line-height: 1.15; letter-spacing: -0.005em; }
-.et-h1      { font-family: var(--font-serif); font-weight: 600; font-size: 38px; line-height: 1.2; }
-.et-h2      { font-family: var(--font-serif); font-weight: 500; font-size: 26px; line-height: 1.25; }
-.et-h3      { font-family: var(--font-serif); font-weight: 500; font-size: 20px; line-height: 1.3; }
-.et-eyebrow { font-family: var(--font-sans);  font-weight: 600; font-size: 11px; line-height: 1; letter-spacing: 0.18em; text-transform: uppercase; color: var(--text-muted); }
-.et-body    { font-family: var(--font-sans);  font-weight: 400; font-size: 14px; line-height: 1.55; }
-.et-meta    { font-family: var(--font-sans);  font-weight: 500; font-size: 12px; line-height: 1.4; color: var(--text-muted); }
-.et-num     { font-family: var(--font-serif); font-feature-settings: 'tnum' 1; font-variant-numeric: tabular-nums; }
+/* type scale (legacy class names, instrument styling) */
+.et-display { font-family: var(--font-display); font-weight: 200; font-size: 56px; line-height: 1.1; letter-spacing: -0.02em; }
+.et-h1      { font-family: var(--font-sans); font-weight: 500; font-size: 30px; line-height: 1.25; letter-spacing: 0.01em; }
+.et-h2      { font-family: var(--font-sans); font-weight: 500; font-size: 22px; line-height: 1.3; letter-spacing: 0.01em; }
+.et-h3      { font-family: var(--font-sans); font-weight: 500; font-size: 17px; line-height: 1.35; letter-spacing: 0.02em; }
+.et-eyebrow { font-family: var(--font-mono); font-weight: 400; font-size: var(--label-size); line-height: 1.2; letter-spacing: var(--label-tracking); text-transform: uppercase; color: var(--text-faint); }
+.et-body    { font-family: var(--font-sans); font-weight: 400; font-size: 13.5px; line-height: 1.6; }
+.et-meta    { font-family: var(--font-sans); font-weight: 400; font-size: 12px; line-height: 1.45; color: var(--text-muted); }
+.et-num     { font-family: var(--font-mono); font-variant-numeric: tabular-nums; letter-spacing: 0; }
 
-/* paper texture (subtle) */
-.et-paper-grain {
-  background-image:
-    radial-gradient(rgba(26,43,74,0.025) 1px, transparent 1px),
-    radial-gradient(rgba(26,43,74,0.018) 1px, transparent 1px);
-  background-size: 3px 3px, 7px 7px;
-  background-position: 0 0, 1px 2px;
-}
-.et-dark .et-paper-grain,
-.et-dark.et-paper-grain {
-  background-image:
-    radial-gradient(rgba(244,236,218,0.022) 1px, transparent 1px),
-    radial-gradient(rgba(244,236,218,0.014) 1px, transparent 1px);
-}
+/* the old paper grain is gone; the class stays so old markup is harmless */
+.et-paper-grain { background-image: none; }
 
-/* a hairline rule that mimics letterpress */
-.et-rule { height: 1px; background: var(--border-default); border: 0; }
-.et-rule-double { height: 5px; border-top: 1px solid var(--border-default); border-bottom: 1px solid var(--border-default); background: transparent; }
+.et-rule { height: 1px; background: var(--border-subtle); border: 0; }
+.et-rule-double { height: 4px; border-top: 1px solid var(--border-default); border-bottom: 1px solid var(--border-subtle); background: transparent; }
 
-/* tag chip (老朋友 / 夜聊伙伴 / 秒回选手 …) — legacy; new code uses <Chip> */
+/* tag chip (legacy; new code uses <Chip>) — a small hardware label */
 .et-chip {
   display: inline-flex; align-items: center; gap: 4px;
-  padding: 3px 9px; border-radius: 999px;
-  font-family: var(--font-sans); font-size: 11px; font-weight: 500;
+  height: 18px; padding: 0 6px; border-radius: var(--radius-xs);
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 400;
   letter-spacing: 0.04em;
-  /* A tag is one word; never break it (absolutely positioned chips, e.g. the
-     friend hero's avatar badge, otherwise shrink-wrap onto two lines). */
   white-space: nowrap;
-  background: var(--accent-soft);
-  color: var(--accent-strong);
-  border: 0.5px solid var(--accent-border);
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-default);
 }
-.et-chip.ink  { background: var(--surface-hover); color: var(--text-primary); border-color: var(--border-subtle); }
+.et-chip.ink   { color: var(--text-primary); }
 .et-chip.sage  { background: var(--success-bg); color: var(--success-fg); border-color: var(--success-border); }
 .et-chip.amber { background: var(--warning-bg); color: var(--warning-fg); border-color: var(--warning-border); }
-.et-chip.faint { background: transparent; color: var(--text-muted); border: 0.5px dashed var(--border-default); }
+.et-chip.faint { color: var(--text-faint); border-style: dashed; }

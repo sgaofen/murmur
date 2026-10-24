@@ -228,7 +228,7 @@ export function ChatPage({ chatId, query, navigate }: ChatPageProps) {
   const back = fromSearch
     ? { label: '搜索', onClick: () => navigate(searchBackPath(params)) }
     : isGroup
-      ? { label: '首页', onClick: () => navigate('') }
+      ? { label: '年代记', onClick: () => navigate('') }
       : { label: '朋友页', onClick: () => navigate(`friend/${chatId}`) };
 
   const name = displayName(chatId, info?.name ?? null);

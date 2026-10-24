@@ -1,0 +1,71 @@
+/* 后台任务 key + drawer (components/extras/TaskCenter.tsx). Tokens only. */
+.tc-key__n {
+  min-width: 16px; height: 16px; padding: 0 4px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-family: var(--font-mono); font-size: 10px; line-height: 1;
+  color: var(--text-faint);
+  border-radius: var(--radius-xs);
+}
+.tc-key__n.is-run { background: var(--signal); color: var(--text-on-signal); font-weight: 600; }
+.tc-key.is-open { border-color: var(--text-secondary); }
+
+.tc-scrim { position: fixed; inset: 0; z-index: 50; background: transparent; }
+.tc-drawer {
+  position: fixed; z-index: 51;
+  top: calc(var(--shell-top, 0px) + 8px); right: 12px;
+  width: min(380px, calc(100vw - 24px));
+  display: flex; flex-direction: column;
+  max-height: calc(100vh - var(--shell-top, 0px) - var(--shell-bottom, 0px) - 16px);
+  background: var(--surface-raised);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+.tc-drawer__head {
+  flex: none; height: 30px;
+  display: flex; align-items: center; gap: 10px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--border-subtle);
+  font-family: var(--font-mono); font-size: var(--label-size); letter-spacing: var(--label-tracking);
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+.tc-drawer__count { margin-left: auto; }
+.tc-drawer__list { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.tc-drawer__empty { padding: 22px 14px; text-align: center; font-size: 12px; color: var(--text-muted); }
+.tc-drawer__foot {
+  flex: none;
+  display: flex; justify-content: flex-end;
+  padding: 6px 8px;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--surface-card);
+}
+
+.tc-row { padding: 10px 14px 11px; border-bottom: 1px solid var(--border-subtle); }
+.tc-row:last-child { border-bottom: 0; }
+.tc-row__top { display: flex; align-items: center; gap: 10px; }
+.tc-row__state {
+  flex: none; width: 52px;
+  display: inline-flex; align-items: center; gap: 6px;
+  font-family: var(--font-mono); font-size: 9.5px; letter-spacing: var(--label-tracking);
+  color: var(--text-secondary);
+}
+.tc-row.is-error .tc-row__state { color: var(--danger-fg); }
+.tc-row.is-done .tc-row__state { color: var(--text-faint); }
+.tc-row__name { flex: 1 1 auto; min-width: 0; font-size: 12.5px; font-weight: 500; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tc-row.is-done .tc-row__name { color: var(--text-muted); }
+.tc-row__pct { flex: none; font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary); }
+.tc-row__btn {
+  appearance: none; margin: 0; flex: none;
+  height: 22px; padding: 0 8px;
+  border: 1px solid var(--border-default); border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  font-family: var(--font-sans); font-size: 11px; color: var(--text-secondary);
+  cursor: pointer;
+}
+.tc-row__btn:hover { color: var(--text-primary); border-color: var(--border-strong); }
+.tc-row__bar { display: flex; gap: 2px; height: 5px; margin: 8px 0 0 62px; }
+.tc-row__bar i { flex: 1 1 0; background: var(--heat-1); }
+.tc-row__bar i.on { background: var(--signal); }
+.tc-row__sub { margin: 5px 0 0 62px; font-size: 11px; line-height: 1.5; color: var(--text-muted); overflow-wrap: anywhere; }

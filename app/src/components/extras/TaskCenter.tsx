@@ -2,6 +2,8 @@ import { createContext, useCallback, useContext, useEffect, useState } from 'rea
 import type { ReactNode } from 'react';
 import { maskText } from '../../utils/privacy';
 import { usePrivacy } from '../../utils/usePrivacy';
+import { cx } from '../../ui';
+import './TaskCenter.css';
 
 // ─── Types ───
 export type TaskIcon = 'key' | 'lock' | 'agent' | 'index';
@@ -66,112 +68,50 @@ export function useTaskCenter(): TaskStore {
   return v;
 }
 
-// ─── Bell icon ───
+// ─── Bell / key ───
+/** Opens the task drawer; shows how many tasks are running. Looks like an
+ * instrument key: `[T] 任务 2`. */
 export function TaskCenterBell({ onClick, active }: { onClick: () => void; active: boolean }) {
   const { tasks } = useTaskCenter();
   const count = tasks.filter(t => t.status === 'run').length;
   return (
-    <button onClick={onClick} title="后台任务" style={{
-      all: 'unset', cursor: 'pointer', position: 'relative',
-      width: 32, height: 32, borderRadius: 8,
-      display: 'flex', alignItems: 'center', justifyContent: 'center',
-      background: active ? 'var(--et-orange-soft)' : 'transparent',
-      color: active ? 'var(--et-orange-2)' : 'var(--et-mute)',
-    }}>
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4">
-        <path d="M8 2v1M4 7a4 4 0 018 0v3l1 2H3l1-2V7zM6.5 13a1.5 1.5 0 003 0" strokeLinecap="round" strokeLinejoin="round" />
-      </svg>
-      {count > 0 && (
-        <span style={{
-          position: 'absolute', top: 4, right: 4,
-          minWidth: 14, height: 14, padding: '0 3px', borderRadius: 999,
-          background: 'var(--accent-solid)', color: 'var(--text-on-accent)',
-          fontSize: 9, fontWeight: 700,
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          fontFamily: 'var(--et-sans)',
-          boxShadow: '0 0 0 2px var(--et-paper)',
-        }}>{count}</span>
-      )}
+    <button type="button" onClick={onClick} title="后台任务" aria-expanded={active}
+      className={cx('ui-btn', 'ui-btn--secondary', 'ui-btn--sm', 'ui-btn--kbd', 'tc-key', active && 'is-open')}>
+      <kbd className="ui-kbd" aria-hidden="true">T</kbd>
+      <span className="ui-btn__label">任务</span>
+      <span className={cx('tc-key__n', count > 0 && 'is-run')}>{count > 0 ? count : '0'}</span>
     </button>
   );
 }
 
 // ─── Drawer ───
-const TASK_ICONS: Record<TaskIcon, React.ReactNode> = {
-  key: (
-    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4">
-      <circle cx="4" cy="7" r="2.5" />
-      <path d="M6 7h6M11 7v2.5M9 7v2" />
-    </svg>
-  ),
-  agent: (
-    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-      <path d="M7 1L4 7h2.5L5.5 13l4-7H7L7 1z" fill="currentColor" />
-    </svg>
-  ),
-  index: (
-    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4">
-      <path d="M2 4l2-2h3l1 1h4v8H2V4z" />
-    </svg>
-  ),
-  lock: (
-    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4">
-      <rect x="3" y="6" width="8" height="6" rx="1" />
-      <path d="M5 6V4.5a2 2 0 014 0V6" />
-    </svg>
-  ),
-};
+const STATUS_LABEL: Record<TaskStatus, string> = { run: 'RUN', done: 'DONE', error: 'FAIL' };
 
 function TaskRow({ task, onCancel, onClear }: { task: Task; onCancel?: () => void; onClear?: () => void }) {
   void usePrivacy();
-  const isDone = task.status === 'done';
-  const isError = task.status === 'error';
-  const isTerminal = isDone || isError;
+  const isTerminal = task.status === 'done' || task.status === 'error';
+  const segs = 24;
+  const lit = Math.round((task.pct / 100) * segs);
   return (
-    <div style={{
-      display: 'flex', alignItems: 'center', gap: 12,
-      padding: '12px 14px', borderRadius: 12,
-      background: isTerminal ? 'transparent' : 'var(--et-paper)',
-      border: isTerminal ? '0.5px dashed var(--et-line-2)' : '0.5px solid var(--et-line-2)',
-      opacity: isDone ? 0.65 : 1,
-      transition: 'transform .15s, box-shadow .2s',
-    }}
-    onMouseEnter={(e) => { if (!isTerminal) { e.currentTarget.style.transform = 'translateY(-1px)'; e.currentTarget.style.boxShadow = 'var(--et-shadow-2)'; } }}
-    onMouseLeave={(e) => { e.currentTarget.style.transform = 'none'; e.currentTarget.style.boxShadow = 'none'; }}
-    >
-      <div style={{
-        width: 30, height: 30, borderRadius: 8,
-        background: isTerminal ? 'var(--surface-hover)' : 'var(--et-orange-soft)',
-        color: isError ? 'var(--et-orange)' : isDone ? 'var(--et-mute)' : 'var(--et-orange-2)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
-      }}>
-        {isError ? (
-          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6">
-            <path d="M3 3l6 6M9 3L3 9" strokeLinecap="round" />
-          </svg>
-        ) : isDone ? (
-          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6">
-            <path d="M2.5 6.2L4.8 8.5L9.5 3.8" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-        ) : TASK_ICONS[task.icon]}
+    <div className={cx('tc-row', `is-${task.status}`)}>
+      <div className="tc-row__top">
+        <span className="tc-row__state">
+          <i className={cx('ui-led', task.status === 'done' && 'is-off', task.status === 'error' && 'ui-led--error', task.status === 'run' && 'is-pulse')} aria-hidden="true" />
+          {STATUS_LABEL[task.status]}
+        </span>
+        <span className="tc-row__name">{maskText(task.name)}</span>
+        {!isTerminal && <span className="tc-row__pct">{task.pct}%</span>}
+        <button type="button" className="tc-row__btn" onClick={isTerminal ? onClear : onCancel}
+          title={isTerminal ? '清除这条记录' : '只隐藏这条任务，不会中止后台进程'}>
+          {isTerminal ? '清除' : maskText(task.action || '隐藏')}
+        </button>
       </div>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
-          <span style={{ fontSize: 12.5, fontWeight: 600, color: isDone ? 'var(--et-mute)' : 'var(--et-ink)' }}>{maskText(task.name)}</span>
-          {!isTerminal && <span className="et-num" style={{ fontSize: 11, color: 'var(--et-mute)' }}>{task.pct}%</span>}
+      {!isTerminal && (
+        <div className="tc-row__bar" aria-hidden="true">
+          {Array.from({ length: segs }, (_, i) => <i key={i} className={cx(i < lit && 'on')} />)}
         </div>
-        {!isTerminal && (
-          <div style={{ height: 4, background: 'var(--surface-pressed)', borderRadius: 999, overflow: 'hidden', marginTop: 6 }}>
-            <div style={{ width: `${task.pct}%`, height: '100%', background: 'var(--et-orange)', borderRadius: 999, transition: 'width .25s' }} />
-          </div>
-        )}
-        <div className="et-meta" style={{ fontSize: 11, marginTop: 4, color: 'var(--et-mute)' }}>{maskText(task.sub)}</div>
-      </div>
-      <button onClick={isTerminal ? onClear : onCancel} title={isTerminal ? '清除这条记录' : '只隐藏这条任务，不会中止后台进程'} style={{
-        all: 'unset', cursor: 'pointer', padding: '4px 10px', borderRadius: 6,
-        fontSize: 11, color: isTerminal ? 'var(--et-mute)' : 'var(--et-ink)',
-        border: '0.5px solid var(--et-line-2)', background: 'var(--et-paper)',
-      }}>{isTerminal ? '清除' : maskText(task.action || '隐藏')}</button>
+      )}
+      <div className="tc-row__sub">{maskText(task.sub)}</div>
     </div>
   );
 }
@@ -183,40 +123,22 @@ export function TaskCenterDrawer({ onClose }: { onClose: () => void }) {
   const errors = tasks.filter(t => t.status === 'error').length;
   return (
     <>
-      <div onClick={onClose} style={{
-        position: 'fixed', inset: 0, background: 'var(--surface-hover)',
-        backdropFilter: 'blur(2px)', zIndex: 50,
-      }} />
-      <div style={{
-        position: 'fixed', top: 56, right: 'min(28px, 3vw)', zIndex: 51,
-        width: 'min(380px, calc(100vw - 24px))', background: 'var(--et-paper)',
-        border: '0.5px solid var(--et-line-2)',
-        borderRadius: 'var(--et-r)', boxShadow: 'var(--et-shadow-3)',
-        overflow: 'hidden',
-      }}>
-        <div style={{
-          position: 'absolute', top: -7, right: 18, width: 14, height: 14,
-          background: 'var(--et-paper)',
-          borderTop: '0.5px solid var(--et-line-2)',
-          borderLeft: '0.5px solid var(--et-line-2)',
-          transform: 'rotate(45deg)',
-        }} />
-        <div style={{ padding: '14px 18px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '0.5px solid var(--et-line)' }}>
-          <div className="et-serif" style={{ fontSize: 14, fontWeight: 600, color: 'var(--et-ink)' }}>后台任务</div>
-          <div className="et-meta">{running} 进行中 · {done} 已完成{errors ? ` · ${errors} 失败` : ''}</div>
+      <div className="tc-scrim" onClick={onClose} />
+      <div className="tc-drawer" role="dialog" aria-label="后台任务">
+        <div className="tc-drawer__head">
+          <span className="ui-mod__id">T</span>
+          <span className="ui-mod__title">后台任务</span>
+          <span>TASKS</span>
+          <span className="tc-drawer__count">RUN {running} · DONE {done}{errors ? ` · FAIL ${errors}` : ''}</span>
         </div>
-        <div style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 10, maxHeight: '60vh', overflowY: 'auto' }}>
-          {tasks.length === 0 && (
-            <div className="et-meta" style={{ textAlign: 'center', padding: 20 }}>没有正在跑的任务。</div>
-          )}
+        <div className="tc-drawer__list">
+          {tasks.length === 0 && <div className="tc-drawer__empty">没有正在跑的任务。</div>}
           {tasks.map(t => (
             <TaskRow key={t.id} task={t} onCancel={() => removeTask(t.id)} onClear={() => removeTask(t.id)} />
           ))}
         </div>
-        <div style={{ padding: '10px 18px', borderTop: '0.5px solid var(--et-line)', display: 'flex', justifyContent: 'flex-end' }}>
-          <button onClick={clearDone} style={{
-            all: 'unset', cursor: 'pointer', fontSize: 11, color: 'var(--et-orange)', fontWeight: 600,
-          }}>清除已结束</button>
+        <div className="tc-drawer__foot">
+          <button type="button" className="ui-btn ui-btn--ghost ui-btn--sm" onClick={clearDone}>清除已结束</button>
         </div>
       </div>
     </>

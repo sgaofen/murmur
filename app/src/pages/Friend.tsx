@@ -32,7 +32,7 @@ function FriendChromeBar({ onBack, friend }: { onBack: () => void; friend: Frien
   const name = displayName(friend.id, friend.name);
   return (
     <PageHeader
-      back={{ label: '首页', onClick: onBack }}
+      back={{ label: '年代记', onClick: onBack }}
       title={`和 ${name} 的故事`}
       subtitle={<span className="et-mono">{maskedWxid(friend.id)}</span>}
     />
@@ -575,7 +575,7 @@ function ExportReportCard({ report }: { report: ExportReport }) {
 function FriendSkeleton({ onBack }: { onBack: () => void }) {
   return (
     <div className="friend-page et-root" aria-busy="true">
-      <PageHeader back={{ label: '首页', onClick: onBack }} title="朋友" />
+      <PageHeader back={{ label: '年代记', onClick: onBack }} title="朋友" />
       <div className="friend-tabs" aria-hidden="true">
         {['故事', '相册', '完整对话'].map((t, i) => (
           <span key={t} className="friend-tab" aria-selected={i === 0}>{t}</span>
@@ -730,7 +730,7 @@ export function FriendPage({ friendId, onBack, onOpenFriend }: Props) {
     const entry = lookupError(code);
     return (
       <>
-        <PageHeader back={{ label: '首页', onClick: onBack }} title="朋友" />
+        <PageHeader back={{ label: '年代记', onClick: onBack }} title="朋友" />
         <ErrorState
           layout="page"
           title={entry?.title ?? '这位朋友的页面没能加载'}
