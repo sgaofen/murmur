@@ -398,10 +398,10 @@ class PrivateCopyJob:
         import live_key as _live_key
         return _live_key.load_keys(self._kpath())
 
-    def _split_pending(self, salt_map: dict):
+    def _split_pending(self, salt_map: dict, wxid=None):
         sys.path.insert(0, str(CLI_DIR))
         import live_key as _live_key
-        return _live_key.split_pending(salt_map, self._load_keys())
+        return _live_key.split_pending(salt_map, self._load_keys(), wxid)
 
     def _merge(self, new_keys: dict, salt_by_rel: dict, wxid,
                passphrase: Optional[dict] = None):
@@ -416,7 +416,7 @@ class PrivateCopyJob:
         if not profiles:
             return {"total": 0, "known": 0, "pending": []}
         salt_map = self._salts(profiles[0])
-        pending, known = self._split_pending(salt_map)
+        pending, known = self._split_pending(salt_map, getattr(profiles[0], "wxid", None))
         return {"total": len(salt_map), "known": len(known), "pending": sorted(pending)}
 
     def status(self) -> dict:
@@ -572,7 +572,7 @@ class PrivateCopyJob:
             salt_map = self._salts(prof)
             if not salt_map:
                 raise _StartError("没找到加密数据库 — 让微信完成首次同步后再试")
-            pending, known = self._split_pending(salt_map)
+            pending, known = self._split_pending(salt_map, getattr(prof, "wxid", None))
         except Exception as e:
             msg = str(e) if isinstance(e, _StartError) else f"{type(e).__name__}: {e}"
             with self._lock:
