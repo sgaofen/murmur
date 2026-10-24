@@ -77,3 +77,94 @@
 ## 引导期
 
 和其他数据接口一样，没有解密数据时三个接口都返回 503（`no_decrypted_data` / `onboarding_required`）。
+
+---
+
+# 本机语义搜索（可选，默认关闭）
+
+实现在 `cli/semantic_index.py`。全程在本机运行，不调用任何云端 API；唯一的联网动作是用户点击后下载模型。
+
+## 怎么工作
+
+- 输入是上面的关键词索引（`messages` 表），所以建语义索引前会先把关键词索引补到最新。
+- 同一个会话里相邻的消息合成一个片段：最多 8 条、约 400 字，两条消息间隔超过 1 小时就断开。单条消息超过 200 字会截断。
+- 每个片段用嵌入模型编码成 512 维向量，以 float16 BLOB 存在 `~/Documents/Murmur/semantic/index/<platform>-<account>.sqlite`（可用 `MURMUR_SEMANTIC_DIR` 改目录）。不写入微信 / QQ 的解密库。
+- 查询时把问题也编码成向量，对所有片段算余弦相似度（装了 numpy 用矩阵乘法，并按索引版本缓存在内存里，默认上限 512MB，可用 `MURMUR_SEMANTIC_CACHE_MB` 调；没有 numpy 时走纯 Python）。
+- 增量：每个会话记住已编码的最后一条消息；会话最后一个片段是「开放」的，有新消息时连同新消息重新编码。关键词索引被重建（行 id 变了）时，对应会话的语义片段会自动重建。已编码消息被撤回 / 编辑需要全量重建。
+
+### 选型
+
+| 方案 | 取舍 |
+|---|---|
+| **SQLite BLOB + 线性扫描（采用）** | 零额外原生扩展；macOS 自带 Python 的 sqlite3 不能 `enable_load_extension`，sqlite-vec 装不上。十几万个片段一次矩阵乘法在 1 秒内。 |
+| sqlite-vec | 要加载扩展，Windows / macOS 打包都麻烦。 |
+| faiss / hnswlib | 需要编译或大 wheel，这个规模用不上近似检索。 |
+
+模型：`BAAI/bge-small-zh-v1.5`（MIT），用 `Xenova/bge-small-zh-v1.5` 仓库里的 int8 ONNX 导出（`onnx/model_quantized.onnx` 24MB + `tokenizer.json` 0.4MB，合计约 24MB），由 onnxruntime + tokenizers 运行，不需要 torch。文件固定到一个 commit，下载后校验 SHA-256，所以从镜像下载也安全。M 系列 Mac 上实测约 230 个片段/秒（100 万条消息约 12.5 万个片段，约 9 分钟），单次查询编码约 2ms。
+
+## 可选依赖
+
+```bash
+python3.12 -m pip install -r requirements-semantic.txt   # onnxruntime, tokenizers, numpy
+```
+
+没装时各接口返回 `state = "not_installed"`，`missing_deps` 列出缺的包，`install_hint` 是安装命令。打包版 App 不带这几个依赖。
+
+## GET /api/search/semantic/status
+
+没有解密数据时也能调（此时 `index` 为 `null`）。
+
+```jsonc
+{
+  "state": "not_installed | disabled | model_missing | downloading | empty | building | ready | error",
+  "message": "给用户看的中文说明",
+  "installed": true, "missing_deps": [], "install_hint": "python3.12 -m pip install -r requirements-semantic.txt",
+  "enabled": false,                       // 默认关闭
+  "mirror": "huggingface",
+  "mirrors": [{"id": "huggingface", "label": "...", "endpoint": "https://huggingface.co"},
+              {"id": "hf-mirror", "label": "...", "endpoint": "https://hf-mirror.com"}],
+  "model": {"id", "name", "repo", "revision", "license", "homepage", "size_bytes", "files": [{"path", "size", "sha256"}], "downloaded", "dir"},
+  "download": {"state": "idle|downloading|done|error", "mirror", "file", "done_bytes", "total_bytes", "error"},
+  "local_only": true,
+  "index": {"state", "phase", "done", "total", "percent", "chunks", "indexed_messages", "last_built_at", "last_error"}
+}
+```
+
+状态的先后顺序：`not_installed` → `disabled` → `model_missing` / `downloading` → `empty` / `building` / `ready` / `error`。
+
+环境变量 `MURMUR_HF_ENDPOINT=https://...` 会多出一个 `custom` 下载源。
+
+## POST /api/search/semantic/settings
+
+`{"enabled": true|false, "mirror": "huggingface|hf-mirror|custom"}`，字段都可选。设置存在 `~/Documents/Murmur/semantic/settings.json`。关闭时会取消正在进行的建索引。未知的 `mirror` 返回 400。返回同 status。
+
+## POST /api/search/semantic/download
+
+`{"mirror": "hf-mirror"}`（可选，默认用设置里的）。后台下载并校验，进度看 status 的 `download`。界面必须先把 `model.size_bytes` 和 `model.repo` / 下载源告诉用户，用户点了才调这个接口。依赖没装时返回 409。
+
+## POST /api/search/semantic/build
+
+`{"full": false}`。后台增量建索引（`full: true` 为全量重建），进度看 status 的 `index`。没装依赖 / 没开启 / 没下模型时返回 409。`/api/refresh` 成功后，如果语义搜索可用，也会自动跑一次增量。
+
+## GET /api/search?mode=semantic（或 GET /api/search/semantic）
+
+参数：`q`、`chat`、`sender`、`from`、`to`、`limit`（1–100，默认 20）、`offset`、`min_score`（可选）。不支持 `type`。
+
+- `chat`：片段所属会话；`sender`：片段里有这个人发的消息；`from` / `to`：片段时间范围和区间有重叠。
+- 不可用时返回 409：`{"error": "semantic_unavailable", "message": "...", "status": {...同 status...}}`。
+
+返回结构和关键词搜索一样（`mode` / `match` 为 `"semantic"`，另有 `model`），每条结果多两个字段：
+
+```jsonc
+{
+  // ...和关键词结果一样的字段，指向片段里和问题字面最接近的一条消息（锚点）...
+  "score": 0.6123,                         // 余弦相似度，越大越相关；按它降序排列
+  "chunk": {
+    "id": 12, "ts_start": 1714550400, "ts_end": 1714554000,
+    "message_count": 6, "anchor_index": 2,
+    "messages": [{"sender", "sender_name", "ts", "time", "type", "text", "locator"}]
+  }
+}
+```
+
+`total` 是参与打分的片段数（设置了 `min_score` 时是达到阈值的数量）。`snippet` / `segments` 只在锚点消息里字面出现查询词时才有高亮。隐私遮罩同上，`chunk.messages` 里的名字和文字也要遮罩。

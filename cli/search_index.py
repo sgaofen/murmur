@@ -51,6 +51,10 @@ MAX_TERMS = 8
 MAX_LIMIT = 200
 SNIPPET_RADIUS = 40
 
+# Columns (alias `m` = messages) that format_rows() expects, in order.
+ROW_COLUMNS = ("m.platform, m.chat, m.is_group, m.sender, m.sender_hint, m.ts, m.type, "
+               "m.type_label, m.text, m.src, m.tbl, m.local_id, m.server_id")
+
 MODE_FTS = "fts5_trigram"
 MODE_LIKE = "like"
 
@@ -799,6 +803,62 @@ class SearchIndex:
             self._name_cache = (key, _WeChatSource(self.store).chat_by_table())
         return self._name_cache[1]
 
+    def display_namer(self):
+        """Callable username -> display name ("你" for self)."""
+        contacts = self._names()
+
+        def disp(u: str) -> str:
+            if u == "self":
+                return "你"
+            ct = contacts.get(u)
+            if ct is not None:
+                try:
+                    return ct.display()
+                except Exception:
+                    pass
+            return u
+        return disp
+
+    def format_rows(self, rows) -> list:
+        """Turn `SELECT {ROW_COLUMNS}` rows into (result item, text) pairs.
+
+        The item has everything of a search hit except the snippet fields;
+        shared with semantic_index so both result kinds have one shape.
+        """
+        disp = self.display_namer()
+        tbl_chat = self._table_chat_map()
+        out = []
+        for (plat, chat_u, is_group, snd, hint, ts, mtype, label, text, src_name, tbl,
+             local_id, server_id) in rows:
+            chat_u = chat_u or tbl_chat.get(tbl, "")
+            is_g = bool(is_group) or chat_u.endswith("@chatroom")
+            if snd == "self":
+                snd_name = "你"
+            elif hint:
+                snd_name = hint
+            else:
+                snd_name = disp(snd) if snd else ""
+            item = {
+                "platform": plat,
+                "chat": chat_u,
+                "chat_name": disp(chat_u) if chat_u else tbl,
+                "is_group": is_g,
+                "sender": snd,
+                "sender_name": snd_name,
+                "ts": int(ts),
+                "time": datetime.fromtimestamp(int(ts), CST).isoformat(),
+                "type": label,
+                "type_code": int(mtype),
+                "locator": {
+                    "db": src_name,
+                    "table": tbl,
+                    "local_id": int(local_id),
+                    "server_id": server_id,
+                },
+            }
+            out.append((item, text))
+        return out
+
     def search(self, q: str, *, chat=None, sender=None, ts_from: Optional[int] = None,
                ts_to: Optional[int] = None, types=None, limit: int = 50, offset: int = 0) -> dict:
         terms = split_terms(q)
@@ -863,8 +923,7 @@ class SearchIndex:
                     total = c.execute(f"SELECT COUNT(*) FROM messages m WHERE {where_sql}",
                                       params).fetchone()[0]
                     rows = c.execute(
-                        "SELECT m.platform, m.chat, m.is_group, m.sender, m.sender_hint, m.ts, m.type, "
-                        "m.type_label, m.text, m.src, m.tbl, m.local_id, m.server_id "
+                        f"SELECT {ROW_COLUMNS} "
                         f"FROM messages m WHERE {where_sql} ORDER BY m.ts DESC, m.id DESC "
                         "LIMIT ? OFFSET ?", params + [limit, offset]).fetchall()
                 except sqlite3.OperationalError as e:
@@ -874,51 +933,8 @@ class SearchIndex:
             finally:
                 c.close()
 
-        contacts = self._names()
-        tbl_chat = self._table_chat_map()
-
-        def disp(u: str) -> str:
-            if u == "self":
-                return "你"
-            ct = contacts.get(u)
-            if ct is not None:
-                try:
-                    return ct.display()
-                except Exception:
-                    pass
-            return u
-
-        results = []
-        for (plat, chat_u, is_group, snd, hint, ts, mtype, label, text, src_name, tbl,
-             local_id, server_id) in rows:
-            chat_u = chat_u or tbl_chat.get(tbl, "")
-            is_g = bool(is_group) or chat_u.endswith("@chatroom")
-            if snd == "self":
-                snd_name = "你"
-            elif hint:
-                snd_name = hint
-            else:
-                snd_name = disp(snd) if snd else ""
-            item = {
-                "platform": plat,
-                "chat": chat_u,
-                "chat_name": disp(chat_u) if chat_u else tbl,
-                "is_group": is_g,
-                "sender": snd,
-                "sender_name": snd_name,
-                "ts": int(ts),
-                "time": datetime.fromtimestamp(int(ts), CST).isoformat(),
-                "type": label,
-                "type_code": int(mtype),
-                "locator": {
-                    "db": src_name,
-                    "table": tbl,
-                    "local_id": int(local_id),
-                    "server_id": server_id,
-                },
-            }
-            item.update(build_snippet(text, terms))
-            results.append(item)
+        results = [dict(item, **build_snippet(text, terms))
+                   for item, text in self.format_rows(rows)]
         return {
             "query": q,
             "terms": terms,

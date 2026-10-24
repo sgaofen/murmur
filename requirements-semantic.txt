@@ -1,0 +1,14 @@
+# Optional on-device semantic search dependencies (off by default).
+#
+# Install with:
+#   python3.12 -m pip install -r requirements-semantic.txt
+#
+# Used only by cli/semantic_index.py. No torch: the embedding model
+# (BAAI/bge-small-zh-v1.5, int8 ONNX, ~24 MB) runs on onnxruntime, and the
+# HuggingFace `tokenizers` wheel does the tokenization. The model itself is
+# downloaded only when you click "下载模型" in Murmur (huggingface.co or the
+# hf-mirror.com mirror), SHA-256 verified, then everything runs locally.
+-r requirements.txt
+onnxruntime>=1.16
+tokenizers>=0.15
+numpy>=1.21
