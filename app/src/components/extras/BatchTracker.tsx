@@ -192,10 +192,10 @@ export function BatchStatusPill({ onOpenReports }: { onOpenReports: () => void }
             </span>
             <span className="et-num" style={{ fontSize: 11, color: 'var(--et-mute)' }}>{pct}%</span>
           </div>
-          <div style={{ height: 4, marginTop: 6, background: 'rgba(26,43,74,0.08)', borderRadius: 999, overflow: 'hidden' }}>
+          <div style={{ height: 4, marginTop: 6, background: 'var(--surface-pressed)', borderRadius: 999, overflow: 'hidden' }}>
             <div style={{
               width: `${pct}%`, height: '100%', borderRadius: 999,
-              background: status.running ? 'var(--et-orange)' : '#4EB06D',
+              background: status.running ? 'var(--accent)' : 'var(--success-solid)',
               transition: 'width .25s ease',
             }} />
           </div>

@@ -85,7 +85,7 @@ export function TaskCenterBell({ onClick, active }: { onClick: () => void; activ
         <span style={{
           position: 'absolute', top: 4, right: 4,
           minWidth: 14, height: 14, padding: '0 3px', borderRadius: 999,
-          background: 'var(--et-orange)', color: '#fff',
+          background: 'var(--accent-solid)', color: 'var(--text-on-accent)',
           fontSize: 9, fontWeight: 700,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           fontFamily: 'var(--et-sans)',
@@ -141,7 +141,7 @@ function TaskRow({ task, onCancel, onClear }: { task: Task; onCancel?: () => voi
     >
       <div style={{
         width: 30, height: 30, borderRadius: 8,
-        background: isTerminal ? 'rgba(26,43,74,0.06)' : 'var(--et-orange-soft)',
+        background: isTerminal ? 'var(--surface-hover)' : 'var(--et-orange-soft)',
         color: isError ? 'var(--et-orange)' : isDone ? 'var(--et-mute)' : 'var(--et-orange-2)',
         display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
       }}>
@@ -161,7 +161,7 @@ function TaskRow({ task, onCancel, onClear }: { task: Task; onCancel?: () => voi
           {!isTerminal && <span className="et-num" style={{ fontSize: 11, color: 'var(--et-mute)' }}>{task.pct}%</span>}
         </div>
         {!isTerminal && (
-          <div style={{ height: 4, background: 'rgba(26,43,74,0.08)', borderRadius: 999, overflow: 'hidden', marginTop: 6 }}>
+          <div style={{ height: 4, background: 'var(--surface-pressed)', borderRadius: 999, overflow: 'hidden', marginTop: 6 }}>
             <div style={{ width: `${task.pct}%`, height: '100%', background: 'var(--et-orange)', borderRadius: 999, transition: 'width .25s' }} />
           </div>
         )}
@@ -184,12 +184,12 @@ export function TaskCenterDrawer({ onClose }: { onClose: () => void }) {
   return (
     <>
       <div onClick={onClose} style={{
-        position: 'fixed', inset: 0, background: 'rgba(20,24,42,0.10)',
+        position: 'fixed', inset: 0, background: 'var(--surface-hover)',
         backdropFilter: 'blur(2px)', zIndex: 50,
       }} />
       <div style={{
-        position: 'fixed', top: 56, right: 28, zIndex: 51,
-        width: 380, background: 'var(--et-paper)',
+        position: 'fixed', top: 56, right: 'min(28px, 3vw)', zIndex: 51,
+        width: 'min(380px, calc(100vw - 24px))', background: 'var(--et-paper)',
         border: '0.5px solid var(--et-line-2)',
         borderRadius: 'var(--et-r)', boxShadow: 'var(--et-shadow-3)',
         overflow: 'hidden',

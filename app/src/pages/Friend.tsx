@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react';
-import type { CSSProperties } from 'react';
 import { Avatar } from '../components/Avatar';
 import { MessageCard } from '../components/MessageCard';
 import { RingChart } from '../components/RingChart';
@@ -15,9 +14,11 @@ import { mdToHtml, MURMUR_MD_CSS } from '../utils/markdown';
 import { displayName, maskedWxid, maskText } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
 import { PageHeader } from '../shell/PageHeader';
-import { ErrorState } from '../ui';
+import { Button, EmptyState, ErrorState, Skeleton, SkeletonText, cx } from '../ui';
+import { IconClose, IconInbox, IconRefresh } from '../ui/icons';
 import { lookupError } from '../data/errorCatalog';
 import { useActivePlatform } from '../utils/activeProfile';
+import './Friend.css';
 
 interface Props {
   friendId: string;
@@ -44,45 +45,32 @@ function PersonCard({ friend, stats }: { friend: Friend; stats: FriendStats | nu
     ? `${friend.bond} · 跨度 ${stats.spanDays} 天，${friend.count.toLocaleString()} 条消息。`
     : `${friend.bond} · ${friend.count.toLocaleString()} 条消息。`;
   return (
-    <div className="et-paper-grain" style={{
-      position: 'relative', padding: '28px 30px', display: 'grid',
-      gridTemplateColumns: 'auto 1fr', gap: 24, alignItems: 'center',
-      background: 'var(--et-paper)', border: '0.5px solid var(--et-line-2)',
-      borderRadius: 'var(--et-r-lg)', boxShadow: 'var(--et-shadow-2)', overflow: 'hidden',
-    }}>
-      <div style={{ position: 'absolute', top: 18, right: 22, transform: 'rotate(-6deg)', opacity: 0.85 }}>
+    <section className="friend-person et-paper-grain" aria-label="人物档案">
+      <div className="friend-person__stamp" aria-hidden="true">
         <Stamp size={62} />
       </div>
-      <div style={{ position: 'relative' }}>
+      <div className="friend-person__avatar">
         <Avatar friend={friend} size={108} />
-        <span className={`et-chip ${friend.tagKind}`} style={{ position: 'absolute', bottom: -8, left: '50%', transform: 'translateX(-50%)' }}>{friend.tag}</span>
+        <span className={`et-chip ${friend.tagKind} friend-person__tag`}>{friend.tag}</span>
       </div>
-      <div>
+      <div className="friend-person__text">
         <div className="et-eyebrow">人物档案</div>
-        <div className="et-h1" style={{ marginTop: 8, color: 'var(--et-ink)' }}>{name}</div>
-        <div className="et-meta" style={{ marginTop: 6, color: 'var(--et-mute)' }}>{friend.knew} · 最近活跃 {friend.last}</div>
-        <div className="et-serif" style={{
-          marginTop: 18, fontSize: 17, lineHeight: 1.65, color: 'var(--et-ink-soft)',
-          paddingLeft: 14, borderLeft: '2.5px solid var(--et-orange)',
-          maxWidth: 540, fontStyle: 'italic',
-        }}>
+        <h2 className="et-h1 friend-person__name">{name}</h2>
+        <div className="et-meta friend-person__meta">{friend.knew} · 最近活跃 {friend.last}</div>
+        <div className="friend-person__quote">
           「{maskText(summarySentence)}」
         </div>
       </div>
-    </div>
+    </section>
   );
 }
 
 function StatTile({ label, value, sub, big = false }: { label: string; value: string; sub?: string; big?: boolean }) {
   return (
-    <div style={{
-      flex: 1, padding: '16px 18px', background: 'var(--et-paper)',
-      border: '0.5px solid var(--et-line-2)', borderRadius: 'var(--et-r)',
-      display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0,
-    }}>
-      <div className="et-eyebrow" style={{ fontSize: 10 }}>{label}</div>
-      <div className="et-num" style={{ fontSize: big ? 28 : 22, fontWeight: 600, color: 'var(--et-ink)', lineHeight: 1.1 }}>{value}</div>
-      {sub && <div className="et-meta" style={{ color: 'var(--et-mute)' }}>{sub}</div>}
+    <div className={cx('friend-stat', big && 'friend-stat--big')}>
+      <div className="et-eyebrow friend-stat__label">{label}</div>
+      <div className="et-num friend-stat__value">{value}</div>
+      {sub && <div className="et-meta friend-stat__sub">{sub}</div>}
     </div>
   );
 }
@@ -90,12 +78,12 @@ function StatTile({ label, value, sub, big = false }: { label: string; value: st
 function Bar({ label, pct, count, color }: { label: string; pct: number; count: number; color: string }) {
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 }}>
-        <span style={{ fontSize: 13, color: 'var(--et-ink)', fontWeight: 500 }}>{label}</span>
-        <span className="et-num" style={{ fontSize: 13, color: 'var(--et-mute)' }}>{count.toLocaleString()} 条 · {pct}%</span>
+      <div className="friend-bar__head">
+        <span className="friend-bar__label">{label}</span>
+        <span className="et-num friend-bar__count">{count.toLocaleString()} 条 · {pct}%</span>
       </div>
-      <div style={{ height: 6, background: 'rgba(26,43,74,0.08)', borderRadius: 999, overflow: 'hidden' }}>
-        <div style={{ width: `${pct}%`, height: '100%', background: color, borderRadius: 999 }} />
+      <div className="friend-bar__track">
+        <div className="friend-bar__fill" style={{ width: `${pct}%`, background: color }} />
       </div>
     </div>
   );
@@ -103,72 +91,79 @@ function Bar({ label, pct, count, color }: { label: string; pct: number; count: 
 
 function RhythmCard({ friend, stats }: { friend: Friend; stats: FriendStats }) {
   return (
-    <div style={{
-      padding: '24px 26px', background: 'var(--et-paper)',
-      border: '0.5px solid var(--et-line-2)', borderRadius: 'var(--et-r)',
-    }}>
+    <section className="friend-card">
       <div className="et-eyebrow">互动节奏</div>
-      <div className="et-h2" style={{ marginTop: 6, color: 'var(--et-ink)' }}>谁更主动？</div>
-      <div style={{ marginTop: 18, display: 'grid', gridTemplateColumns: 'auto 1fr', gap: 24, alignItems: 'center' }}>
-        <RingChart you={stats.selfPct} size={150} label={stats.selfPct >= 50 ? '你说得更多' : '对方说得更多'} />
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <Bar label="你" pct={stats.selfPct} count={stats.totalSelf} color="var(--et-orange)" />
-          <Bar label={displayName(friend.id, friend.name)} pct={100 - stats.selfPct} count={stats.totalOther} color="var(--et-ink)" />
-          <div style={{ height: 1, background: 'var(--et-line)', margin: '4px 0' }} />
-          <div style={{ display: 'flex', gap: 14, fontSize: 12, color: 'var(--et-mute)' }}>
-            <span>主动开聊 · 你 <b className="et-num" style={{ color: 'var(--et-ink)' }}>{stats.initSelf}</b> 次</span>
-            <span>· {displayName(friend.id, friend.name)} <b className="et-num" style={{ color: 'var(--et-ink)' }}>{stats.initOther}</b> 次</span>
+      <h3 className="et-h2 friend-card__title">谁更主动？</h3>
+      <div className="friend-rhythm__body">
+        <div className="friend-rhythm__ring">
+          <RingChart you={stats.selfPct} size={150} label={stats.selfPct >= 50 ? '你说得更多' : '对方说得更多'} />
+        </div>
+        <div className="friend-rhythm__bars">
+          <Bar label="你" pct={stats.selfPct} count={stats.totalSelf} color="var(--accent)" />
+          <Bar label={displayName(friend.id, friend.name)} pct={100 - stats.selfPct} count={stats.totalOther} color="var(--surface-inverse)" />
+          <div className="friend-rhythm__rule" />
+          <div className="friend-rhythm__facts">
+            <span>主动开聊 · 你 <b className="et-num">{stats.initSelf}</b> 次</span>
+            <span>· {displayName(friend.id, friend.name)} <b className="et-num">{stats.initOther}</b> 次</span>
           </div>
-          <div style={{ fontSize: 12, color: 'var(--et-mute)' }}>1 分钟内秒回 · <b className="et-num" style={{ color: 'var(--et-orange)' }}>{stats.fastReplies}</b> 次</div>
+          <div className="friend-rhythm__facts">
+            <span>1 分钟内秒回 · <b className="et-num is-accent">{stats.fastReplies}</b> 次</span>
+          </div>
         </div>
       </div>
-      <div style={{ marginTop: 20, display: 'flex', gap: 10 }}>
+      <div className="friend-rhythm__tiles">
         <StatTile label="最常聊天时段" value={stats.busiestHourLabel} sub={stats.busiestHourSub} />
         <StatTile label="深夜比例" value={`${stats.lateNightPct}%`} sub="23—4 时占总消息" />
         <StatTile label="中位回复" value={stats.medianReplyHuman} sub="你的中位回复时长" />
       </div>
-    </div>
+    </section>
   );
 }
 
 function MomentsCard({ moments, loading }: { moments: Moment[]; loading: boolean }) {
   void usePrivacy();
   return (
-    <div style={{
-      padding: '24px 26px', background: 'var(--et-paper)',
-      border: '0.5px solid var(--et-line-2)', borderRadius: 'var(--et-r)',
-    }}>
-      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
-        <div>
-          <div className="et-eyebrow">难忘瞬间 · 自动挑选</div>
-          <div className="et-h2" style={{ marginTop: 6, color: 'var(--et-ink)' }}>那些值得回头看的话。</div>
+    <section className="friend-card">
+      <div className="et-eyebrow">难忘瞬间 · 自动挑选</div>
+      <h3 className="et-h2 friend-card__title">那些值得回头看的话。</h3>
+      {!loading && moments.length === 0 ? (
+        <EmptyState
+          icon={<IconInbox size={22} />}
+          title="还没挑出值得回看的话"
+          description="聊天再多一些、再走心一些，这里就会出现你们的金句。"
+        />
+      ) : (
+        <div className="friend-moments__grid" aria-busy={loading || undefined}>
+          {loading && Array.from({ length: 4 }, (_, i) => (
+            <div key={i} className="friend-skel-msg" aria-hidden="true">
+              <div className="friend-skel-msg__row"><Skeleton width="30%" height={12} /><Skeleton width={70} height={11} /></div>
+              <SkeletonText lines={2} lastLineWidth="70%" />
+            </div>
+          ))}
+          {!loading && moments.map((m, i) => (
+            <MessageCard
+              key={i}
+              from={displayName(m.from_id, m.from)}
+              date={m.date}
+              text={maskText(m.text)}
+              accent={i % 2 ? 'var(--surface-inverse)' : 'var(--accent)'}
+            />
+          ))}
         </div>
-      </div>
-      <div style={{ marginTop: 18, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-        {loading && <div className="et-meta" style={{ gridColumn: 'span 2', textAlign: 'center', padding: 20 }}>加载中…</div>}
-        {!loading && moments.length === 0 && <div className="et-meta" style={{ gridColumn: 'span 2', textAlign: 'center', padding: 20 }}>没有抓到合适的样本</div>}
-        {moments.map((m, i) => (
-          <MessageCard
-            key={i}
-            from={displayName(m.from_id, m.from)}
-            date={m.date}
-            text={maskText(m.text)}
-            accent={i % 2 ? 'var(--et-ink)' : 'var(--et-orange)'}
-          />
-        ))}
-      </div>
-    </div>
+      )}
+    </section>
   );
 }
 
 function SignalsEvidenceCard({ friend }: { friend: Friend & { relationship_signals?: any } }) {
+  // QQ has no 朋友圈 equivalent in the local DB (QQ Zone lives in Tencent's
+  // cloud, not nt_msg.db) — drop those two cells in QQ mode so we don't
+  // render a bogus "0 次" stat. The hook runs before any early return so the
+  // hook order stays the same when signals appear after a refresh.
+  const platform = useActivePlatform();
   const sig = friend.relationship_signals;
   if (!sig) return null;
   const notes: string[] = sig.signature_notes || [];
-  // QQ has no 朋友圈 equivalent in the local DB (QQ Zone lives in Tencent's
-  // cloud, not nt_msg.db) — drop those two cells in QQ mode so we don't
-  // render a bogus "0 次" stat.
-  const platform = useActivePlatform();
   const numCells: Array<[string, any, string]> = [
     ['持续年', sig.longevity_years, '年'],
     ['线下证据', sig.offline_evidence?.count, '条'],
@@ -185,43 +180,27 @@ function SignalsEvidenceCard({ friend }: { friend: Friend & { relationship_signa
   }
   if (notes.length === 0 && numCells.every(([, v]) => !v)) return null;
   return (
-    <div style={{
-      padding: '20px 24px', background: 'var(--et-paper)',
-      border: '0.5px solid var(--et-line-2)', borderRadius: 'var(--et-r)',
-    }}>
+    <section className="friend-card friend-card--tight">
       <div className="et-eyebrow">离线证据 · 不靠 AI 也能看的硬信号</div>
-      <div className="et-h2" style={{ marginTop: 6, color: 'var(--et-ink)' }}>
-        关系层级 {sig.tier || '—'} <span style={{ fontSize: 13, color: 'var(--et-mute)', fontWeight: 400 }}>· {maskText(sig.tier_label || '')}</span>
-      </div>
-      <div style={{
-        marginTop: 14, display: 'grid',
-        gridTemplateColumns: 'repeat(4, 1fr)', gap: 8,
-      }}>
+      <h3 className="et-h2 friend-card__title">
+        关系层级 {sig.tier || '—'} <small>· {maskText(sig.tier_label || '')}</small>
+      </h3>
+      <div className="friend-signals__grid">
         {numCells.map(([label, val, unit]) => (
-          <div key={label} style={{
-            padding: '10px 12px', background: 'var(--et-paper-2)',
-            border: '0.5px solid var(--et-line-2)', borderRadius: 8,
-          }}>
-            <div className="et-eyebrow" style={{ fontSize: 9 }}>{label}</div>
-            <div className="et-num" style={{ fontSize: 18, fontWeight: 600, marginTop: 2,
-              color: (val || 0) > 0 ? 'var(--et-ink)' : 'var(--et-faint)' }}>
-              {val || 0}<span style={{ fontSize: 11, color: 'var(--et-mute)', marginLeft: 3 }}>{unit}</span>
+          <div key={label} className="friend-signal">
+            <div className="et-eyebrow friend-signal__label">{label}</div>
+            <div className={cx('et-num friend-signal__value', !((val || 0) > 0) && 'is-zero')}>
+              {val || 0}<span className="friend-signal__unit">{unit}</span>
             </div>
           </div>
         ))}
       </div>
       {notes.length > 0 && (
-        <ul style={{ marginTop: 14, padding: '12px 18px', background: 'var(--et-orange-soft)',
-          border: '0.5px solid var(--et-orange-2)', borderRadius: 8, listStyle: 'none' }}>
-          {notes.map((n, i) => (
-            <li key={i} className="et-serif" style={{ padding: '4px 0', fontSize: 14,
-              color: 'var(--et-ink-soft)', lineHeight: 1.6 }}>
-              <span style={{ color: 'var(--et-orange)', marginRight: 6 }}>▸</span>{maskText(n)}
-            </li>
-          ))}
+        <ul className="friend-signals__notes">
+          {notes.map((n, i) => <li key={i}>{maskText(n)}</li>)}
         </ul>
       )}
-    </div>
+    </section>
   );
 }
 
@@ -239,37 +218,27 @@ function ConnectionsCard({ friend, onOpen }: {
     getFriendConnections(friend.id).then(r => setConns(r.connections)).catch(() => setConns([]));
   }, [friend.id]);
   if (!conns) return (
-    <div style={{ padding: 16, color: 'var(--et-mute)' }} className="et-meta">关联朋友加载中…</div>
+    <section className="friend-card friend-card--tight" aria-busy="true" aria-label="正在加载关联朋友">
+      <Skeleton width={220} height={11} />
+      <div className="friend-conns__skel">
+        {Array.from({ length: 4 }, (_, i) => <Skeleton key={i} height={40} radius={10} />)}
+      </div>
+    </section>
   );
   if (conns.length === 0) return null;
   const top = conns.slice(0, 12);
   return (
-    <div style={{
-      padding: '20px 24px', background: 'var(--et-paper)',
-      border: '0.5px solid var(--et-line-2)', borderRadius: 'var(--et-r)',
-    }}>
+    <section className="friend-card friend-card--tight">
       <div className="et-eyebrow">关联朋友 · {displayName(friend.id, friend.name)} 在你的社交圈里</div>
-      <div className="et-h2" style={{ marginTop: 6, color: 'var(--et-ink)' }}>他认识的你的朋友（点击看人 · 📤 导出这对）</div>
-      <div style={{ marginTop: 14, display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8 }}>
+      <h3 className="et-h2 friend-card__title">他认识的你的朋友（点击看人 · 📤 导出这对）</h3>
+      <div className="friend-conns__grid">
         {top.map(c => (
-          <div key={c.wxid + c.edge_type} style={{
-            display: 'flex', alignItems: 'stretch',
-            background: 'var(--et-paper-2)', border: '0.5px solid var(--et-line-2)',
-            borderRadius: 10, overflow: 'hidden',
-          }}>
-            <button onClick={() => onOpen(c.wxid)} style={{
-              all: 'unset', cursor: 'pointer',
-              flex: 1, minWidth: 0,
-              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-              padding: '10px 14px',
-            }}
-            onMouseEnter={(e) => e.currentTarget.style.background = 'var(--et-orange-soft)'}
-            onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}>
-              <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--et-ink)',
-                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 200 }}>
+          <div key={c.wxid + c.edge_type} className="friend-conn">
+            <button type="button" className="friend-conn__open" onClick={() => onOpen(c.wxid)}>
+              <span className="friend-conn__name">
                 {displayName(c.wxid, c.name)}
               </span>
-              <span style={{ fontSize: 10, color: 'var(--et-mute)' }}>
+              <span className="friend-conn__weight">
                 {c.edge_type === 'mutual_reply' ? `群里互动 ${c.weight}` :
                  c.edge_type === 'mention' ? `提及 ${c.mention_count ?? '—'}` :
                  c.edge_type === 'moments_cross' ? `朋友圈 ${c.moments_cross ?? '—'}` :
@@ -278,33 +247,21 @@ function ConnectionsCard({ friend, onOpen }: {
               </span>
             </button>
             <button
+              type="button"
+              className="friend-conn__export"
               onClick={(e) => {
                 e.stopPropagation();
                 setExportPeer({ id: c.wxid, name: c.name });
               }}
               title={`导出 ${displayName(friend.id, friend.name)} ↔ ${displayName(c.wxid, c.name)} 的关系档案`}
-              style={{
-                all: 'unset', cursor: 'pointer',
-                padding: '0 12px',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                color: 'var(--et-mute)', fontSize: 14,
-                borderLeft: '0.5px solid var(--et-line-2)',
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.background = 'var(--et-orange-soft)';
-                e.currentTarget.style.color = 'var(--et-orange-2)';
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.background = 'transparent';
-                e.currentTarget.style.color = 'var(--et-mute)';
-              }}>
+              aria-label={`导出 ${displayName(friend.id, friend.name)} 和 ${displayName(c.wxid, c.name)} 的关系档案`}>
               📤
             </button>
           </div>
         ))}
       </div>
       {conns.length > 12 && (
-        <div className="et-meta" style={{ marginTop: 10, color: 'var(--et-faint)' }}>
+        <div className="et-meta friend-conns__more">
           还有 {conns.length - 12} 条更弱的连线 …
         </div>
       )}
@@ -315,7 +272,7 @@ function ConnectionsCard({ friend, onOpen }: {
           onClose={() => setExportPeer(null)}
         />
       )}
-    </div>
+    </section>
   );
 }
 
@@ -329,27 +286,13 @@ function PairExportModal({
     return () => window.removeEventListener('keydown', fn);
   }, [onClose]);
   return (
-    <div onClick={onClose} style={{
-      position: 'fixed', inset: 0, zIndex: 100,
-      background: 'rgba(20,24,42,0.42)',
-      display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24,
-    }}>
-      <div onClick={(e) => e.stopPropagation()} style={{
-        width: 540, maxWidth: '92%',
-        background: 'var(--et-bg)',
-        borderRadius: 'var(--et-r-lg)',
-        boxShadow: 'var(--et-shadow-3)',
-        position: 'relative', overflow: 'hidden',
-      }}>
-        <button onClick={onClose} aria-label="关闭" style={{
-          // `all: 'unset'` must come first — after `position` it would reset it
-          // and drop the × into the top-left corner. top: 30 centres it on the
-          // panel's title row, below the "MURMUR / PAIR EXPORT" eyebrow.
-          all: 'unset', position: 'absolute', top: 30, right: 14, cursor: 'pointer',
-          width: 28, height: 28, borderRadius: 8, color: 'var(--et-mute)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          fontSize: 16, zIndex: 1,
-        }}>×</button>
+    <div className="friend-overlay" onClick={onClose}>
+      <div className="friend-overlay__panel" role="dialog" aria-modal="true" aria-label="导出这对朋友的关系档案"
+        onClick={(e) => e.stopPropagation()}>
+        {/* Sits on the panel's title row, below the "MURMUR / PAIR EXPORT" eyebrow. */}
+        <button type="button" className="ui-icon-btn friend-overlay__close" onClick={onClose} aria-label="关闭" title="关闭">
+          <IconClose size={14} />
+        </button>
         <PairAnalysisPanel a={a} b={b} aName={aName} bName={bName} />
       </div>
     </div>
@@ -376,49 +319,22 @@ function AIReportCard({ friend, onView, onRerun }: {
   const ageDays = Math.floor(ageMs / 86400000);
   const ageStr = ageDays < 1 ? '今天' : ageDays === 1 ? '昨天' : `${ageDays} 天前`;
   return (
-    <div className="et-paper-grain" style={{
-      position: 'relative', padding: '22px 26px',
-      background: 'var(--et-paper)', border: '0.5px solid var(--et-orange-2)',
-      borderRadius: 'var(--et-r)', boxShadow: 'var(--et-shadow-1)',
-    }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
-        <span style={{
-          padding: '3px 10px', borderRadius: 999, fontSize: 10, fontWeight: 600,
-          background: 'var(--et-orange)', color: '#fff', letterSpacing: 0.5,
-        }}>AI 已分析</span>
-        <span className="et-meta" style={{ color: 'var(--et-mute)', fontSize: 11 }}>
+    <section className="friend-card friend-card--accent et-paper-grain">
+      <div className="friend-ai__head">
+        <span className="friend-ai__badge">AI 已分析</span>
+        <span className="et-meta">
           {ageStr} · {(r.size / 1024).toFixed(1)} KB
         </span>
       </div>
-      <div className="et-h2" style={{ color: 'var(--et-ink)' }}>关于 {displayName(friend.id, friend.name)} —— AI 摘要</div>
-      <div className="et-serif" style={{
-        marginTop: 12, fontSize: 14.5, lineHeight: 1.78, color: 'var(--et-ink-soft)',
-        whiteSpace: 'pre-wrap', maxHeight: 220, overflow: 'hidden',
-        position: 'relative',
-      }}>
+      <h3 className="et-h2 friend-card__title">关于 {displayName(friend.id, friend.name)} —— AI 摘要</h3>
+      <div className="friend-ai__preview">
         {maskText(preview)}
-        <div style={{
-          position: 'absolute', bottom: 0, left: 0, right: 0, height: 60,
-          background: 'linear-gradient(to bottom, transparent, var(--et-paper))',
-          pointerEvents: 'none',
-        }} />
       </div>
-      <div style={{ marginTop: 14, display: 'flex', gap: 8 }}>
-        <button onClick={onView} style={{
-          all: 'unset', cursor: 'pointer',
-          padding: '8px 18px', borderRadius: 8,
-          background: 'var(--et-ink)', color: 'var(--et-paper)',
-          fontSize: 13, fontWeight: 600,
-        }}>📖 阅读完整报告</button>
-        <button onClick={onRerun} style={{
-          all: 'unset', cursor: 'pointer',
-          padding: '8px 18px', borderRadius: 8,
-          background: 'transparent', color: 'var(--et-mute)',
-          border: '0.5px solid var(--et-line-2)',
-          fontSize: 13, fontWeight: 500,
-        }}>↻ 重新分析</button>
+      <div className="friend-ai__actions">
+        <Button variant="primary" onClick={onView}>📖 阅读完整报告</Button>
+        <Button variant="secondary" icon={<IconRefresh size={14} />} onClick={onRerun}>重新分析</Button>
       </div>
-    </div>
+    </section>
   );
 }
 
@@ -428,37 +344,27 @@ function AnalysisProgressCard({ stream, error }: {
 }) {
   const tail = stream?.output?.trim().slice(-1800);
   return (
-    <div className="et-paper-grain" style={{
-      position: 'relative', padding: '18px 22px',
-      background: 'var(--et-paper)', border: '0.5px solid var(--et-orange-2)',
-      borderRadius: 'var(--et-r)', boxShadow: 'var(--et-shadow-1)',
-    }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+    <section className="friend-card friend-card--tight friend-card--accent et-paper-grain" role="status">
+      <div className="friend-progress__head">
         <div>
           <div className="et-eyebrow">AI 分析进度</div>
-          <div className="et-h2" style={{ marginTop: 4, color: 'var(--et-ink)' }}>
+          <h3 className="et-h2 friend-card__title">
             {error ? '分析失败' : `${stream?.stage || '运行中'}…`}
-          </div>
+          </h3>
         </div>
-        <div className="et-meta" style={{ fontFamily: 'var(--et-mono)', color: 'var(--et-mute)' }}>
+        <div className="et-meta et-mono">
           {stream?.elapsed || 0}s
         </div>
       </div>
       {error && (
-        <div className="et-meta" style={{ marginTop: 10, color: 'var(--et-rose)' }}>
+        <div className="et-meta friend-progress__error">
           {maskText(error.slice(0, 180))}
         </div>
       )}
       {tail && !error && (
-        <div style={{
-          marginTop: 10, padding: '10px 12px', borderRadius: 8,
-          background: 'var(--et-paper-2)', border: '0.5px solid var(--et-line-2)',
-          fontFamily: 'var(--et-mono)', fontSize: 11, lineHeight: 1.55,
-          color: 'var(--et-ink-soft)', whiteSpace: 'pre-wrap',
-          maxHeight: 180, overflow: 'auto',
-        }}>{maskText(tail)}</div>
+        <div className="friend-progress__log">{maskText(tail)}</div>
       )}
-    </div>
+    </section>
   );
 }
 
@@ -477,37 +383,34 @@ function ReportViewerOverlay({ relPath, friendName, onClose }: {
     return () => { cancelled = true; };
   }, [relPath]);
   return (
-    <div onClick={onClose} style={{
-      position: 'fixed', inset: 0, zIndex: 1000,
-      background: 'rgba(20,24,42,0.55)',
-      display: 'flex', justifyContent: 'center', alignItems: 'flex-start',
-      paddingTop: 40, paddingBottom: 40, overflowY: 'auto',
-    }}>
-      <div onClick={e => e.stopPropagation()} style={{
-        width: '88%', maxWidth: 920,
-        background: 'var(--et-paper)',
-        border: '0.5px solid var(--et-line-2)',
-        borderRadius: 'var(--et-r-lg)',
-        boxShadow: 'var(--et-shadow-3)',
-        padding: '32px 44px', position: 'relative',
-      }}>
-        <button onClick={(e) => { e.stopPropagation(); onClose(); }} style={{
-          all: 'unset', cursor: 'pointer', position: 'absolute', top: 14, right: 18,
-          fontSize: 22, color: 'var(--et-mute)', lineHeight: 1, padding: 6,
-        }}>×</button>
+    <div className="friend-overlay friend-overlay--reader" onClick={onClose}>
+      <div className="friend-overlay__panel friend-overlay__panel--reader" role="dialog" aria-modal="true" aria-label="AI 关系档案"
+        onClick={e => e.stopPropagation()}>
+        <button type="button" className="ui-icon-btn friend-overlay__close" aria-label="关闭" title="关闭"
+          onClick={(e) => { e.stopPropagation(); onClose(); }}>
+          <IconClose size={16} />
+        </button>
         <div className="et-eyebrow">AI 关系档案</div>
-        <div style={{ fontFamily: 'var(--et-serif)', fontSize: 13, color: 'var(--et-mute)', marginTop: 4 }}>
+        <div className="friend-reader__sub">
           关于 {friendName}
         </div>
-        {error && <div style={{ marginTop: 24, color: 'var(--et-rose)' }}>加载失败：{maskText(error)}</div>}
-        {!content && !error && <div className="et-meta" style={{ marginTop: 24 }}>加载中…</div>}
+        {error && (
+          <div className="friend-reader__state">
+            <ErrorState
+              title="报告没能打开"
+              reason={maskText(error)}
+              fixes={['关掉再点一次「阅读完整报告」', '报告文件被移走或删掉的话，点「重新分析」重新生成']}
+            />
+          </div>
+        )}
+        {!content && !error && (
+          <div className="friend-reader__state" aria-busy="true">
+            <SkeletonText lines={8} lastLineWidth="45%" />
+          </div>
+        )}
         {content && (
           <article
-            className="murmur-md"
-            style={{
-              marginTop: 18, fontFamily: 'var(--et-sans)',
-              fontSize: 15, lineHeight: 1.78, color: 'var(--et-ink)',
-            }}
+            className="murmur-md friend-reader__body"
             dangerouslySetInnerHTML={{ __html: mdToHtml(maskText(content)) }}
           />
         )}
@@ -528,29 +431,16 @@ function ActionDock({ onExportAI, onShowMessages, onExportChat, onOpenYearbook }
   const [media, setMedia] = useState<MediaPolicy>('none');
   const [report, setReport] = useState<ExportReport | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
-  const Btn = ({ icon, label, sub, primary, disabled, onClick }: {
-    icon: string; label: string; sub: string; primary?: boolean; disabled?: boolean; onClick?: () => void;
+  const Btn = ({ icon, label, sub, primary, expanded, onClick }: {
+    icon: string; label: string; sub: string; primary?: boolean; expanded?: boolean; onClick?: () => void;
   }) => (
-    <button onClick={onClick} disabled={disabled} style={{
-      all: 'unset', cursor: disabled ? 'not-allowed' : 'pointer',
-      flex: 1, padding: '14px 18px',
-      background: primary ? 'var(--et-ink)' : 'var(--et-paper)',
-      color: primary ? 'var(--et-paper)' : 'var(--et-ink)',
-      border: primary ? 'none' : '0.5px solid var(--et-line-2)',
-      borderRadius: 'var(--et-r)',
-      display: 'flex', alignItems: 'center', gap: 12,
-      opacity: disabled ? 0.45 : 1,
-    }}>
-      <div style={{
-        width: 34, height: 34, borderRadius: 8,
-        background: primary ? 'var(--et-orange)' : 'var(--et-orange-soft)',
-        color: primary ? '#fff' : 'var(--et-orange-2)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16, flexShrink: 0,
-      }}>{icon}</div>
-      <div style={{ minWidth: 0 }}>
-        <div style={{ fontSize: 14, fontWeight: 600 }}>{label}</div>
-        <div style={{ fontSize: 11, opacity: primary ? 0.7 : 1, color: primary ? 'var(--et-paper)' : 'var(--et-mute)', marginTop: 2 }}>{sub}</div>
-      </div>
+    <button type="button" onClick={onClick} aria-expanded={expanded}
+      className={cx('friend-dock__btn', primary && 'is-primary')}>
+      <span className="friend-dock__icon" aria-hidden="true">{icon}</span>
+      <span className="friend-dock__text">
+        <span className="friend-dock__label">{label}</span>
+        <span className="friend-dock__sub">{sub}</span>
+      </span>
     </button>
   );
 
@@ -572,82 +462,58 @@ function ActionDock({ onExportAI, onShowMessages, onExportChat, onOpenYearbook }
     }
   }
 
-  const sectionLabel: CSSProperties = {
-    fontSize: 11, color: 'var(--et-mute)', letterSpacing: '0.08em',
-    width: 40, flexShrink: 0, paddingTop: 9,
-  };
-
   return (
     <div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+      <div className="friend-dock">
         <Btn icon="📖" label="完整聊天记录" sub="气泡浏览，可跳到某一天" onClick={onShowMessages} />
-        <Btn icon="📤" label="导出聊天" sub={pickerOpen ? '选择格式…' : '6 种格式 · 可带附件'} onClick={() => setPickerOpen(v => !v)} />
+        <Btn icon="📤" label="导出聊天" sub={pickerOpen ? '选择格式…' : '6 种格式 · 可带附件'} expanded={pickerOpen} onClick={() => setPickerOpen(v => !v)} />
         <Btn icon="💑" label="双人年代记" sub="按年份的故事时间线" onClick={onOpenYearbook} />
         <Btn icon="🤖" label="导出 AI 分析包" sub="一键打包给 AI 看" primary onClick={onExportAI} />
       </div>
       {pickerOpen && (
-        <div style={{
-          marginTop: 10, padding: 12,
-          background: 'var(--et-paper)', border: '0.5px solid var(--et-line-2)',
-          borderRadius: 'var(--et-r)', display: 'flex', flexDirection: 'column', gap: 10,
-        }}>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <div style={sectionLabel}>附件</div>
-            <div role="radiogroup" aria-label="附件策略" style={{
-              flex: 1, display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6,
-            }}>
+        <div className="friend-export">
+          <div className="friend-export__row">
+            <div className="friend-export__label">附件</div>
+            <div role="radiogroup" aria-label="附件策略" className="friend-export__opts friend-export__opts--media">
               {MEDIA_OPTIONS.map(o => {
                 const on = media === o.id;
                 return (
-                  <button key={o.id} role="radio" aria-checked={on} disabled={busy !== null}
-                    onClick={() => { setMedia(o.id); setReport(null); }} style={{
-                      all: 'unset', cursor: busy !== null ? 'wait' : 'pointer',
-                      padding: '7px 10px', borderRadius: 8,
-                      background: on ? 'var(--et-orange-soft)' : 'var(--et-paper-2)',
-                      border: `0.5px solid ${on ? 'var(--et-orange)' : 'var(--et-line-2)'}`,
-                      color: on ? 'var(--et-orange-2)' : 'var(--et-ink)',
-                    }}>
-                    <div style={{ fontSize: 12, fontWeight: 600 }}>{o.label}</div>
-                    <div style={{ fontSize: 10.5, color: 'var(--et-mute)', marginTop: 2 }}>{o.sub}</div>
+                  <button key={o.id} type="button" role="radio" aria-checked={on} disabled={busy !== null}
+                    className="friend-export__opt"
+                    onClick={() => { setMedia(o.id); setReport(null); }}>
+                    <div className="friend-export__opt-title">{o.label}</div>
+                    <div className="friend-export__opt-sub">{o.sub}</div>
                   </button>
                 );
               })}
             </div>
-            <div style={{ width: 38, flexShrink: 0 }} />
           </div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <div style={sectionLabel}>格式</div>
-            <div style={{
-              flex: 1, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(92px, 1fr))', gap: 6,
-            }}>
+          <div className="friend-export__row">
+            <div className="friend-export__label">格式</div>
+            <div className="friend-export__opts friend-export__opts--formats">
               {EXPORT_FORMATS.map(f => (
-                <button key={f.id} onClick={() => pick(f.id)} disabled={busy !== null} title={f.sub} style={{
-                  all: 'unset', cursor: busy !== null ? 'wait' : 'pointer',
-                  textAlign: 'center', padding: '8px 4px',
-                  background: busy === f.id ? 'var(--et-orange)' : 'var(--et-paper-2)',
-                  color: busy === f.id ? 'var(--et-paper)' : 'var(--et-ink)',
-                  border: '0.5px solid var(--et-line-2)', borderRadius: 8,
-                  opacity: busy !== null && busy !== f.id ? 0.4 : 1,
-                }}>
-                  <div style={{ fontSize: 12, fontWeight: 600 }}>{busy === f.id ? '导出中…' : f.label}</div>
-                  <div style={{ fontSize: 10.5, marginTop: 2, color: busy === f.id ? 'var(--et-paper)' : 'var(--et-mute)' }}>{f.sub}</div>
+                <button key={f.id} type="button" onClick={() => pick(f.id)} disabled={busy !== null} title={f.sub}
+                  className={cx('friend-export__opt friend-export__opt--format',
+                    busy === f.id && 'is-busy', busy !== null && busy !== f.id && 'is-dim')}>
+                  <div className="friend-export__opt-title">{busy === f.id ? '导出中…' : f.label}</div>
+                  <div className="friend-export__opt-sub">{f.sub}</div>
                 </button>
               ))}
             </div>
-            <button onClick={() => { setPickerOpen(false); setReport(null); setExportError(null); }} style={{
-              all: 'unset', cursor: 'pointer', width: 38, flexShrink: 0, textAlign: 'center',
-              paddingTop: 9, alignSelf: 'flex-start', color: 'var(--et-mute)', fontSize: 12,
-            }}>取消</button>
+            <div className="friend-export__aside">
+              <button type="button" className="friend-export__cancel"
+                onClick={() => { setPickerOpen(false); setReport(null); setExportError(null); }}>取消</button>
+            </div>
           </div>
           {media !== 'none' && !report && (
-            <div style={{ fontSize: 11, color: 'var(--et-mute)', paddingLeft: 48, lineHeight: 1.6 }}>
+            <div className="friend-export__note">
               带附件时会生成一个文件夹（聊天文件 + media/ 附件 + 导出报告），不走浏览器下载。
               {media === 'originals' ? '只拷已解密的原图和本机已有的视频。' : '原图缺失时用缩略图顶上。'}
               ChatLab 格式没有附件字段，附件只会放在 media/ 里。
             </div>
           )}
           {exportError && (
-            <div style={{ fontSize: 12, color: 'var(--et-rose)', paddingLeft: 48 }}>{maskText(exportError)}</div>
+            <div className="friend-export__error" role="alert">{maskText(exportError)}</div>
           )}
           {report && <ExportReportCard report={report} />}
         </div>
@@ -675,37 +541,75 @@ function ExportReportCard({ report }: { report: ExportReport }) {
   const m = report.media;
   const reasons = Object.entries(m.missing_reasons || {});
   return (
-    <div style={{
-      marginLeft: 48, marginRight: 46, padding: '10px 12px',
-      background: 'var(--et-paper-2)', border: '0.5px solid var(--et-line-2)',
-      borderRadius: 8, fontSize: 12, color: 'var(--et-ink)', lineHeight: 1.7,
-    }}>
-      <div style={{ fontWeight: 600 }}>
+    <div className="friend-export__report" role="status">
+      <div className="friend-export__report-title">
         已导出 <span className="et-num">{report.messages}</span> 条消息
       </div>
-      <div style={{ color: 'var(--et-ink-soft)' }}>
+      <div className="friend-export__report-media">
         图片 / 视频消息 <span className="et-num">{m.media_messages}</span> 条：
-        附件成功 <span className="et-num" style={{ color: 'var(--et-sage)' }}>{m.exported_total}</span> 个
+        附件成功 <span className="et-num friend-ok">{m.exported_total}</span> 个
         {m.exported_thumbnail > 0 && <>（其中缩略图 <span className="et-num">{m.exported_thumbnail}</span>）</>}
-        ，缺失 <span className="et-num" style={{ color: m.missing_total ? 'var(--et-rose)' : undefined }}>{m.missing_total}</span> 个
+        ，缺失 <span className={cx('et-num', m.missing_total > 0 && 'friend-bad')}>{m.missing_total}</span> 个
       </div>
       {reasons.length > 0 && (
-        <ul style={{ margin: '4px 0 0', paddingLeft: 18, color: 'var(--et-mute)' }}>
+        <ul>
           {reasons.map(([code, n]) => (
             <li key={code}>{m.missing_reason_labels?.[code] || code}：<span className="et-num">{n}</span></li>
           ))}
         </ul>
       )}
       {m.thumbnail_skipped > 0 && (
-        <div style={{ color: 'var(--et-mute)' }}>其中 {m.thumbnail_skipped} 个有缩略图，换「尽可能」可以导出缩略图。</div>
+        <div className="friend-export__report-hint">其中 {m.thumbnail_skipped} 个有缩略图，换「尽可能」可以导出缩略图。</div>
       )}
-      <div style={{ display: 'flex', gap: 14, marginTop: 6, alignItems: 'baseline' }}>
-        <button onClick={() => { void openFolder(report.file); }} style={{
-          all: 'unset', cursor: 'pointer', color: 'var(--et-orange-2)', fontWeight: 600, flexShrink: 0,
-        }}>打开文件夹</button>
-        <span className="et-meta" style={{ color: 'var(--et-faint)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>
+      <div className="friend-export__report-foot">
+        <button type="button" className="friend-export__open" onClick={() => { void openFolder(report.file); }}>打开文件夹</button>
+        <span className="et-meta friend-export__dir">
           {maskText(report.dir)}
         </span>
+      </div>
+    </div>
+  );
+}
+
+/** The story tab's shape while the friend loads. */
+function FriendSkeleton({ onBack }: { onBack: () => void }) {
+  return (
+    <div className="friend-page et-root" aria-busy="true">
+      <PageHeader back={{ label: '首页', onClick: onBack }} title="朋友" />
+      <div className="friend-tabs" aria-hidden="true">
+        {['故事', '相册', '完整对话'].map((t, i) => (
+          <span key={t} className="friend-tab" aria-selected={i === 0}>{t}</span>
+        ))}
+      </div>
+      <div className="friend-body" aria-label="正在加载这位朋友">
+        <div className="friend-person" aria-hidden="true">
+          <div className="friend-skel-person">
+            <Skeleton width={108} circle />
+            <div className="friend-skel-person__lines">
+              <Skeleton width={70} height={11} />
+              <Skeleton width="38%" height={30} />
+              <Skeleton width="30%" height={12} />
+              <Skeleton width="62%" height={18} />
+            </div>
+          </div>
+        </div>
+        <div className="friend-stats" aria-hidden="true">
+          {Array.from({ length: 4 }, (_, i) => (
+            <div key={i} className="friend-stat">
+              <Skeleton width="50%" height={10} />
+              <Skeleton width="70%" height={24} />
+              <Skeleton width="60%" height={11} />
+            </div>
+          ))}
+        </div>
+        <div className="friend-card" aria-hidden="true">
+          <Skeleton width={80} height={11} />
+          <div style={{ marginTop: 10 }}><Skeleton width={140} height={22} /></div>
+          <div className="friend-rhythm__body">
+            <div className="friend-rhythm__ring"><Skeleton width={150} circle /></div>
+            <SkeletonText lines={4} lastLineWidth="40%" />
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -840,7 +744,7 @@ export function FriendPage({ friendId, onBack, onOpenFriend }: Props) {
     );
   }
   if (!friend) {
-    return <div style={{ padding: 40 }}><div className="et-meta">加载中…</div></div>;
+    return <FriendSkeleton onBack={onBack} />;
   }
 
   // If user invoked an agent, show the report page instead of the regular friend layout
@@ -853,12 +757,12 @@ export function FriendPage({ friendId, onBack, onOpenFriend }: Props) {
   }
 
   return (
-    <div className="et-root" style={{ background: 'var(--et-bg)', minHeight: '100%', position: 'relative' }}>
+    <div className="friend-page et-root">
       <FriendChromeBar onBack={onBack} friend={friend} />
       <FriendTabs tab={tab} setTab={(t) => (t === 'chat' ? openChat() : setTab(t))} />
       {tab === 'media' && <MediaGallery friend={friend} />}
       {tab === 'story' && (
-      <div style={{ padding: '24px 28px 32px', display: 'flex', flexDirection: 'column', gap: 18, maxWidth: 1180, margin: '0 auto' }}>
+      <div className="friend-body">
         <PersonCard friend={friend} stats={stats} />
         {(analysisStream || analysisError) && (
           <AnalysisProgressCard stream={analysisStream} error={analysisError} />
@@ -870,7 +774,7 @@ export function FriendPage({ friendId, onBack, onOpenFriend }: Props) {
         <ConnectionsCard friend={friend} onOpen={(id) => onOpenFriend?.(id)} />
         {stats ? (
           <>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+            <div className="friend-stats">
               <StatTile label="总消息" value={(stats.totalSelf + stats.totalOther).toLocaleString()} sub="含图文/语音" big />
               <StatTile label="时间跨度" value={`${stats.spanDays} 天`} sub="第一次 → 最近一次" />
               <StatTile label="最长沉默" value={`${stats.longestSilenceDays} 天`} sub={`${stats.longestSilenceFrom} 起`} />
@@ -879,7 +783,13 @@ export function FriendPage({ friendId, onBack, onOpenFriend }: Props) {
             <RhythmCard friend={friend} stats={stats} />
           </>
         ) : (
-          <div className="et-meta" style={{ color: 'var(--et-mute)', textAlign: 'center', padding: 20 }}>这位朋友消息太少，没有可分析的统计。</div>
+          <section className="friend-card">
+            <EmptyState
+              icon={<IconInbox size={22} />}
+              title="消息太少，还算不出统计"
+              description={`你们一共 ${friend.count.toLocaleString()} 条消息。多聊一阵子，这里会出现谁更主动、深夜比例、回复速度这些数字。`}
+            />
+          </section>
         )}
         <MomentsCard moments={moments} loading={momentsLoading} />
         <ActionDock
@@ -888,7 +798,7 @@ export function FriendPage({ friendId, onBack, onOpenFriend }: Props) {
           onExportChat={handleExportChat}
           onOpenYearbook={() => { window.location.hash = `#yearbook/${friendId}`; }}
         />
-        <div className="et-meta" style={{ textAlign: 'center', color: 'var(--et-faint)', marginTop: 8 }}>
+        <div className="et-meta friend-footnote">
           — 这一页只你看得见。Murmur 不会把任何内容上传到云端。 —
         </div>
       </div>
@@ -934,17 +844,10 @@ function FriendTabs({ tab, setTab }: { tab: FriendTab; setTab: (t: FriendTab) =>
     { id: 'chat', label: '完整对话' },
   ];
   return (
-    <div style={{ padding: '4px 28px 0', display: 'flex', gap: 4, borderBottom: '0.5px solid var(--et-line-2)' }}>
+    <div className="friend-tabs" role="tablist" aria-label="朋友页">
       {tabs.map(t => (
-        <button key={t.id} onClick={() => setTab(t.id)} style={{
-          all: 'unset', cursor: 'pointer',
-          padding: '10px 18px', borderRadius: '10px 10px 0 0',
-          fontFamily: 'var(--et-serif)', fontSize: 14, fontWeight: t.id === tab ? 600 : 500,
-          color: t.id === tab ? 'var(--et-ink)' : 'var(--et-mute)',
-          background: t.id === tab ? 'var(--et-paper)' : 'transparent',
-          borderBottom: t.id === tab ? '2px solid var(--et-orange)' : '2px solid transparent',
-          marginBottom: -1,
-        }}>{t.label}</button>
+        <button key={t.id} type="button" role="tab" aria-selected={t.id === tab}
+          className="friend-tab" onClick={() => setTab(t.id)}>{t.label}</button>
       ))}
     </div>
   );

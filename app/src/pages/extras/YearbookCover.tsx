@@ -17,6 +17,7 @@ import { Stamp } from '../../components/Stamp';
 import { Postmark } from '../../components/Postmark';
 import { displayName } from '../../utils/privacy';
 import { Share, Download } from '../../utils/icons';
+import { Button } from '../../ui';
 
 interface Props {
   // Either pass a full Friend or just the wxid + display name. The cover
@@ -103,21 +104,22 @@ export function YearbookCover(props: Props) {
         className="et-paper-grain"
         aria-label="year cover"
         style={{
-          width: 360,
-          background: 'var(--et-paper)',
-          border: '0.5px solid var(--et-line-2)',
+          // Phone-screenshot sized, but never wider than the column it sits in.
+          width: '100%', maxWidth: 360, boxSizing: 'border-box',
+          background: 'var(--surface-card)',
+          border: '0.5px solid var(--border-default)',
           borderRadius: 18,
-          boxShadow: 'var(--et-shadow-2)',
+          boxShadow: 'var(--shadow-md)',
           padding: '32px 28px 28px',
           position: 'relative',
           overflow: 'hidden',
-          fontFamily: 'var(--et-sans)',
+          fontFamily: 'var(--font-sans)',
         }}
       >
         <div
           style={{
             position: 'absolute', inset: 12,
-            border: '0.5px solid var(--et-line)', borderRadius: 14, pointerEvents: 'none',
+            border: '0.5px solid var(--border-subtle)', borderRadius: 14, pointerEvents: 'none',
           }}
         />
 
@@ -131,7 +133,7 @@ export function YearbookCover(props: Props) {
         <div
           className="et-num"
           style={{
-            marginTop: 4, fontSize: 56, lineHeight: 1, color: 'var(--et-orange)',
+            marginTop: 4, fontSize: 56, lineHeight: 1, color: 'var(--accent)',
             fontWeight: 700, letterSpacing: '-0.02em',
           }}
         >
@@ -145,8 +147,8 @@ export function YearbookCover(props: Props) {
             <div
               className="et-serif"
               style={{
-                fontSize: 22, fontWeight: 600, color: 'var(--et-ink)',
-                lineHeight: 1.2, marginTop: 1,
+                fontSize: 22, fontWeight: 600, color: 'var(--text-primary)',
+                lineHeight: 1.2, marginTop: 1, overflowWrap: 'anywhere',
               }}
             >
               {friendName}
@@ -160,10 +162,10 @@ export function YearbookCover(props: Props) {
             marginTop: 22,
             fontSize: 17,
             lineHeight: 1.55,
-            color: 'var(--et-ink)',
+            color: 'var(--text-primary)',
             fontStyle: 'italic',
             paddingLeft: 12,
-            borderLeft: '2px solid var(--et-orange)',
+            borderLeft: '2px solid var(--accent)',
           }}
         >
           {cap}
@@ -193,7 +195,7 @@ export function YearbookCover(props: Props) {
           style={{
             marginTop: 20,
             paddingTop: 16,
-            borderTop: '0.5px dashed var(--et-line-2)',
+            borderTop: '0.5px dashed var(--border-default)',
             display: 'flex', alignItems: 'center', gap: 12,
           }}
         >
@@ -212,16 +214,16 @@ export function YearbookCover(props: Props) {
           className="et-num"
           style={{
             position: 'absolute', bottom: 16, right: 22,
-            fontSize: 9, color: 'var(--et-mute)', letterSpacing: '0.16em',
+            fontSize: 9, color: 'var(--text-muted)', letterSpacing: '0.16em',
           }}
         >
           NO. {String(friend.id).slice(-6).toUpperCase()}
         </div>
       </article>
 
-      <div style={{ display: 'flex', gap: 8 }}>
-        <CoverBtn label="保存为图片" icon={<Download size={13} />} onClick={() => doScreenshot(ref.current)} />
-        <CoverBtn label="复制分享文案" icon={<Share size={13} />} onClick={() => copyShareText(friendName, yearNum, cap)} />
+      <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'center', gap: 8 }}>
+        <Button size="sm" icon={<Download size={13} />} onClick={() => doScreenshot(ref.current)}>保存为图片</Button>
+        <Button size="sm" icon={<Share size={13} />} onClick={() => copyShareText(friendName, yearNum, cap)}>复制分享文案</Button>
       </div>
     </div>
   );
@@ -238,13 +240,13 @@ function CoverRow({
         alignItems: 'baseline',
         gap: 12,
         padding: '10px 0',
-        borderBottom: '0.5px solid var(--et-line)',
+        borderBottom: '0.5px solid var(--border-subtle)',
       }}
     >
-      <div className="et-serif" style={{ fontSize: 12.5, color: 'var(--et-ink-soft)' }}>
+      <div className="et-serif" style={{ fontSize: 12.5, color: 'var(--text-secondary)', minWidth: 0 }}>
         {label}
         {sub && (
-          <div style={{ fontSize: 10.5, color: 'var(--et-mute)', marginTop: 1, fontFamily: 'var(--et-sans)' }}>
+          <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 1, fontFamily: 'var(--font-sans)' }}>
             {sub}
           </div>
         )}
@@ -255,38 +257,19 @@ function CoverRow({
           style={{
             fontSize: 20,
             fontWeight: 600,
-            color: 'var(--et-ink)',
+            color: 'var(--text-primary)',
             letterSpacing: '-0.01em',
           }}
         >
           {value}
         </span>
         {unit && (
-          <span className="et-serif" style={{ fontSize: 12, color: 'var(--et-mute)' }}>
+          <span className="et-serif" style={{ fontSize: 12, color: 'var(--text-muted)' }}>
             {unit}
           </span>
         )}
       </div>
     </div>
-  );
-}
-
-function CoverBtn({ label, icon, onClick }: { label: string; icon: React.ReactNode; onClick?: () => void }) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        all: 'unset', cursor: 'pointer',
-        padding: '8px 14px', borderRadius: 8,
-        background: 'var(--et-paper)', color: 'var(--et-ink)',
-        border: '0.5px solid var(--et-line-2)',
-        fontSize: 12, fontWeight: 600,
-        display: 'inline-flex', alignItems: 'center', gap: 6,
-      }}
-    >
-      <span style={{ display: 'inline-flex', color: 'var(--et-orange)' }}>{icon}</span>
-      {label}
-    </button>
   );
 }
 
@@ -301,7 +284,10 @@ async function doScreenshot(node: HTMLElement | null) {
   try {
     const mod: { toPng: (n: HTMLElement, opts?: Record<string, unknown>) => Promise<string> } =
       await import(/* @vite-ignore */ pkgName);
-    const dataUrl = await mod.toPng(node, { pixelRatio: 2, backgroundColor: '#f5f3ec' });
+    // Paint the card on its own (theme-resolved) surface colour so the PNG
+    // matches what is on screen in light and dark mode.
+    const backgroundColor = getComputedStyle(node).backgroundColor;
+    const dataUrl = await mod.toPng(node, { pixelRatio: 2, backgroundColor });
     const a = document.createElement('a');
     a.download = `murmur-year-cover.png`;
     a.href = dataUrl;

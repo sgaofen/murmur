@@ -202,6 +202,14 @@
   /* layers */
   --z-dialog: 1200;
 
+  /* media overlays — drawn on top of photos / video, so the same in both
+     themes (a dark scrim with white text reads on any picture) */
+  --media-scrim:        rgba(20, 24, 42, 0.72);
+  --media-scrim-strong: rgba(8, 10, 18, 0.88);
+  --media-on-scrim:     #FFFFFF;
+  --media-control:      rgba(255, 255, 255, 0.92);
+  --media-control-ink:  #1A2B4A;
+
   /* —— legacy (--et-*) —— */
   --et-serif: var(--font-serif);
   --et-sans:  var(--font-sans);

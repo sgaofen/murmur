@@ -5,6 +5,7 @@ Synthetic, unencrypted WeChat 4.x DBs; no third-party deps.
 import hashlib
 import json
 import os
+import random
 import shutil
 import sqlite3
 import sys
@@ -293,6 +294,219 @@ class EchoPagingTest(ChatViewBase):
                 os.environ["MURMUR_SEARCH_INDEX_DIR"] = old
 
 
+class BoundsTest(ChatViewBase):
+    """#46 review: oversized integers are a 400-class CursorError, never an
+    OverflowError from SQLite."""
+
+    def test_cursor_numbers_are_bounded(self) -> None:
+        top = 1 << 53
+        self.assertEqual(cv.parse_cursor(f"{top}:{top}:message_0.db"), (top, "message_0.db", top))
+        for bad in (f"{top + 1}:1:message_0.db", f"1:{top + 1}:message_0.db",
+                    "9" * 40 + ":1:message_0.db", "1:" + "9" * 40 + ":message_0.db",
+                    "-1:1:message_0.db", "1:-5:message_0.db"):
+            with self.assertRaises(cv.CursorError):
+                cv.parse_cursor(bad)
+
+    def test_huge_values_never_reach_sqlite(self) -> None:
+        huge = "9" * 30
+        for kw in ({"before": f"{huge}:1:message_0.db"}, {"after": f"1:{huge}:message_1.db"},
+                   {"around": f"{huge}:{huge}:message_0.db"}, {"at": huge}, {"at": "-" + huge}):
+            with self.subTest(kw=kw), self.assertRaises(cv.CursorError):
+                self.page(**kw)
+        # Just inside the bound still pages normally (past the end → the last message).
+        r = self.page(at=1 << 53, limit=2)
+        self.assertEqual([m["text"] for m in r["messages"]], ALICE_TEXTS[-2:])
+
+    def test_fallback_sql_path_is_bounded_too(self) -> None:
+        with mock.patch.object(cv, "_file_keys", lambda *a: None):
+            with self.assertRaises(cv.CursorError):
+                self.page(before=f"{1 << 70}:1:message_0.db")
+            r = self.page(before=f"{1 << 53}:{1 << 53}:message_9.db", limit=3)
+            self.assertEqual([m["text"] for m in r["messages"]], ALICE_TEXTS[-3:])
+
+
+class AroundFillTest(ChatViewBase):
+    """#46 review: near either end of a chat, `around` / `at` fill the window
+    from the other side instead of returning a short page."""
+
+    def test_first_message_fills_with_newer(self) -> None:
+        first = self.page(limit=50)["messages"][0]
+        r = self.page(around=first["id"], limit=5)
+        self.assertEqual(r["anchor"], first["id"])
+        self.assertEqual([m["text"] for m in r["messages"]], ALICE_TEXTS[:5])
+        self.assertFalse(r["has_more_before"])
+        self.assertTrue(r["has_more_after"])
+
+    def test_second_message_fills_with_newer(self) -> None:
+        second = self.page(limit=50)["messages"][1]
+        r = self.page(around=second["id"], limit=6)
+        self.assertEqual([m["text"] for m in r["messages"]], ALICE_TEXTS[:6])
+        self.assertEqual(r["anchor"], second["id"])
+        self.assertTrue(r["has_more_after"])
+
+    def test_before_the_first_day(self) -> None:
+        r = self.page(at="0", limit=4)
+        self.assertEqual([m["text"] for m in r["messages"]], ALICE_TEXTS[:4])
+        self.assertEqual(r["anchor"], r["messages"][0]["id"])
+        self.assertTrue(r["has_more_after"])
+
+    def test_last_message_fills_with_older(self) -> None:
+        last = self.page(limit=50)["messages"][-1]
+        r = self.page(around=last["id"], limit=5)
+        self.assertEqual([m["text"] for m in r["messages"]], ALICE_TEXTS[-5:])
+        self.assertTrue(r["has_more_before"])
+        self.assertFalse(r["has_more_after"])
+
+    def test_window_bigger_than_chat(self) -> None:
+        mid = self.page(limit=50)["messages"][5]
+        r = self.page(around=mid["id"], limit=50)
+        self.assertEqual([m["text"] for m in r["messages"]], ALICE_TEXTS)
+        self.assertFalse(r["has_more_before"])
+        self.assertFalse(r["has_more_after"])
+
+    def test_list_backed_store(self) -> None:
+        store = _ListStore(11)
+        first = cv.chat_page(store, "u1", at=0, limit=4)
+        self.assertEqual([m["text"] for m in first["messages"]], ["m0", "m1", "m2", "m3"])
+        self.assertTrue(first["has_more_after"])
+        r = cv.chat_page(store, "u1", around=first["messages"][0]["id"], limit=5)
+        self.assertEqual([m["text"] for m in r["messages"]], ["m0", "m1", "m2", "m3", "m4"])
+
+
+class SortKeyIndexTest(unittest.TestCase):
+    """#46 review item 4: pages come from cached sort keys, not a scan + sort
+    of the whole chat per request. Results must match the plain-SQL path
+    exactly (same order, same cross-DB tie-break, same has_more)."""
+
+    N_FILES = 3
+
+    def setUp(self) -> None:
+        cv._KEY_CACHE.clear()
+        self.tmp = Path(tempfile.mkdtemp(prefix="murmur-chat-keys-"))
+        d = build_fixture(self.tmp)
+        # A busier chat: rows inserted out of time order (local_id order ≠
+        # time order) and lots of same-second ties within and across files.
+        rnd = random.Random(46)
+        self.expected = []
+        base = ts("2025-01-01")
+        for k in range(self.N_FILES):
+            fname = f"message_{k + 2}.db"
+            c = make_msg_db(d / fname, [ME, BOB])
+            stamps = [base + rnd.randint(0, 400) for _ in range(300)]
+            for j, when in enumerate(stamps):
+                add_msg(c, BOB, BOB if j % 2 else ME, when, f"f{k}-{j}")
+            c.commit()
+            for local_id, when, text in c.execute(
+                    f"SELECT local_id, create_time, message_content FROM {table_for(BOB)}"):
+                self.expected.append(((when, fname, local_id), text))
+            c.close()
+        self.expected.sort()
+        self.texts = [t for _, t in self.expected]
+        self.store = EchoStore(d)
+
+    def tearDown(self) -> None:
+        cv._KEY_CACHE.clear()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def walk(self) -> list:
+        """Every page shape the chat page asks for, as comparable tuples."""
+        out = []
+        r = cv.chat_page(self.store, BOB, limit=37)
+        out.append(r)
+        cur = r["messages"][0]["id"]
+        while True:
+            r = cv.chat_page(self.store, BOB, before=cur, limit=41)
+            out.append(r)
+            if not r["has_more_before"]:
+                break
+            cur = r["messages"][0]["id"]
+        for i in (0, 1, 150, 451, len(self.expected) - 2, len(self.expected) - 1):
+            key, _ = self.expected[i]
+            out.append(cv.chat_page(self.store, BOB, around=cv.format_cursor(key), limit=20))
+            out.append(cv.chat_page(self.store, BOB, after=cv.format_cursor(key), limit=25))
+            out.append(cv.chat_page(self.store, BOB, at=key[0], limit=9))
+        return [(tuple((m["id"], m["text"]) for m in p["messages"]), p["has_more_before"],
+                 p["has_more_after"], p["anchor"], p.get("chat")) for p in out]
+
+    def test_matches_plain_sql_paging(self) -> None:
+        fast = self.walk()
+        with mock.patch.object(cv, "_file_keys", lambda *a: None):
+            slow = self.walk()
+        self.assertEqual(fast, slow)
+        # And the full walk back is the true order, each message once.
+        r = cv.chat_page(self.store, BOB, limit=50)
+        seen = r["messages"]
+        while r["has_more_before"]:
+            r = cv.chat_page(self.store, BOB, before=seen[0]["id"], limit=50)
+            seen = r["messages"] + seen
+        self.assertEqual([m["text"] for m in seen], self.texts)
+        self.assertEqual(cv.chat_page(self.store, BOB, limit=1)["chat"]["count"], len(self.texts))
+
+    def _traced(self):
+        log = []
+        orig = self.store._conn
+
+        def conn(fname):
+            c = orig(fname)
+            c.set_trace_callback(lambda sql: log.append(sql))
+            return c
+        return log, mock.patch.object(self.store, "_conn", conn)
+
+    def test_pages_after_the_first_do_not_scan(self) -> None:
+        log, patch = self._traced()
+        with patch:
+            first = cv.chat_page(self.store, BOB, limit=40)
+            built = [s for s in log if "ORDER BY" in s]
+            self.assertEqual(len(built), self.N_FILES)  # one key read per file, meta included
+            self.assertFalse([s for s in log if "COUNT(" in s])
+            log.clear()
+            cur = first["messages"][0]["id"]
+            for _ in range(5):
+                cur = cv.chat_page(self.store, BOB, before=cur, limit=40)["messages"][0]["id"]
+            cv.chat_page(self.store, BOB, around=cur, limit=40)
+            cv.chat_page(self.store, BOB, at=self.expected[10][0][0], limit=40)
+        scans = [s for s in log if "ORDER BY" in s or "COUNT(" in s or "MIN(" in s]
+        self.assertEqual(scans, [])
+        reads = [s for s in log if s.lstrip().upper().startswith("SELECT LOCAL_ID")]
+        self.assertTrue(reads)
+        self.assertTrue(all("WHERE local_id IN" in s for s in reads))
+
+    def test_cache_follows_file_changes(self) -> None:
+        before = cv.chat_page(self.store, BOB, limit=5)
+        self.assertEqual(before["chat"]["count"], len(self.texts))
+        c = sqlite3.connect(str(self.store.dir / "message_2.db"))
+        add_msg(c, BOB, BOB, ts("2025-06-01"), "新消息")
+        c.commit()
+        c.close()
+        os.utime(self.store.dir / "message_2.db", ns=(1, 2))  # mtime always moves, even on coarse clocks
+        after = cv.chat_page(self.store, BOB, limit=5)
+        self.assertEqual(after["chat"]["count"], len(self.texts) + 1)
+        self.assertEqual(after["messages"][-1]["text"], "新消息")
+
+    def test_unpackable_keys_fall_back_to_sql(self) -> None:
+        c = sqlite3.connect(str(self.store.dir / "message_3.db"))
+        c.execute(f"INSERT INTO {table_for(BOB)} (local_id, local_type, real_sender_id, create_time, "
+                  "message_content) VALUES (?, 1, 1, ?, '大号 local_id')", ((1 << 32) + 7, ts("2025-01-01") + 200))
+        c.commit()
+        c.close()
+        cv._KEY_CACHE.clear()
+        fast = self.walk()
+        self.assertIsNone(cv._file_keys(self.store, "message_3.db", table_for(BOB)))
+        with mock.patch.object(cv, "_file_keys", lambda *a: None):
+            slow = self.walk()
+        self.assertEqual(fast, slow)
+        self.assertIn("大号 local_id", [t for p in fast for _, t in p[0]])
+
+    def test_cache_is_bounded(self) -> None:
+        with mock.patch.object(cv, "_KEY_CACHE_MAX_ENTRIES", 2):
+            cv.chat_page(self.store, BOB, limit=5)
+            self.assertEqual(len(cv._KEY_CACHE), 2)
+        with mock.patch.object(cv, "_KEY_CACHE_MAX_ROWS", 10):
+            cv._KEY_CACHE.clear()
+            cv.chat_page(self.store, BOB, limit=5)
+            self.assertEqual(len(cv._KEY_CACHE), 1)  # always keeps the newest entry
+
+
 # ---------------------------------------------------------------- fallback
 
 @dataclass
@@ -408,6 +622,22 @@ class HttpTest(ChatViewBase):
         code, body = self._get(f"/api/chat/messages?chat={q(ALICE)}&before=1:1:a.db&after=1:1:a.db")
         self.assertEqual(code, 400)
         self.assertEqual(body["error"], "bad_param")
+
+    def test_oversized_numbers_are_400(self) -> None:
+        q = urllib.parse.quote
+        huge = "9" * 30
+        for qs in (f"before={huge}:1:message_0.db", f"after=1:{huge}:message_0.db",
+                   f"around={huge}:{huge}:message_0.db", f"at={huge}", f"at=-{huge}"):
+            with self.subTest(qs=qs):
+                code, body = self._get(f"/api/chat/messages?chat={q(ALICE)}&{qs}")
+                self.assertEqual(code, 400)
+                self.assertEqual(body["error"], "bad_param")
+        code, r = self._get(f"/api/chat/messages?chat={q(ALICE)}&limit={huge}")
+        self.assertEqual(code, 200)  # clamped to MAX_LIMIT, like any big limit
+        self.assertEqual(len(r["messages"]), len(ALICE_TEXTS))
+        # Backstop: an OverflowError from anywhere below is still a 400.
+        with mock.patch.object(cv, "chat_page", side_effect=OverflowError("Python int too large")):
+            self.assertEqual(self._get(f"/api/chat/messages?chat={q(ALICE)}")[0], 400)
 
     def test_gated_without_store(self) -> None:
         H = self.etcli._MurmurAPIHandler

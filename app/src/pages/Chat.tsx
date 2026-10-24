@@ -7,6 +7,7 @@
  *   ?at=YYYY-MM-DD             at the first message of that day
  *   (nothing)                  at the newest message
  *   &from=search               back goes to 搜索 instead of the friend page
+ *   &back=<search query>       …and restores that search (words, mode, dates)
  *
  * Data: GET /api/chat/messages (cli/chat_view.py). Built from ui/ primitives
  * and tokens; layout in ./Chat.css. */
@@ -20,6 +21,7 @@ import { IconClose, IconPlay, IconRefresh } from '../ui/icons';
 import { PageHeader } from '../shell/PageHeader';
 import { displayName, maskText } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
+import { searchBackPath } from '../utils/searchLinks';
 import {
   Highlight, IconArrowDown, IconCalendarJump, IconMessage, IconQuote, TypeIcon,
   clockOf, dayFromTs, dayOf, formatDay, isStub, splitQuote, splitShare, splitTerms, typeLabel,
@@ -224,7 +226,7 @@ export function ChatPage({ chatId, query, navigate }: ChatPageProps) {
   // Groups have no friend page; they are reached from search (or a link) only.
   const isGroup = info ? info.is_group : chatId.endsWith('@chatroom');
   const back = fromSearch
-    ? { label: '搜索', onClick: () => navigate(q ? `search?q=${encodeURIComponent(q)}` : 'search') }
+    ? { label: '搜索', onClick: () => navigate(searchBackPath(params)) }
     : isGroup
       ? { label: '首页', onClick: () => navigate('') }
       : { label: '朋友页', onClick: () => navigate(`friend/${chatId}`) };

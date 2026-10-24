@@ -1,0 +1,141 @@
+/* 年度总览 (#/annual) — tokens only (see app/src/ui/README.md). */
+
+.annual-page {
+  --annual-gutter: 28px;
+  min-height: var(--shell-vh, 100vh);
+  background: var(--surface-page);
+}
+.annual-body {
+  max-width: 1080px; margin: 0 auto;
+  padding: 24px var(--annual-gutter) 60px;
+  display: flex; flex-direction: column; gap: 22px;
+}
+.annual-pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: 18px; }
+.annual-pair:empty { display: none; }
+
+/* card shell */
+.annual-card {
+  min-width: 0;
+  padding: 20px 24px;
+  background: var(--surface-card);
+  border: 0.5px solid var(--border-default);
+  border-radius: var(--radius-lg);
+}
+.annual-card__title { margin: 4px 0 0; color: var(--text-primary); }
+.annual-card__body { margin-top: 12px; }
+.annual-big { font-family: var(--font-serif); font-size: 18px; font-weight: 600; color: var(--accent-text); }
+.annual-link {
+  appearance: none; margin: 4px 0 0; padding: 0; border: 0; background: transparent; cursor: pointer;
+  font-family: var(--font-serif); font-size: 18px; font-weight: 600; text-align: left;
+  color: var(--accent-text); overflow-wrap: anywhere;
+}
+.annual-link:hover { text-decoration: underline; text-underline-offset: 3px; }
+.annual-link:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; border-radius: var(--radius-xs); }
+.annual-note { margin-top: 6px; font-size: 12px; color: var(--text-secondary); }
+.annual-note--lead { margin-top: 0; }
+.annual-note b { color: var(--text-primary); }
+.annual-note b.is-accent { color: var(--accent-text); }
+.annual-hint { margin-top: 6px; font-size: 11px; color: var(--text-muted); }
+.annual-hint--quiet { font-style: italic; color: var(--text-faint); }
+
+/* hero */
+.annual-hero {
+  position: relative; overflow: hidden;
+  padding: 40px 44px 30px;
+  background: var(--surface-card);
+  border: 0.5px solid var(--border-default);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-md);
+}
+.annual-hero__postmark { position: absolute; top: 24px; right: 30px; transform: rotate(-7deg); }
+.annual-hero__title {
+  position: relative; margin: 22px 0 0; max-width: 720px;
+  font-family: var(--font-serif); font-weight: 600;
+  font-size: clamp(30px, 2.6vw + 20px, 56px); line-height: 1.15; letter-spacing: -0.005em;
+  color: var(--text-primary);
+}
+.annual-hero__title em { font-style: normal; color: var(--accent); }
+.annual-hero__meta { position: relative; margin-top: 16px; display: flex; flex-wrap: wrap; gap: 6px 24px; }
+.annual-hero__meta b { color: var(--text-primary); }
+
+/* top 5 */
+.annual-top { display: flex; flex-direction: column; gap: 4px; }
+.annual-top__row {
+  appearance: none; margin: 0; width: 100%; font: inherit; color: inherit; text-align: left; cursor: pointer;
+  display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; align-items: center; gap: 12px;
+  padding: 8px 6px; border: 0; border-radius: var(--radius-sm); background: transparent;
+  transition: background-color var(--dur-fast) var(--ease-out);
+}
+.annual-top__row:hover { background: var(--surface-hover); }
+.annual-top__row:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.annual-top__rank { font-size: 16px; font-weight: 600; color: var(--text-muted); }
+.annual-top__row.is-first .annual-top__rank { color: var(--accent-text); }
+.annual-top__main { min-width: 0; }
+.annual-top__name, .annual-top__track, .annual-top__fill, .annual-top__count, .annual-top__split { display: block; }
+.annual-top__name { font-family: var(--font-serif); font-size: 14px; font-weight: 500; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.annual-top__track { margin-top: 4px; height: 4px; overflow: hidden; border-radius: var(--radius-pill); background: var(--surface-pressed); }
+.annual-top__fill { height: 100%; border-radius: var(--radius-pill); background: var(--text-secondary); }
+.annual-top__row.is-first .annual-top__fill { background: var(--accent); }
+.annual-top__count { text-align: right; font-size: 14px; font-weight: 600; color: var(--text-primary); }
+.annual-top__split { text-align: right; font-size: 10px; color: var(--text-muted); white-space: nowrap; }
+
+/* heatmap */
+.annual-heat { display: grid; gap: 3px; }
+.annual-heat__row { display: grid; grid-template-columns: 20px repeat(24, minmax(0, 1fr)); gap: 3px; align-items: center; }
+.annual-heat__day { padding-right: 4px; font-size: 10px; text-align: right; color: var(--text-faint); }
+.annual-heat__cell { height: 14px; border-radius: 2px; background: var(--surface-hover); }
+.annual-heat__axis { margin-top: 10px; font-size: 10px; text-align: right; color: var(--text-faint); }
+
+/* monthly winners */
+.annual-months { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.annual-month {
+  appearance: none; margin: 0; min-width: 0; font: inherit; color: inherit; text-align: left;
+  padding: 10px 12px; cursor: pointer;
+  background: var(--surface-sunken);
+  border: 0.5px solid var(--border-default); border-radius: var(--radius-sm);
+  transition: border-color var(--dur-fast) var(--ease-out);
+}
+.annual-month:hover:not(:disabled) { border-color: var(--accent-border); }
+.annual-month:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.annual-month:disabled { cursor: default; opacity: 0.5; }
+.annual-month__label { font-size: 11px; color: var(--text-muted); }
+.annual-month__name { margin-top: 2px; font-family: var(--font-serif); font-size: 13px; font-weight: 500; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.annual-month__count { margin-top: 2px; font-size: 10px; color: var(--text-faint); }
+
+/* initiative */
+.annual-callout { margin-top: 10px; padding: 10px 12px; border-radius: var(--radius-sm); background: var(--accent-soft); }
+.annual-callout__label { font-size: 10px; }
+.annual-callout .annual-link { margin-top: 2px; font-size: 14px; }
+
+/* phrases */
+.annual-phrases { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 14px; }
+.annual-phrase { font-family: var(--font-serif); color: var(--text-secondary); }
+.annual-phrase.is-top { font-weight: 600; color: var(--text-primary); }
+.annual-phrase.is-first { border-bottom: 1.5px solid var(--accent); }
+.annual-phrase__n { margin-left: 4px; font-family: var(--font-mono); font-size: 9px; font-weight: 400; color: var(--text-faint); }
+
+/* loading */
+.annual-status { margin: 4px 0 0; display: flex; align-items: center; gap: 10px; font-size: 12.5px; color: var(--text-secondary); }
+.annual-hero--skeleton { display: flex; flex-direction: column; gap: 16px; }
+
+/* ——— narrower windows ——— */
+@media (max-width: 640px) {
+  .annual-page { --annual-gutter: 16px; }
+  .annual-body { padding-top: 16px; gap: 14px; }
+  .annual-pair { gap: 14px; }
+  .annual-card { padding: 18px 16px; }
+  .annual-card__title.et-h2 { font-size: 20px; }
+  .annual-hero { padding: 26px 20px 22px; border-radius: var(--radius-lg); }
+  .annual-hero__postmark { top: 14px; right: 10px; transform: rotate(-7deg) scale(0.62); transform-origin: top right; }
+  .annual-hero__title br { display: none; }
+  .annual-heat, .annual-heat__row { gap: 2px; }
+  .annual-heat__row { grid-template-columns: 16px repeat(24, minmax(0, 1fr)); }
+  .annual-heat__day { padding-right: 2px; }
+  .annual-heat__cell { height: 10px; border-radius: 1.5px; }
+  .annual-months { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+  .annual-month { padding: 8px 9px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .annual-top__row, .annual-month { transition: none; }
+}

@@ -217,7 +217,7 @@ function Streaming({ friend, agentName, text, secs, onClose }: { friend: Friend;
         <div style={{ marginTop: 22, paddingTop: 16, borderTop: '0.5px solid var(--et-line)', display: 'flex', alignItems: 'center', gap: 14 }}>
           <div className="et-meta">已用时 <span className="et-num" style={{ color: 'var(--et-ink)', fontWeight: 600 }}>{secs}s</span></div>
           <div className="et-meta">· 可以返回浏览，后台继续跑</div>
-          <div style={{ flex: 1, height: 4, background: 'rgba(26,43,74,0.08)', borderRadius: 999, overflow: 'hidden' }}>
+          <div style={{ flex: 1, height: 4, background: 'var(--surface-pressed)', borderRadius: 999, overflow: 'hidden' }}>
             <div style={{ width: `${Math.min(95, secs * 2)}%`, height: '100%', background: 'var(--et-orange)', borderRadius: 999, transition: 'width .3s' }} />
           </div>
         </div>

@@ -4937,8 +4937,10 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     limit=int(qs.get("limit", [_cv.DEFAULT_LIMIT])[0]),
                     media_index_path=_paths.media_index_path(),
                 )
-            except ValueError as e:
-                return self._send_json({"error": "bad_param", "message": str(e)}, 400)
+            except (ValueError, OverflowError) as e:
+                # chat_view bounds every number it binds; OverflowError is a
+                # backstop so an oversized value can never surface as a 500.
+                return self._send_json({"error": "bad_param", "message": str(e)[:200]}, 400)
             return self._send_json(payload)
         if path == "/api/graph":
             scope = qs.get("scope", ["private"])[0]

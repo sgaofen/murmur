@@ -17,6 +17,7 @@ import { SettingsPage } from './pages/Settings';
 import { SearchPage } from './pages/Search';
 import { ChatPage } from './pages/Chat';
 import { supportsQQOnboarding, syncActiveToBackend } from './utils/activeProfile';
+import { searchBackPath } from './utils/searchLinks';
 import { useTheme } from './ui';
 import { AppShell } from './shell/AppShell';
 import type { NavKey } from './shell/AppShell';
@@ -90,10 +91,16 @@ function shellFor(route: Route, go: (path: string) => void): { active: NavKey | 
       return { active: 'table', header: { title: '离线证据表' } };
     case 'search':
       return { active: 'search', header: { title: '搜索' } };
-    case 'chat':
-      return new URLSearchParams(route.query).get('from') === 'search'
-        ? { active: 'search', header: { title: '聊天', back: { label: '搜索', onClick: () => go('search') } } }
+    case 'chat': {
+      const params = new URLSearchParams(route.query);
+      if (params.get('from') === 'search') {
+        return { active: 'search', header: { title: '聊天', back: { label: '搜索', onClick: () => go(searchBackPath(params)) } } };
+      }
+      // Same rule as the page's own header: groups have no friend page.
+      return route.id.endsWith('@chatroom')
+        ? { active: 'home', header: { title: '聊天', back: { label: '首页', onClick: () => go('') } } }
         : { active: 'home', header: { title: '聊天', back: { label: '朋友页', onClick: () => go(`friend/${route.id}`) } } };
+    }
     case 'settings':
       return { active: 'settings', header: { title: '设置' } };
     default:
