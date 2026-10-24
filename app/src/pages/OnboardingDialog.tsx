@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Button, Callout } from '../ui';
 import { errorCode, extractKey, getDiagnose, openFullDiskAccess, refreshData, resignWechat, saveKey, saveWeChatRoot, startDiskScan, getDiskScanStatus, cancelDiskScan } from '../data/api';
 import type { Diagnose, ScanState, ScanFound } from '../data/api';
 import { maskText } from '../utils/privacy';
@@ -300,7 +301,7 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
       }}>
         <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 6, background: 'var(--et-orange)' }} />
         <button onClick={onClose} title="跳过引导（不推荐）" style={{
-          position: 'absolute', top: 14, right: 14, all: 'unset', cursor: 'pointer',
+          all: 'unset', position: 'absolute', top: 14, right: 14, cursor: 'pointer',
           width: 28, height: 28, borderRadius: 8, color: 'var(--et-mute)',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
         }}>
@@ -408,14 +409,12 @@ function Welcome({ onNext, onPickQQ }: { onNext: () => void; onPickQQ?: () => vo
           </div>
         ))}
       </div>
-      <button onClick={onNext} style={primaryBtn}>开始（微信）</button>
-      {onPickQQ && !isMacClient && (
-        <button onClick={onPickQQ} style={{
-          ...primaryBtn, marginTop: 8, background: 'transparent',
-          color: 'var(--et-ink)', boxShadow: 'none',
-          border: '1px solid var(--et-line-2)',
-        }}>🐧 切换到 QQ</button>
-      )}
+      <div className="ui-stack">
+        <Button variant="primary" size="lg" block onClick={onNext}>开始（微信）</Button>
+        {onPickQQ && !isMacClient && (
+          <Button variant="secondary" size="lg" block onClick={onPickQQ}>🐧 切换到 QQ</Button>
+        )}
+      </div>
     </>
   );
 }
@@ -1035,29 +1034,22 @@ function MacResignPrompt({ diag, onConsent, onPaste }: { diag: Diagnose; onConse
           <li style={{ marginBottom: 4 }}>对 WeChat 主可执行文件做 <code>codesign --remove-signature</code> + 重新 ad-hoc 签名</li>
           <li>重启 WeChat → <strong>停在你这里等你下一步</strong>，不会自动跑抓 key</li>
         </ol>
-        <div style={{ marginTop: 8, padding: '8px 10px', background: 'rgba(72,167,107,0.10)',
-          borderRadius: 6, fontSize: 12, color: '#3a7a4f' }}>
+        <Callout tone="success" compact className="ui-mt-2">
           重签名完成后会重新打开 WeChat，并到下一页「请扫码登录 + 点开几个对话」，<strong>那一步没有时间限制</strong>，
           慢慢操作 — 你点完按钮我才开始抓密钥。
-        </div>
+        </Callout>
       </div>
-      <div style={{
-        padding: '10px 14px', background: 'rgba(232,181,122,0.18)',
-        border: '0.5px solid rgba(138,90,28,0.3)', borderRadius: 8,
-        fontSize: 11.5, color: '#8a5a1c', lineHeight: 1.6, marginBottom: 14,
-      }}>
-        ⚠ 重签名属于「修改 App」操作。WeChat 自己升级时会把签名重置回原样，不影响后续使用。
+      <Callout tone="warning" compact className="ui-mb-3">
+        重签名属于「修改 App」操作。WeChat 自己升级时会把签名重置回原样，不影响后续使用。
         如果不想动 WeChat，下面有「手动粘贴密钥」的备选路径。<br/>
         <strong>风控提示：</strong>重签名、挂钩微信进程这类操作有被腾讯检测到的可能，极端情况下可能触发账号安全提醒或限制。
         Murmur 只读取你这台电脑上你自己的聊天数据，不上传任何内容；介意的话请不要继续。
-      </div>
+      </Callout>
       <CapabilityList diag={diag} />
-      <button onClick={onConsent} style={primaryBtn}>开始重签名</button>
-      <button onClick={onPaste} style={{
-        ...primaryBtn, marginTop: 8, background: 'transparent',
-        color: 'var(--et-ink)', boxShadow: 'none',
-        border: '1px solid var(--et-line-2)',
-      }}>不用，我手动粘贴密钥</button>
+      <div className="ui-stack ui-mt-4">
+        <Button variant="primary" size="lg" block onClick={onConsent}>开始重签名</Button>
+        <Button variant="secondary" size="lg" block onClick={onPaste}>不用，我手动粘贴密钥</Button>
+      </div>
     </>
   );
 }
@@ -1082,21 +1074,19 @@ function MacWaitLogin({ diag, onContinue, onLive }: { diag: Diagnose | null; onC
           <li>都做完了再回来点下面按钮 — <strong>不需要赶时间</strong></li>
         </ol>
       </div>
-      <div style={{
-        padding: '10px 14px', background: 'rgba(72,167,107,0.10)',
-        border: '0.5px solid rgba(72,167,107,0.30)', borderRadius: 8,
-        fontSize: 12, color: '#3a7a4f', marginBottom: 14, lineHeight: 1.6,
-      }}>
-        💡 为啥要点开对话？WCDB 是「点哪个 DB 才解锁哪个 DB」的，没点开 → 那个 DB 的 key 不在内存里 → 我抓出来会缺几个库。<br/>
+      <Callout tone="info" compact className="ui-mb-3">
+        为啥要点开对话？WCDB 是「点哪个 DB 才解锁哪个 DB」的，没点开 → 那个 DB 的 key 不在内存里 → 我抓出来会缺几个库。<br/>
         点完再来按下面按钮，会弹密码窗口（要 root 权限扫内存），输完就开始扫。
-      </div>
+      </Callout>
       {liveFirst && <LiveRecommendBanner version={diag?.wechat_version} onLive={onLive} />}
-      <button onClick={onContinue} style={liveFirst ? secondaryBtn : primaryBtn}>
-        WeChat 都准备好了 → {liveFirst ? '先试试内存扫描（抓不到会自动切到实时抓取）' : '开始抓密钥'}
-      </button>
-      {!liveFirst && (
-        <button onClick={onLive} style={secondaryBtn}>微信 4.1.9 及以上？直接用「实时抓取」</button>
-      )}
+      <div className="ui-stack ui-mt-4">
+        <Button variant={liveFirst ? 'secondary' : 'primary'} size="lg" block onClick={onContinue}>
+          WeChat 都准备好了 → {liveFirst ? '先试试内存扫描（抓不到会自动切到实时抓取）' : '开始抓密钥'}
+        </Button>
+        {!liveFirst && (
+          <Button variant="secondary" size="lg" block onClick={onLive}>微信 4.1.9 及以上？直接用「实时抓取」</Button>
+        )}
+      </div>
     </>
   );
 }
@@ -1121,25 +1111,19 @@ function MacAutoExtract({ diag, onStart, onLive, onPaste }: { diag: Diagnose; on
           <li>WeChat 别关掉，继续在跑</li>
         </ol>
       </div>
-      <div style={{
-        padding: '10px 14px', background: 'rgba(232,181,122,0.18)',
-        border: '0.5px solid rgba(138,90,28,0.3)', borderRadius: 8,
-        fontSize: 11.5, color: '#8a5a1c', lineHeight: 1.6, marginBottom: 14,
-      }}>
-        💡 准备好了再点下面 — 一旦点确认，30 秒内会弹一次 macOS 系统密码窗口，输入开机密码后立刻开扫。
-      </div>
+      <Callout tone="warning" compact className="ui-mb-3">
+        准备好了再点下面 — 一旦点确认，30 秒内会弹一次 macOS 系统密码窗口，输入开机密码后立刻开扫。
+      </Callout>
       <CapabilityList diag={diag} />
-      <button onClick={onStart} style={liveFirst ? secondaryBtn : primaryBtn}>
-        WeChat 已就绪 → {liveFirst ? '先试试内存扫描（抓不到会自动切到实时抓取）' : '开始抓取'}
-      </button>
-      {!liveFirst && (
-        <button onClick={onLive} style={secondaryBtn}>微信 4.1.9 及以上？直接用「实时抓取」</button>
-      )}
-      <button onClick={onPaste} style={{
-        ...primaryBtn, marginTop: 8, background: 'transparent',
-        color: 'var(--et-ink)', boxShadow: 'none',
-        border: '1px solid var(--et-line-2)',
-      }}>或者：手动粘贴密钥</button>
+      <div className="ui-stack ui-mt-4">
+        <Button variant={liveFirst ? 'secondary' : 'primary'} size="lg" block onClick={onStart}>
+          WeChat 已就绪 → {liveFirst ? '先试试内存扫描（抓不到会自动切到实时抓取）' : '开始抓取'}
+        </Button>
+        {!liveFirst && (
+          <Button variant="secondary" size="lg" block onClick={onLive}>微信 4.1.9 及以上？直接用「实时抓取」</Button>
+        )}
+        <Button variant="ghost" block onClick={onPaste}>或者：手动粘贴密钥</Button>
+      </div>
     </>
   );
 }
@@ -1192,19 +1176,11 @@ function WinNeedKey({ diag, onStart, onRetry }: { diag: Diagnose; onStart: () =>
 
 function LiveRecommendBanner({ version, onLive }: { version?: string | null; onLive: () => void }) {
   return (
-    <div style={{
-      padding: '12px 14px', background: 'rgba(255,107,71,0.08)',
-      border: '0.5px solid rgba(255,107,71,0.35)', borderRadius: 8,
-      fontSize: 13, lineHeight: 1.7, marginBottom: 12, color: 'var(--et-ink)',
-    }}>
-      <div style={{ fontWeight: 600 }}>
-        检测到微信 {version || '4.1.9+'}：推荐用「实时抓取」
-      </div>
-      <div className="et-meta" style={{ marginBottom: 4 }}>
-        4.1.9 之后密钥不再常驻内存，下面的内存扫描大概率一个都抓不到。实时抓取会在你用微信时把密钥截下来，大约 1–2 分钟。
-      </div>
-      <button onClick={onLive} style={primaryBtn}>用实时抓取（推荐）</button>
-    </div>
+    <Callout tone="accent" className="ui-mb-3"
+      title={`检测到微信 ${version || '4.1.9+'}：推荐用「实时抓取」`}
+      actions={<Button variant="primary" size="lg" block onClick={onLive}>用实时抓取（推荐）</Button>}>
+      4.1.9 之后密钥不再常驻内存，下面的内存扫描大概率一个都抓不到。实时抓取会在你用微信时把密钥截下来，大约 1–2 分钟。
+    </Callout>
   );
 }
 
@@ -1285,9 +1261,4 @@ const primaryBtn: React.CSSProperties = {
   background: 'var(--et-orange)', color: '#fff',
   borderRadius: 'var(--et-r)', fontSize: 14, fontWeight: 600,
   boxShadow: '0 6px 16px rgba(255,107,71,0.32)',
-};
-
-const secondaryBtn: React.CSSProperties = {
-  ...primaryBtn, background: 'transparent', color: 'var(--et-ink)', boxShadow: 'none',
-  border: '1px solid var(--et-line-2)',
 };
