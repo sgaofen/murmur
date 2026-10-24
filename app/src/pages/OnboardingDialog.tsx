@@ -1021,8 +1021,10 @@ function MacResignPrompt({ diag, onConsent, onPaste }: { diag: Diagnose; onConse
         border: '0.5px solid rgba(138,90,28,0.3)', borderRadius: 8,
         fontSize: 11.5, color: '#8a5a1c', lineHeight: 1.6, marginBottom: 14,
       }}>
-        ⚠ 重签名是合法但属于「修改 App」操作。WeChat 自己升级时会把签名重置回原样，不影响后续使用。
-        如果不想动 WeChat，下面有「手动粘贴密钥」的备选路径。
+        ⚠ 重签名属于「修改 App」操作。WeChat 自己升级时会把签名重置回原样，不影响后续使用。
+        如果不想动 WeChat，下面有「手动粘贴密钥」的备选路径。<br/>
+        <strong>风控提示：</strong>重签名、挂钩微信进程这类操作有被腾讯检测到的可能，极端情况下可能触发账号安全提醒或限制。
+        Murmur 只读取你这台电脑上你自己的聊天数据，不上传任何内容；介意的话请不要继续。
       </div>
       <CapabilityList diag={diag} />
       <button onClick={onConsent} style={primaryBtn}>开始重签名</button>

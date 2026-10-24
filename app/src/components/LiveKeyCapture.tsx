@@ -145,7 +145,8 @@ export function LiveKeyCapture({ onDecrypt, reason = 'manual', wechatVersion, on
             fontSize: 11.5, color: '#8a5a1c', lineHeight: 1.6, margin: '10px 0 4px',
           }}>
             💡 点开始后多半会弹 macOS 密码窗口（挂钩微信需要管理员权限），输完开机密码倒计时才开始。
-            倒计时期间<strong>切到微信去操作</strong>，Murmur 这边不用看着。
+            倒计时期间<strong>切到微信去操作</strong>，Murmur 这边不用看着。<br/>
+            风控提示：挂钩微信进程有被腾讯检测到的可能。Murmur 只处理本机、你本人的数据，不上传任何内容。
           </div>
           {finished && matched > 0 ? (
             <>
