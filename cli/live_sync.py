@@ -296,7 +296,8 @@ class LiveSync:
             # so a DB whose key just appeared (or changed) gets synced even if
             # its file did not change.
             if plan.mode == "per_db":
-                key_hex = _refresh.key_for_db(src, src_root, plan.per_db or {})
+                key_hex = _refresh.key_for_db(src, src_root, plan.per_db or {},
+                                              getattr(profile, "wxid", None))
                 tag = _refresh.key_tag(key_hex) if key_hex else None
             else:
                 key_hex, tag = plan.key_hex, None
