@@ -55,6 +55,7 @@ a = Analysis(
         "qq_paths",
         "qq_decrypt",
         "qq_store",
+        "search_index",
         "media",
         "sns",
         "voice",

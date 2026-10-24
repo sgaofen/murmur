@@ -356,6 +356,20 @@ def self_wxid(prefs_path: Optional[Path] = None) -> Optional[str]:
 
 # ---------- DB layer ----------
 
+def _prefer_compressed_text(mtype, content, compress):
+    """Prefer compress_content when it carries a real zstd payload.
+
+    WeChat 4.x routinely puts the actual text body there. Only swap for
+    text-type rows; non-text rows keep their original (XML/blob) content.
+    """
+    if (mtype == 1
+            and isinstance(compress, (bytes, bytearray))
+            and len(compress) >= 4
+            and bytes(compress[:4]) == b"\x28\xb5\x2f\xfd"):
+        return bytes(compress)
+    return content
+
+
 @dataclass
 class Contact:
     username: str
@@ -525,6 +539,12 @@ class EchoStore:
 
     # --- messages ---
 
+    def message_db_files(self) -> list[str]:
+        """Sorted message_*.db filenames that hold Msg_<md5> tables
+        (excludes WeChat's own FTS, resource and biz DBs)."""
+        return sorted(p.name for p in self.dir.glob("message_*.db")
+                      if "_fts" not in p.name and "_resource" not in p.name and "biz_" not in p.name)
+
     def _locate_msg_dbs(self, username: str) -> list[tuple[str, str]]:
         """Returns ALL (msg_db_filename, table_name) pairs for a session.
 
@@ -538,8 +558,7 @@ class EchoStore:
             return [(db, table) for db in dbs]  # type: ignore[list-item]
         table = f"Msg_{hashlib.md5(username.encode()).hexdigest()}"
         found: list[str] = []
-        for fname in sorted(p.name for p in self.dir.glob("message_*.db")
-                            if "_fts" not in p.name and "_resource" not in p.name and "biz_" not in p.name):
+        for fname in self.message_db_files():
             if fname in self._known_malformed:
                 continue
             c = self._conn(fname)
@@ -639,14 +658,7 @@ class EchoStore:
                 sql += " ORDER BY create_time ASC, local_id ASC"
                 # Don't apply limit here; we'll cap after merging
                 for local_id, ts, sender_id, mtype, content, compress in c.execute(sql, params):
-                    # Prefer compress_content when it carries a real zstd payload — that's
-                    # where WeChat 4.x routinely puts the actual text body. Only swap for
-                    # text-type rows; non-text rows keep their original (XML/blob) content.
-                    if (mtype == 1
-                            and isinstance(compress, (bytes, bytearray))
-                            and len(compress) >= 4
-                            and bytes(compress[:4]) == b"\x28\xb5\x2f\xfd"):
-                        content = bytes(compress)
+                    content = _prefer_compressed_text(mtype, content, compress)
                     # Light dedup against duplicates that may sit at db-rollover boundaries
                     if isinstance(content, bytes):
                         content_bytes = content
@@ -685,6 +697,54 @@ class EchoStore:
         for ts, mtype, sender_wxid, sender_name, text in all_rows:
             yield Message(ts, sender_wxid, sender_name, mtype, text,
                           MSG_TYPES.get(mtype, f"type_{mtype}"))
+
+    def iter_table_rows(self, fname: str, table: str, after_local_id: int = 0,
+                        is_group: bool = False, render_ctx=None) -> Iterator[dict]:
+        """Yield the rows of one Msg_<md5> table with their location info.
+
+        Used by the search indexer (cli/search_index.py), which needs
+        (db file, table, local_id, server_id) to locate a hit later and only
+        wants rows newer than its last checkpoint. Rows come in local_id
+        order. `sender_raw` is the Name2Id wxid ("" if unknown); mapping it
+        to "self"/peer is left to the caller. `text` is rendered exactly like
+        messages() does.
+
+        `render_ctx` lets a background thread render content without sharing
+        this store's zstd decompressor (zstandard objects are not
+        thread-safe). Pass any object with a `_zstd` attribute.
+        """
+        ctx = render_ctx if render_ctx is not None else self
+        c = self._conn(fname)
+        try:
+            try:
+                n2i = {row[0]: row[1] for row in c.execute("SELECT rowid, user_name FROM Name2Id").fetchall()}
+            except sqlite3.DatabaseError:
+                n2i = {}
+            tbl_cols = {row[1] for row in c.execute(f"PRAGMA table_info({table})").fetchall()}
+            compress_col = "compress_content" if "compress_content" in tbl_cols else "NULL"
+            server_col = "server_id" if "server_id" in tbl_cols else "NULL"
+            sql = (f"SELECT local_id, {server_col}, create_time, real_sender_id, local_type, "
+                   f"message_content, {compress_col} FROM {table} WHERE local_id > ? "
+                   f"ORDER BY local_id ASC")
+            for local_id, server_id, ts, sender_id, mtype, content, compress in c.execute(
+                    sql, (int(after_local_id),)):
+                mtype = int(mtype or 0)
+                content = _prefer_compressed_text(mtype, content, compress)
+                try:
+                    text = EchoStore._render_content(ctx, mtype, content, is_group)  # type: ignore[arg-type]
+                except Exception:
+                    text = ""
+                yield {
+                    "local_id": int(local_id or 0),
+                    "server_id": server_id,
+                    "ts": int(ts or 0),
+                    "sender_raw": n2i.get(sender_id, ""),
+                    "type": mtype,
+                    "type_label": MSG_TYPES.get(mtype, f"type_{mtype}"),
+                    "text": text,
+                }
+        finally:
+            c.close()
 
     def _render_content(self, mtype: int, content, is_group: bool) -> str:
         if mtype == 1:
@@ -4014,6 +4074,24 @@ def friend_moments(store: EchoStore, wxid: str, n: int = 4) -> list[dict]:
     ]
 
 
+# ---------- message search index (cli/search_index.py) ----------
+
+def _search_index_for(store):
+    """SearchIndex for the given (active) store; platform follows the store type."""
+    import search_index as _si
+    return _si.get_index(store, "qq" if _is_qq_store(store) else "wechat")
+
+
+def _kick_search_index(store) -> None:
+    """Best-effort background incremental index update (never raises)."""
+    if store is None:
+        return
+    try:
+        _search_index_for(store).start_update(full=False)
+    except Exception as e:
+        sys.stderr.write(f"[search-index] kick failed: {type(e).__name__}: {e}\n")
+
+
 # ---------- HTTP handler ----------
 
 class _MurmurAPIHandler(BaseHTTPRequestHandler):
@@ -4343,6 +4421,33 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             }, status=503)
         if path == "/api/agents":
             return self._send_json(_detect_local_agents())
+        if path == "/api/search/status":
+            idx = _search_index_for(self.store)
+            auto = idx.ensure_fresh()
+            payload = idx.status()
+            payload["auto_started"] = auto
+            return self._send_json(payload)
+        if path == "/api/search":
+            import search_index as _si
+            q = (qs.get("q", [""])[0] or "").strip()
+            if not q:
+                return self._send_json({"error": "q required"}, 400)
+            try:
+                ts_from = _si.parse_time_param(qs.get("from", [None])[0])
+                ts_to = _si.parse_time_param(qs.get("to", [None])[0], end=True)
+                limit = int(qs.get("limit", [50])[0])
+                offset = int(qs.get("offset", [0])[0])
+            except ValueError as e:
+                return self._send_json({"error": "bad_param", "message": str(e)}, 400)
+            idx = _search_index_for(self.store)
+            idx.ensure_fresh()
+            payload = idx.search(
+                q, chat=qs.get("chat"), sender=qs.get("sender"),
+                ts_from=ts_from, ts_to=ts_to, types=qs.get("type"),
+                limit=limit, offset=offset,
+            )
+            payload["index"] = idx.status()
+            return self._send_json(payload)
         if path == "/api/graph":
             scope = qs.get("scope", ["private"])[0]
             min_private = int(qs.get("min_private", [10])[0])
@@ -4780,6 +4885,13 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 "needs_onboarding": True,
             }, status=503)
 
+        if path == "/api/search/rebuild":
+            idx = _search_index_for(self.store)
+            kicked = idx.start_update(full=True)
+            payload = idx.status()
+            payload.update({"ok": True, **kicked})
+            return self._send_json(payload)
+
         if path == "/api/wechat-root":
             length = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(length) if length else b"{}"
@@ -4932,6 +5044,9 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 # when the decrypted dir was still empty stubs.
                 _MurmurAPIHandler._flush_analysis_caches()
                 _disk_clear()  # nuke persisted caches too — data is fresh
+                # Fresh decrypted data → incremental search-index pass in the
+                # background (first run builds the whole index).
+                _kick_search_index(_MurmurAPIHandler._wechat_store)
             return self._send_json({
                 "ok": ok,
                 "ms": dt,
