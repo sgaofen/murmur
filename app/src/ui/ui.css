@@ -273,7 +273,8 @@ button.ui-step__hit:focus-visible { outline: 2px solid var(--focus-ring); outlin
   display: flex; flex-direction: column; align-items: center; text-align: center;
   padding: 40px 24px;
 }
-.ui-empty--page { min-height: 100vh; justify-content: center; }
+/* inside the app shell, "page" means the content area under the top bar */
+.ui-empty--page { min-height: var(--shell-vh, 100vh); justify-content: center; }
 .ui-empty .ui-medallion { margin-bottom: 22px; }
 .ui-empty__title {
   font-family: var(--font-serif); font-size: 24px; font-weight: 600; line-height: 1.3;
@@ -287,7 +288,7 @@ button.ui-step__hit:focus-visible { outline: 2px solid var(--focus-ring); outlin
 
 /* ——— ErrorState ——— */
 .ui-error-wrap { display: flex; justify-content: center; padding: 24px 16px; }
-.ui-error-wrap--page { min-height: 100vh; align-items: center; }
+.ui-error-wrap--page { min-height: var(--shell-vh, 100vh); align-items: center; }
 .ui-error {
   position: relative; overflow: hidden;
   width: 100%; max-width: 580px;
@@ -429,32 +430,9 @@ button.ui-step__hit:focus-visible { outline: 2px solid var(--focus-ring); outlin
 .ui-segmented--icon-only .ui-segmented__item { padding: 0; width: 28px; }
 .ui-segmented--sm.ui-segmented--icon-only .ui-segmented__item { width: 24px; }
 
-/* ——— Floating dock (temporary home of theme + privacy until UI-2's sidebar) ——— */
-.ui-dock {
-  position: fixed; right: 16px; bottom: 16px; z-index: var(--z-dock);
-  display: flex; align-items: center; gap: 6px;
-  padding: 4px;
-  border-radius: var(--radius-pill);
-  background: var(--surface-raised);
-  border: 0.5px solid var(--border-default);
-  box-shadow: var(--shadow-md);
-}
-.ui-dock--top-right { top: 16px; bottom: auto; }
-.ui-dock .ui-segmented { background: transparent; border-color: transparent; padding: 0; }
-.ui-dock__sep { width: 1px; height: 14px; background: var(--border-default); }
-.ui-dock-btn {
-  appearance: none; border: 0; margin: 0;
-  display: inline-flex; align-items: center; gap: 4px;
-  height: 24px; padding: 0 10px;
-  border-radius: var(--radius-pill);
-  background: transparent; color: var(--text-secondary);
-  font-family: var(--font-sans); font-size: 11px; font-weight: 600; white-space: nowrap;
-  cursor: pointer;
-  transition: background-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
-}
-.ui-dock-btn:hover { background: var(--surface-hover); color: var(--text-primary); }
-.ui-dock-btn.is-on { background: var(--surface-inverse); color: var(--text-inverse); }
-.ui-dock-btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; border-radius: var(--radius-pill); }
+/* thin vertical rule between inline groups (the old floating dock is gone —
+ * theme lives in 设置, privacy in the app shell's nav) */
+.ui-vsep { flex: none; width: 1px; height: 14px; background: var(--border-default); }
 
 /* spacing utilities — last so they beat component margins */
 .ui-mt-2 { margin-top: var(--space-2); }

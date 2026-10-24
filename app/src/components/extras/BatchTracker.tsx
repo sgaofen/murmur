@@ -173,7 +173,8 @@ export function BatchStatusPill({ onOpenReports }: { onOpenReports: () => void }
 
   return (
     <div style={{
-      position: 'fixed', left: 18, bottom: 18, zIndex: 9998,
+      // Bottom-left of the content area, clear of the app shell's nav.
+      position: 'fixed', left: 'calc(var(--shell-left, 0px) + 18px)', bottom: 18, zIndex: 9998,
       width: 300, padding: '11px 12px',
       background: 'var(--et-paper)',
       border: '0.5px solid var(--et-line-2)',

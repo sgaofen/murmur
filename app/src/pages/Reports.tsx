@@ -6,7 +6,7 @@ import { mdToHtml, MURMUR_MD_CSS } from '../utils/markdown';
 import { useBatchTracker } from '../components/extras/BatchTracker';
 import { maskText } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
-import { ProfileSwitcher } from '../components/ProfileSwitcher';
+import { PageHeader } from '../shell/PageHeader';
 
 interface Props {
   onBack: () => void;
@@ -218,21 +218,14 @@ ${sections}
   const extraAgents = agents.filter(a => a.cli !== 'claude' && a.cli !== 'codex');
 
   return (
-    <div style={{ position: 'fixed', inset: 0, display: 'flex',
+    <div className="app-fill" style={{ display: 'flex',
       background: 'var(--et-bg)', overflow: 'hidden' }}>
+      <PageHeader title="AI 关系档案"
+        subtitle={`朋友档案 ${list.friends.length} 份 · 关系档案 ${list.pairs.length} 份`} />
       {/* Sidebar */}
       <div style={{ width: 320, borderRight: '0.5px solid var(--et-line-2)',
         display: 'flex', flexDirection: 'column', background: 'var(--et-paper)' }}>
-        <div style={{ padding: '14px 18px', borderBottom: '0.5px solid var(--et-line)',
-          display: 'flex', alignItems: 'center', gap: 10 }}>
-          <button onClick={onBack} style={{ all: 'unset', cursor: 'pointer',
-            fontSize: 13, color: 'var(--et-mute)' }}>← 返回</button>
-          <ProfileSwitcher />
-          <span style={{ fontFamily: 'var(--et-serif)', fontSize: 16, fontWeight: 600, color: 'var(--et-ink)' }}>
-            AI 关系档案
-          </span>
-        </div>
-        <div style={{ padding: '8px 14px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <div style={{ padding: '12px 14px 8px', display: 'flex', flexDirection: 'column', gap: 6 }}>
           <input
             placeholder="筛选..."
             value={filter}
@@ -251,8 +244,11 @@ ${sections}
           }}>📦 导出全套 HTML</button>
           <button onClick={() => setBatchOpen(o => !o)} style={{
             all: 'unset', cursor: 'pointer', padding: '7px 12px', borderRadius: 8,
-            background: batchRunning ? 'var(--et-orange-2)' : 'var(--et-ink)',
-            color: '#fff', fontSize: 12, fontWeight: 600, textAlign: 'center',
+            // --et-ink turns cream in dark mode; pair the inverse surface with
+            // its own text token so the label stays readable in both themes.
+            background: batchRunning ? 'var(--et-orange-2)' : 'var(--surface-inverse)',
+            color: batchRunning ? 'var(--text-on-accent)' : 'var(--text-inverse)',
+            fontSize: 12, fontWeight: 600, textAlign: 'center',
           }}>🤖 批量分析{batchRunning ? ' (跑着)' : ''}</button>
           {batchOpen && (
             <div style={{

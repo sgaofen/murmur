@@ -6,7 +6,8 @@
 // phrases, lost friend. Reads from /api/annual-report.
 
 import { useEffect, useState } from 'react';
-import { ProfileSwitcher } from '../components/ProfileSwitcher';
+import { PageHeader } from '../shell/PageHeader';
+import { SegmentedControl } from '../ui';
 import { Postmark } from '../components/Postmark';
 import { Ribbon } from '../components/Ribbon';
 import {
@@ -17,11 +18,12 @@ import { displayName, maskText } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
 
 interface Props {
+  /** Unused since the app shell's nav replaced the page's own ← 返回. */
   onBack: () => void;
   onOpenFriend?: (wxid: string) => void;
 }
 
-export function AnnualReportPage({ onBack, onOpenFriend }: Props) {
+export function AnnualReportPage({ onOpenFriend }: Props) {
   void usePrivacy();
   const [years, setYears] = useState<number[]>([]);
   const [year, setYear] = useState<number | null>(null);
@@ -54,18 +56,10 @@ export function AnnualReportPage({ onBack, onOpenFriend }: Props) {
   }, [year]);
 
   return (
-    <div className="et-root" style={{ background: 'var(--et-bg)', minHeight: '100vh' }}>
-      <div style={{
-        padding: '14px 28px', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        borderBottom: '0.5px solid var(--et-line)',
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-          <button onClick={onBack} style={{ all: 'unset', cursor: 'pointer', color: 'var(--et-mute)', fontSize: 13 }}>← 返回</button>
-          <ProfileSwitcher />
-        </div>
-        <div className="et-serif" style={{ fontSize: 14, color: 'var(--et-mute)' }}>年度总览 · 你的所有朋友 + 所有聊天</div>
+    <div className="et-root" style={{ background: 'var(--et-bg)', minHeight: 'var(--shell-vh, 100vh)' }}>
+      <PageHeader title="年度总览" subtitle="你的所有朋友 + 所有聊天">
         <YearSwitcher years={years} value={year} onChange={setYear} />
-      </div>
+      </PageHeader>
 
       {loading && (
         <div style={{ padding: 60, textAlign: 'center' }}>
@@ -98,20 +92,16 @@ function YearSwitcher({ years, value, onChange }: {
   if (!years.length) {
     return <span className="et-meta" style={{ fontSize: 11 }}>无可用年份</span>;
   }
+  // Same control as the graph page's "显示 top" picker, so the shell top bar
+  // reads as one system.
   return (
-    <div style={{ display: 'flex', gap: 4 }}>
-      {years.map(y => (
-        <button key={y} onClick={() => onChange(y)} style={{
-          all: 'unset', cursor: 'pointer',
-          padding: '4px 10px', borderRadius: 6,
-          background: value === y ? 'var(--et-orange)' : 'transparent',
-          color: value === y ? '#fff' : 'var(--et-ink-soft)',
-          border: `0.5px solid ${value === y ? 'var(--et-orange)' : 'var(--et-line-2)'}`,
-          fontSize: 12, fontWeight: 600,
-          fontFamily: 'var(--et-mono)',
-        }}>{y}</button>
-      ))}
-    </div>
+    <SegmentedControl
+      label="选择年份"
+      size="sm"
+      value={value === null ? '' : String(value)}
+      onChange={(v) => onChange(Number(v))}
+      options={years.map(y => ({ value: String(y), label: String(y) }))}
+    />
   );
 }
 

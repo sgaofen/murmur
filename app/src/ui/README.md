@@ -29,7 +29,7 @@ import { IconKey } from '../ui/icons';
 - **border**：`--border-subtle` / `--border-default` / `--border-strong`，焦点环 `--focus-ring`
 - **accent**（珊瑚橙品牌色）：`--accent`（图标/细线）、`--accent-strong`、`--accent-text`（小字号文字，已保证对比度）、`--accent-solid` / `--accent-solid-hover`（实心按钮底）、`--accent-soft`（浅底）、`--accent-border`
 - **状态色**：`--{success|warning|danger|info}-{bg|fg|border|solid}`，`-bg` 做底、`-fg` 做字和图标、`-border` 做描边、`-solid` 做实心元素（`--danger-solid-hover` 用于危险按钮悬停）
-- **其他**：`--shadow-sm/md/lg/accent`、`--skeleton-base/shine`、`--radius-xs/sm/md/lg/xl/pill`、`--space-1..9`（4/8/12/16/24/32/48/64/96px）、`--font-serif/sans/mono`、`--ease-out`、`--dur-fast/base`、`--z-dialog`、`--z-dock`
+- **其他**：`--shadow-sm/md/lg/accent`、`--skeleton-base/shine`、`--radius-xs/sm/md/lg/xl/pill`、`--space-1..9`（4/8/12/16/24/32/48/64/96px）、`--font-serif/sans/mono`、`--ease-out`、`--dur-fast/base`、`--z-dialog`（外壳自己的层级见第 7 节）
 
 ### 规则
 
@@ -57,7 +57,7 @@ const { mode, resolved, setMode, toggle } = useTheme();
 - `ThemeProvider` 监听 `prefers-color-scheme` 变化（选「跟随系统」时实时生效）和 `storage` 事件（多窗口同步）。
 - `useTheme()` 必须在 `ThemeProvider` 里调用，否则会抛错。
 - 非 React 代码可以直接用 `setThemeMode(mode)`；`resolveTheme(mode, systemDark)` 是纯函数。
-- `<ThemeSwitcher compact />`：浅色/深色/跟随系统三段切换。现在临时放在右下角隐私按钮旁边的浮动坞里，**UI-2 会挪到设置页**。
+- `<ThemeSwitcher />`：浅色/深色/跟随系统三段切换，放在「设置 → 外观」（`#settings`）。UI-1 时右下角的临时浮动坞已删除。关系网顶栏的月亮/太阳按钮调用的是同一个 `toggle()`。
 - 深色作用在 `<html class="et-dark">` 上，所以页面里**不需要**再传 `dark` prop 或手动加 `.et-dark`。
 
 ---
@@ -238,7 +238,7 @@ const steps = [
 
 ### 图标 / 工具
 
-- `../ui/icons`：`IconSun` `IconMoon` `IconSystem` `IconInfoCircle` `IconCheckCircle` `IconWarning` `IconAlertCircle` `IconClose` `IconCheck` `IconRefresh` `IconCopy` `IconInbox` `IconKey` `IconSparkle`。24 网格、1.5 描边、`currentColor`、默认 `aria-hidden`，都接受 `size`
+- `../ui/icons`：`IconSun` `IconMoon` `IconSystem` `IconInfoCircle` `IconCheckCircle` `IconWarning` `IconAlertCircle` `IconClose` `IconCheck` `IconRefresh` `IconCopy` `IconInbox` `IconKey` `IconSparkle`；外壳用到的 `IconHome` `IconNetwork` `IconCalendar` `IconReport` `IconTable` `IconSearch` `IconSettings` `IconEye` `IconEyeOff` `IconChevronLeft` `IconChevronsUpDown` `IconSidebarCollapse` `IconSidebarExpand` `IconFolder` `IconPlay` `IconPause` `IconPlus`。24 网格、1.5 描边、`currentColor`、默认 `aria-hidden`，都接受 `size`
 - `copyText(text)`：优先 `navigator.clipboard`，失败回退到 `execCommand('copy')`
 - `cx(...classes)`：拼 className，忽略假值
 
@@ -253,6 +253,7 @@ const steps = [
 | `.ui-row` | 横向 flex，居中对齐，间距 8px，可换行 |
 | `.ui-mt-2/3/4`、`.ui-mb-2/3/4` | 上/下外边距 8/12/16px（写在 `ui.css` 末尾，能覆盖组件自带的 margin） |
 | `.ui-eyebrow` / `.ui-eyebrow--accent` | 小号大写眉题 |
+| `.ui-vsep` | 行内竖分隔线（14px 高） |
 
 ---
 
@@ -270,3 +271,22 @@ const steps = [
 2. 在 `index.ts` 导出组件和 props 类型。
 3. 在 `pages/UiGallery.tsx` 加一个演示分区，并在浅色、深色、390px 宽度下各看一眼。
 4. 更新本文件。
+
+---
+
+## 7. 应用外壳（`src/shell/`）
+
+除了 `#ui-gallery` 和启动加载页，所有页面都包在 `<AppShell>` 里：左侧导航栏 + 顶栏 + 内容区，整页滚动（`document` 滚，不是内容区自己滚）。
+
+- **顶栏**：页面用 `<PageHeader>` 声明自己的标题，它会通过 portal 渲染进外壳顶栏。页面特有的按钮作为 children 传进去，放在右侧。
+  ```tsx
+  <PageHeader title="年度总览" subtitle="你的所有朋友 + 所有聊天">
+    <YearSwitcher … />
+  </PageHeader>
+  <PageHeader back={{ label: '首页', onClick: onBack }} title={`和 ${name} 的故事`} />
+  ```
+  页面还没渲染 `PageHeader`（加载中、报错）时，顶栏显示 `App.tsx` 里 `shellFor()` 给的默认标题。按钮放不下时在顶栏里横向滚动，不会撑宽页面。
+- **左侧栏**：首页 / 关系网 / 年度 / 报告 / 离线证据表 / 搜索，底部是账号切换、隐私模式、设置和收起按钮。窗口宽度 < 900px 时自动收成 64px 图标栏；更宽时可以手动收起，记在 `localStorage['murmur.nav.collapsed']`。
+- **铺满内容区的页面**（关系网、报告）：根节点加 `className="app-fill"`，它会 `position: fixed` 填满顶栏以下、侧栏右侧的区域。
+- **CSS 变量**（定义在 `.app-shell` 上）：`--shell-left`（内容区左边缘，侧栏宽度）、`--shell-top`（顶栏高度 56px）、`--shell-vh`（内容区可见高度）。页面里 `position: fixed` 的东西用它们避开侧栏和顶栏，例如 `left: 'var(--shell-left, 0px)'`；整屏高度的占位用 `minHeight: 'var(--shell-vh, 100vh)'`。
+- **层级**：页面内容 < 顶栏 `--z-topbar`(30) < 侧栏 `--z-nav`(40) < `.app-fill`(45) < 页面自己的浮层/对话框。侧栏里的账号弹层 portal 到 `body`，z-index 300。

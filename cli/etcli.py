@@ -4590,6 +4590,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     "data_dir": None,
                     "self_wxid": None,
                     "version": APP_VERSION,
+                    "export_dir": str(self.export_dir),
                     "bootstrap": True,
                     "needs_onboarding": True,
                     "reason": diagnose_hint,
@@ -4609,6 +4610,8 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 "platform": self.__class__._active_platform,
                 "active_id": self.__class__._active_id,
                 "version": APP_VERSION,
+                # Where AI packs / chat exports land (设置 → 数据与目录 shows it).
+                "export_dir": str(self.export_dir),
             })
 
         if path == "/api/profiles":

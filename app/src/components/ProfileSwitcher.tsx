@@ -1,29 +1,80 @@
-/* ProfileSwitcher — collapsed pill + dropdown popover for switching the
- * active platform/account. Uses Murmur's real `app/src/tokens.css` palette
+/* ProfileSwitcher — trigger + popover for switching the active
+ * platform/account. Uses Murmur's real `app/src/tokens.css` palette
  * (cream paper + ink-blue + warm coral); QQ pages reuse `--et-sky` so the
  * magazine tone stays consistent.
  *
- * Mounts in every chrome bar (Home / Friend / Graph / Reports / Yearbook /
- * OfflineSignalsTable). The backend swaps `_MurmurAPIHandler.store` to a
- * QQStore when the user picks a QQ row, so every page that renders after
- * the reload reads QQ data through the same `EchoStore`-shape interface.
+ * Two looks: `variant="sidebar"` is the account row at the bottom of the app
+ * shell's left nav (icon-only when the nav is collapsed); the default `chip`
+ * is the compact pill the pages' own top bars used before the shell existed.
+ * The popover is portaled to <body> so it is never clipped or covered by the
+ * nav / page stacking contexts.
+ *
+ * The backend swaps `_MurmurAPIHandler.store` to a QQStore when the user
+ * picks a QQ row, so every page that renders after the reload reads QQ data
+ * through the same `EchoStore`-shape interface.
  */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { supportsQQOnboarding, switchActiveProfile, useProfiles } from '../utils/activeProfile';
 import { usePrivacy } from '../utils/usePrivacy';
 import type { ProfileEntry } from '../data/api';
+import { Skeleton, cx } from '../ui';
+import { IconChevronsUpDown, IconPlus } from '../ui/icons';
 
-/** Global signal so any ProfileSwitcher (mounted on any chrome bar) can ask
- * the App-level state to open the right onboarding dialog without prop drilling.
+/** Global signal so any ProfileSwitcher can ask the App-level state to open
+ * the right onboarding dialog without prop drilling.
  * App.tsx listens for this and toggles setOnboarding / setQQOnboarding. */
 function requestOnboarding(platform: 'wechat' | 'qq') {
   window.dispatchEvent(new CustomEvent('murmur:requestOnboarding', { detail: { platform } }));
 }
 
-export function ProfileSwitcher() {
+type Placement = 'below' | 'above' | 'right';
+
+export function ProfileSwitcher({ variant = 'chip', collapsed = false }: {
+  variant?: 'chip' | 'sidebar';
+  /** Sidebar only: icon-only rail. */
+  collapsed?: boolean;
+} = {}) {
   const { profiles, active, loading, error } = useProfiles();
   const [open, setOpen] = useState(false);
   const anchorRef = useRef<HTMLDivElement>(null);
+  const placement: Placement = variant === 'chip' ? 'below' : collapsed ? 'right' : 'above';
+
+  if (variant === 'sidebar') {
+    if (loading && !profiles) {
+      return (
+        <div className="app-nav__item app-account" aria-busy="true" aria-label="正在读取账号">
+          <Skeleton width={28} height={28} circle />
+          <span className="app-nav__label"><Skeleton width="70%" height={11} /></span>
+        </div>
+      );
+    }
+    if (error || !profiles || profiles.length === 0) {
+      return (
+        <button type="button" className="app-nav__item" onClick={() => requestOnboarding('wechat')}
+          title={collapsed ? '添加账号' : undefined} aria-label={collapsed ? '添加账号' : undefined}>
+          <span className="app-nav__icon"><IconPlus size={18} /></span>
+          <span className="app-nav__label">添加账号</span>
+        </button>
+      );
+    }
+    const current = profiles.find(p => p.is_active) ?? profiles[0];
+    return (
+      <div ref={anchorRef} className="app-account-anchor">
+        <SidebarAccountButton profile={current} count={profiles.length} open={open}
+          collapsed={collapsed} onClick={() => setOpen(o => !o)} />
+        {open && (
+          <Popover
+            profiles={profiles}
+            activeId={active?.id ?? current.id}
+            onClose={() => setOpen(false)}
+            anchorRef={anchorRef}
+            placement={placement}
+          />
+        )}
+      </div>
+    );
+  }
 
   if (loading || error || !profiles || profiles.length === 0) {
     // Single-account installs (the common case before QQ is added) collapse to
@@ -53,9 +104,41 @@ export function ProfileSwitcher() {
           activeId={active?.id ?? activeProfile.id}
           onClose={() => setOpen(false)}
           anchorRef={anchorRef}
+          placement={placement}
         />
       )}
     </div>
+  );
+}
+
+// ---------- sidebar row (app shell) ----------
+
+function SidebarAccountButton({ profile, count, open, collapsed, onClick }: {
+  profile: ProfileEntry; count: number; open: boolean; collapsed: boolean; onClick: () => void;
+}) {
+  const privacyOn = usePrivacy();
+  const platformLabel = profile.platform === 'wechat' ? '微信' : 'QQ';
+  const display = privacyOn ? profile.display_id : displayPlain(profile);
+  const meta = count > 1 ? `${platformLabel} · 共 ${count} 个账号` : `${platformLabel} · 切换或添加`;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-expanded={open}
+      aria-haspopup="menu"
+      aria-label={`当前${platformLabel}账号 ${display}，点击切换`}
+      title={collapsed ? `${platformLabel}：${display} — 点击切换账号` : undefined}
+      className={cx('app-nav__item', 'app-account', open && 'is-open')}
+    >
+      <span className={cx('app-account__avatar', `app-account__avatar--${profile.platform}`)} aria-hidden="true">
+        {profile.platform === 'wechat' ? '💬' : '🐧'}
+      </span>
+      <span className="app-nav__label app-account__text">
+        <span className="app-account__name">{display}</span>
+        <span className="app-account__meta">{meta}</span>
+      </span>
+      <span className="app-nav__trail app-account__caret"><IconChevronsUpDown size={14} /></span>
+    </button>
   );
 }
 
@@ -121,18 +204,51 @@ function Caret({ open, color }: { open: boolean; color: string }) {
 
 // ---------- popover ----------
 
-function Popover({ profiles, activeId, onClose, anchorRef }: {
+/** Fixed-position coordinates for the portaled popover, next to its anchor. */
+function popoverPosition(anchor: DOMRect, placement: Placement): React.CSSProperties {
+  const gap = 8;
+  const margin = 8;
+  const maxLeft = Math.max(margin, window.innerWidth - POPOVER_WIDTH - margin);
+  if (placement === 'right') {
+    return {
+      left: Math.min(anchor.right + gap, maxLeft),
+      bottom: Math.max(margin, window.innerHeight - anchor.bottom),
+    };
+  }
+  const left = Math.min(Math.max(margin, anchor.left), maxLeft);
+  if (placement === 'above') return { left, bottom: window.innerHeight - anchor.top + gap };
+  return { left, top: anchor.bottom + gap };
+}
+
+function Popover({ profiles, activeId, onClose, anchorRef, placement }: {
   profiles: ProfileEntry[];
   activeId: string;
   onClose: () => void;
   anchorRef: React.RefObject<HTMLDivElement | null>;
+  placement: Placement;
 }) {
   const popRef = useRef<HTMLDivElement>(null);
   const [adding, setAdding] = useState(false);
   const [hoverId, setHoverId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [pos, setPos] = useState<React.CSSProperties | null>(null);
   const privacyOn = usePrivacy();
   const qqSupported = supportsQQOnboarding();
+
+  // Track the anchor while open (window resize, page scroll, nav collapse).
+  useLayoutEffect(() => {
+    const place = () => {
+      const el = anchorRef.current;
+      if (el) setPos(popoverPosition(el.getBoundingClientRect(), placement));
+    };
+    place();
+    window.addEventListener('resize', place);
+    window.addEventListener('scroll', place, true);
+    return () => {
+      window.removeEventListener('resize', place);
+      window.removeEventListener('scroll', place, true);
+    };
+  }, [anchorRef, placement]);
 
   useEffect(() => {
     const onDoc = (e: MouseEvent) => {
@@ -169,8 +285,8 @@ function Popover({ profiles, activeId, onClose, anchorRef }: {
     }
   };
 
-  return (
-    <div ref={popRef} role="menu" style={popoverShell}>
+  return createPortal(
+    <div ref={popRef} role="menu" style={{ ...popoverShell, ...pos, visibility: pos ? 'visible' : 'hidden' }}>
       <div style={popoverHeader}>
         <span className="et-eyebrow">你的账号</span>
         <span className="et-eyebrow" style={{ letterSpacing: '0.08em', color: 'var(--et-faint)', fontSize: 9 }}>
@@ -222,7 +338,8 @@ function Popover({ profiles, activeId, onClose, anchorRef }: {
           </div>
         )}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -382,9 +499,13 @@ const addOnlyChip: React.CSSProperties = {
   background: 'transparent', border: '0.5px solid var(--et-line-2)',
 };
 
+const POPOVER_WIDTH = 270;
+
+// Portaled to <body>; coordinates come from popoverPosition(). Sits above the
+// app shell (nav 40 / top bar 30 / full-bleed pages 45) but below dialogs.
 const popoverShell: React.CSSProperties = {
-  position: 'absolute', top: 'calc(100% + 8px)', left: 0, zIndex: 200,
-  width: 270, background: 'var(--et-paper)',
+  position: 'fixed', zIndex: 300,
+  width: POPOVER_WIDTH, maxWidth: 'calc(100vw - 16px)', background: 'var(--et-paper)',
   border: '0.5px solid var(--et-line-2)', borderRadius: 'var(--et-r)',
   boxShadow: 'var(--et-shadow-2)', overflow: 'hidden',
 };

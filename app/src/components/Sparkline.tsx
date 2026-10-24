@@ -15,7 +15,10 @@ export function Sparkline({ data, months = DEFAULT_MONTHS, w = 560, h = 72, colo
   const max = Math.max(...safeData, 0);
   const bw = w / Math.max(safeData.length, 1);
   return (
-    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} style={{ display: 'block' }}>
+    // `w` is the design width; the chart shrinks with its card (the app shell's
+    // nav leaves narrower content on small windows) instead of overflowing.
+    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`}
+      style={{ display: 'block', width: '100%', maxWidth: w, height: 'auto' }}>
       {safeData.map((v, i) => {
         const ratio = max > 0 ? v / max : 0;
         const bh = ratio * (h - 22);

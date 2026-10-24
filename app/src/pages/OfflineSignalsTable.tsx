@@ -3,7 +3,8 @@ import type { Friend } from '../data/types';
 import { getAllFriends, getFriend } from '../data/api';
 import { displayName, maskedWxid, maskText } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
-import { ProfileSwitcher } from '../components/ProfileSwitcher';
+import { PageHeader } from '../shell/PageHeader';
+import { Button } from '../ui';
 
 interface SignalRow {
   id: string;
@@ -27,11 +28,12 @@ interface SignalRow {
 const TIER_PRIORITY: Record<string, number> = { A: 1, B: 2, C: 3, D: 4, E: 5, '—': 99 };
 
 interface Props {
+  /** Unused since the app shell's nav replaced the page's own ← 返回. */
   onBack: () => void;
   onOpenFriend: (id: string) => void;
 }
 
-export function OfflineSignalsTable({ onBack, onOpenFriend }: Props) {
+export function OfflineSignalsTable({ onOpenFriend }: Props) {
   void usePrivacy();
   const [rows, setRows] = useState<SignalRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -129,41 +131,21 @@ export function OfflineSignalsTable({ onBack, onOpenFriend }: Props) {
   }
 
   return (
-    <div style={{ minHeight: '100vh', background: 'var(--et-bg)' }}>
-      {/* Top bar */}
-      <div style={{ padding: '14px 28px', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        borderBottom: '0.5px solid var(--et-line)' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-          <button onClick={onBack} style={{ all: 'unset', cursor: 'pointer',
-            color: 'var(--et-mute)', fontSize: 13 }}>← 返回</button>
-          <ProfileSwitcher />
-          <div className="et-serif" style={{ fontSize: 18, fontWeight: 600, color: 'var(--et-ink)' }}>
-            朋友信号矩阵 · 离线表格视图
-          </div>
-          <span className="et-meta" style={{ fontSize: 11 }}>
-            纯本地统计，无需 AI · 给不会用 agent 的人
-          </span>
-        </div>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <input
-            value={filter}
-            onChange={e => setFilter(e.target.value)}
-            placeholder="搜索名字 / wxid"
-            style={{
-              all: 'unset', padding: '6px 12px', borderRadius: 999,
-              border: '0.5px solid var(--et-line-2)', background: 'var(--et-paper)',
-              fontSize: 12, color: 'var(--et-ink)', minWidth: 200,
-            }}
-          />
-          <button onClick={exportCSV} disabled={!rows} style={{
-            all: 'unset', cursor: rows ? 'pointer' : 'not-allowed',
-            padding: '7px 14px', borderRadius: 8,
-            background: 'var(--et-orange)', color: '#fff',
-            fontSize: 12, fontWeight: 600,
-            opacity: rows ? 1 : 0.4,
-          }}>导出 CSV</button>
-        </div>
-      </div>
+    <div style={{ minHeight: 'var(--shell-vh, 100vh)', background: 'var(--et-bg)' }}>
+      <PageHeader title="离线证据表" subtitle="朋友信号矩阵 · 纯本地统计，无需 AI · 给不会用 agent 的人">
+        <input
+          value={filter}
+          onChange={e => setFilter(e.target.value)}
+          placeholder="搜索名字 / wxid"
+          aria-label="按名字或 wxid 筛选"
+          style={{
+            all: 'unset', padding: '6px 12px', borderRadius: 999,
+            border: '0.5px solid var(--et-line-2)', background: 'var(--et-paper)',
+            fontSize: 12, color: 'var(--et-ink)', minWidth: 200,
+          }}
+        />
+        <Button variant="primary" size="sm" onClick={exportCSV} disabled={!rows}>导出 CSV</Button>
+      </PageHeader>
 
       {!rows && (
         <div style={{ padding: 60, textAlign: 'center' }}>
