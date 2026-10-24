@@ -70,6 +70,16 @@ jobs:
         if: matrix.platform == 'macos'
         run: python -m pip install -r requirements-mac-keyextract.txt
 
+      # Compile the Frida-free / root-free capture dylib (universal arm64 +
+      # x86_64) so etcli.spec can bundle it (see cli/mac_private_copy.py).
+      - name: Build macOS private-copy capture dylib
+        if: matrix.platform == 'macos'
+        run: |
+          set -euo pipefail
+          sh cli/native/build_keycap.sh
+          file cli/native/murmur_keycap.dylib
+          test -f cli/native/murmur_keycap.dylib
+
       - name: Install frontend dependencies
         working-directory: app
         run: npm ci
@@ -138,6 +148,8 @@ jobs:
           # Live key capture subcommand must parse its forwarded args (needs "--")
           # and find the bundled frida.
           app/src-tauri/etcli/etcli hook-cc-key-frida -- --help >/dev/null
+          # Frida-free capture dylib must have been bundled (see etcli.spec).
+          test -f app/src-tauri/etcli/_internal/native/murmur_keycap.dylib
           app/src-tauri/etcli/etcli serve --port 19100 >/tmp/murmur-backend-smoke.log 2>&1 &
           pid=$!
           trap 'kill "$pid" 2>/dev/null || true' EXIT

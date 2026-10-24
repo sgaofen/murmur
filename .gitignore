@@ -28,6 +28,9 @@ cli/dist/
 # ===== Native binaries (committed via Git LFS or release) =====
 # (We DO ship the .dll because they're load-bearing and Tencent-DMCA-ed elsewhere)
 # But strip the user's local copies of the encrypted source dbs.
+# The macOS capture dylib is compiled from cli/native/murmur_keycap.c by
+# build_keycap.sh (locally / in release CI) — never commit the binary.
+cli/native/murmur_keycap.dylib
 
 # ===== IDE / OS =====
 .vscode/
