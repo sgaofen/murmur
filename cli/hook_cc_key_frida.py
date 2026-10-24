@@ -70,6 +70,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 
 PAGE_SIZE = 4096
@@ -80,7 +81,9 @@ HMAC_HASH_SIZE = 64
 RESERVE = 80
 
 OUT_PATH = os.path.expanduser("~/.murmur/decrypted_keys.json")
-LOG_PATH = "/tmp/murmur_cc_hook_frida.log"
+# Often run as root: never a fixed, predictable /tmp name (symlink attacks).
+# App-driven runs pass --log inside their private temp dir.
+LOG_PATH = os.path.join(tempfile.gettempdir(), f"murmur_cc_hook_frida-{os.getuid() if hasattr(os, 'getuid') else 0}.log")
 
 EXIT_OK = 0
 EXIT_FAIL = 1
@@ -132,11 +135,29 @@ send({type: "ready"});
 """
 
 
+def _open_log(path, truncate=False):
+    """Open the log without following symlinks, and only if it's a plain file
+    we own with a single link — refuse anything an attacker could have
+    pre-planted at that path."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+    if truncate:
+        flags |= os.O_TRUNC
+    fd = os.open(path, flags, 0o600)
+    try:
+        st = os.fstat(fd)
+        if hasattr(os, "getuid") and (st.st_uid != os.getuid() or st.st_nlink != 1):
+            raise OSError("refusing to write log: not our own regular file")
+    except OSError:
+        os.close(fd)
+        raise
+    return os.fdopen(fd, "a")
+
+
 def log(msg):
     line = f"[{time.strftime('%H:%M:%S')}] {msg}"
     print(line, flush=True)
     try:
-        with open(LOG_PATH, "a") as f:
+        with _open_log(LOG_PATH) as f:
             f.write(line + "\n")
     except OSError:
         pass
@@ -204,14 +225,15 @@ def load_pages_file(path):
     return pages, raw.get("__wxid__")
 
 
-def _write_json_atomic(path, payload):
-    tmp = f"{path}.tmp-{os.getpid()}"
-    with open(tmp, "w", encoding="utf-8") as f:
+def _write_json_atomic(path, payload, mode=0o644):
+    tmp = f"{path}.tmp-{os.getpid()}-{os.urandom(4).hex()}"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), mode)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False)
-    # Written by root in app-driven mode; the (non-root) backend must still
-    # be able to read it.
+    # 0644 by default: written by root in app-driven mode, the (non-root)
+    # backend must still be able to read it. Key files use 0600.
     try:
-        os.chmod(tmp, 0o644)
+        os.chmod(tmp, mode)
     except OSError:
         pass
     os.replace(tmp, path)
@@ -248,25 +270,36 @@ class Capture:
             return
         if not self.matched:
             return
-        payload = {
-            "wxid": self.wxid,
+        # Merge into whatever is there (keys from the memory scan, earlier
+        # rounds, keys_by_salt) instead of overwriting the file.
+        payload = {}
+        try:
+            with open(OUT_PATH, encoding="utf-8") as f:
+                payload = json.load(f)
+            if not isinstance(payload, dict):
+                payload = {}
+        except (OSError, ValueError):
+            payload = {}
+        by_db = dict(payload.get("keys_by_db") or {})
+        by_db.update(self.matched)
+        payload.update({
+            "wxid": self.wxid or payload.get("wxid"),
             "extracted_at": int(time.time()),
-            "keys_by_db": self.matched,
-            "keys_by_salt": {},
-        }
+            "keys_by_db": by_db,
+            "keys_by_salt": dict(payload.get("keys_by_salt") or {}),
+        })
         os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)
         try:
-            with open(OUT_PATH, "w") as f:
-                json.dump(payload, f, indent=2)
-            # Whoever writes it first (root via sudo, or a plain user) shouldn't
-            # lock the other out of writing next time — this exact mismatch
-            # (root-owned file from a sudo run, then a later non-sudo run can't
-            # save) already ate 6 freshly-captured keys once.
-            try:
-                os.chmod(OUT_PATH, 0o666)
-            except OSError:
-                pass
-            log(f"wrote {len(self.matched)} keys -> {OUT_PATH}")
+            _write_json_atomic(OUT_PATH, payload, mode=0o600)
+            # Run via sudo: hand the file back to the real user so a later
+            # non-sudo run (or the App) can still read and update it.
+            sudo_uid = os.environ.get("SUDO_UID")
+            if sudo_uid and hasattr(os, "geteuid") and os.geteuid() == 0:
+                try:
+                    os.chown(OUT_PATH, int(sudo_uid), int(os.environ.get("SUDO_GID", "-1")))
+                except (OSError, ValueError):
+                    pass
+            log(f"wrote {len(by_db)} keys -> {OUT_PATH}")
         except OSError as e:
             # Never let a save failure lose in-memory progress: fall back to a
             # path we know we can write, and keep going.
@@ -274,8 +307,7 @@ class Capture:
             log(f"WARNING: could not write {OUT_PATH} ({e}) — writing {fallback} instead. "
                 f"Fix perms (e.g. `sudo chown {os.environ.get('USER', '$USER')} {OUT_PATH}`) and merge it in by hand if this keeps happening.")
             try:
-                with open(fallback, "w") as f:
-                    json.dump(payload, f, indent=2)
+                _write_json_atomic(fallback, payload, mode=0o600)
             except OSError as e2:
                 log(f"fallback write ALSO failed ({e2}) — keys are only in this process's memory now: {self.matched}")
 
@@ -347,6 +379,27 @@ def _is_attach_denied(exc):
             or "task_for_pid" in msg or "not permitted" in msg)
 
 
+def should_stop(stop_file=None, parent_pid=None):
+    """True once the backend asked us to stop: the stop file exists, its
+    directory is gone (backend cleaned up — it will never write the file
+    now), or the backend process itself is gone."""
+    if stop_file:
+        if os.path.exists(stop_file):
+            return True
+        if not os.path.isdir(os.path.dirname(os.path.abspath(stop_file))):
+            return True
+    if parent_pid:
+        try:
+            os.kill(parent_pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            pass  # exists, just not ours to signal
+        except OSError:
+            pass
+    return False
+
+
 def find_wechat_pid():
     pid_raw = subprocess.run(["pgrep", "-x", "WeChat"], capture_output=True,
                              text=True).stdout.strip().split("\n")[0]
@@ -354,7 +407,7 @@ def find_wechat_pid():
 
 
 def run_capture(cap, pid, attach=None, stop_file=None, sleep=time.sleep,
-                clock=time.time, stop_when_complete=True):
+                clock=time.time, stop_when_complete=True, parent_pid=None):
     """Attach to `pid`, stream candidates into `cap` for `cap.seconds`.
 
     `attach(pid) -> (session, script)` is injectable for tests; the default
@@ -362,6 +415,11 @@ def run_capture(cap, pid, attach=None, stop_file=None, sleep=time.sleep,
     """
     if attach is None:
         attach = _frida_attach
+    if should_stop(stop_file, parent_pid):
+        cap.phase = "done"
+        cap.write_progress()
+        log("stop requested before attaching — exiting")
+        return EXIT_OK
     cap.phase = "attaching"
     cap.write_progress()
     log(f"attaching to pid {pid} via frida")
@@ -392,7 +450,7 @@ def run_capture(cap, pid, attach=None, stop_file=None, sleep=time.sleep,
             if stop_when_complete and not cap.pending:
                 reason = "complete"
                 break
-            if stop_file and os.path.exists(stop_file):
+            if should_stop(stop_file, parent_pid):
                 reason = "stopped"
                 break
             sleep(0.5)
@@ -434,10 +492,15 @@ def main(argv=None):
     p.add_argument("--out-keys", default=None, help="write only newly matched keys here instead of ~/.murmur")
     p.add_argument("--progress", default=None, help="rewrite a JSON progress snapshot here while running")
     p.add_argument("--stop-file", default=None, help="stop early once this path exists")
+    p.add_argument("--parent-pid", type=int, default=None, help="exit if this process (the backend) goes away")
+    p.add_argument("--log", default=None, help="log file (default: per-user file in the temp dir)")
     args = p.parse_args(argv)
 
+    global LOG_PATH
+    if args.log:
+        LOG_PATH = args.log
     try:
-        open(LOG_PATH, "w").close()
+        _open_log(LOG_PATH, truncate=True).close()
     except OSError:
         pass
     log("hook_cc_key_frida starting")
@@ -485,7 +548,7 @@ def main(argv=None):
         pid = args.pid
 
     return run_capture(cap, pid, stop_file=args.stop_file,
-                       stop_when_complete=args.pid is None)
+                       stop_when_complete=args.pid is None, parent_pid=args.parent_pid)
 
 
 if __name__ == "__main__":

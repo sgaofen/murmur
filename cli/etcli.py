@@ -5714,7 +5714,10 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     "total_dbs": len(salt_map),
                     # WeChat 4.1.9+ often keeps no key in memory at all — the UI
                     # switches to live capture (hook_cc_key_frida) when this is set.
-                    "suggest_live": mac_keys_count < len(salt_map),
+                    # Only when the scan really ran: a cancelled password dialog,
+                    # a task_for_pid denial (not re-signed) etc. must show the
+                    # real reason instead.
+                    "suggest_live": _live_key.scan_suggests_live(stdout, mac_keys_count, len(salt_map)),
                     "ms": ms,
                     "log": stdout[-3000:] or "(no output)",
                 })

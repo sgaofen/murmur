@@ -222,8 +222,9 @@ class FakeProc:
     """Stands in for the hook_cc_key_frida subprocess: writes progress and
     new keys like the real script would, then exits with `rc`."""
 
-    def __init__(self, argv, rc, keys, **kw):
+    def __init__(self, argv, rc, keys, progress=None, **kw):
         self.argv = argv
+        self.killed = False
         self.returncode = None
         self._rc = rc
         self.stdout = None
@@ -237,13 +238,19 @@ class FakeProc:
             out.write_text(json.dumps({"keys_by_db": keys}))
             prog.write_text(json.dumps({"phase": "done", "new": sorted(keys), "hits": 7,
                                         "remaining": 0}))
+        if progress is not None:
+            Path(args[args.index("--progress") + 1]).write_text(json.dumps(progress))
 
     def poll(self):
         self.returncode = self._rc
         return self.returncode
 
     def kill(self):
+        self.killed = True
         self._rc = -9
+
+    def wait(self, timeout=None):
+        return self.poll()
 
 
 class LiveKeyJobTest(unittest.TestCase):
@@ -264,12 +271,12 @@ class LiveKeyJobTest(unittest.TestCase):
         self.pages_seen = []
 
         def popen(argv, **kw):
-            rc, keys = self.plan[len(self.calls)]
+            rc, keys, *rest = self.plan[len(self.calls)]
             self.calls.append(argv)
             if "--pages" in argv:
                 pages = json.loads(Path(argv[argv.index("--pages") + 1]).read_text())
                 self.pages_seen.append(sorted(pages["pages"]))
-            return FakeProc(argv, rc, keys, **kw)
+            return FakeProc(argv, rc, keys, progress=rest[0] if rest else None, **kw)
 
         self.job = live_key.LiveKeyJob(
             popen=popen,
@@ -362,3 +369,207 @@ class LiveKeyJobTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReviewFixesTest(unittest.TestCase):
+    """Regressions from the #28 review."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.d = Path(self.tmp.name)
+        patcher = mock.patch.object(hck, "LOG_PATH", str(self.d / "log.txt"))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    # 1. frozen etcli needs "--" before the forwarded args
+    def test_frozen_runner_argv_has_separator(self):
+        with mock.patch.object(live_key, "is_frozen", return_value=True):
+            argv = live_key._runner_argv(self.d, "--seconds", "15")
+        self.assertEqual(argv[1:], ["hook-cc-key-frida", "--", "--seconds", "15"])
+
+    def test_etcli_forwards_args_to_hook_script(self):
+        import etcli
+        with mock.patch.object(hck, "main", return_value=0) as m:
+            rc = etcli.main(["hook-cc-key-frida", "--", "--seconds", "15", "--pid", "1"])
+        self.assertEqual(rc, 0)
+        m.assert_called_once_with(["--seconds", "15", "--pid", "1"])
+
+    # 2. stop file / vanished temp dir / dead parent end the child
+    def test_should_stop_signals(self):
+        stop = self.d / "job" / "stop"
+        stop.parent.mkdir()
+        self.assertFalse(hck.should_stop(str(stop), os.getpid()))
+        stop.write_text("x")
+        self.assertTrue(hck.should_stop(str(stop)))
+        stop.unlink()
+        stop.parent.rmdir()
+        self.assertTrue(hck.should_stop(str(stop)))   # backend cleaned up
+        with mock.patch.object(hck.os, "kill", side_effect=ProcessLookupError):
+            self.assertTrue(hck.should_stop(None, 999999))
+
+    def test_stop_requested_before_attach_never_attaches(self):
+        stop = self.d / "stop"
+        stop.write_text("x")
+        cap = hck.Capture({"a.db": make_page1(os.urandom(32), os.urandom(16))}, seconds=5)
+        attach = mock.Mock()
+        self.assertEqual(hck.run_capture(cap, 1, attach=attach, stop_file=str(stop)), hck.EXIT_OK)
+        attach.assert_not_called()
+
+    def test_main_accepts_parent_pid_and_log(self):
+        pages = self.d / "pages.json"
+        pages.write_text(json.dumps({"pages": {}}))
+        log = self.d / "cap.log"
+        with mock.patch.object(hck, "find_wechat_pid", return_value=None):
+            rc = hck.main(["--pages", str(pages), "--parent-pid", str(os.getpid()),
+                           "--log", str(log), "--progress", str(self.d / "p.json")])
+        self.assertEqual(rc, hck.EXIT_FAIL)      # nothing to capture → no-dbs
+        self.assertEqual(json.loads((self.d / "p.json").read_text())["error"], "no-dbs")
+        self.assertTrue(log.exists())
+
+    # 6. log never follows a planted symlink
+    @unittest.skipUnless(hasattr(os, "symlink") and os.name == "posix", "POSIX only")
+    def test_log_refuses_symlink(self):
+        target = self.d / "victim"
+        target.write_text("keep")
+        link = self.d / "log.txt"
+        os.symlink(target, link)
+        with self.assertRaises(OSError):
+            hck._open_log(str(link))
+        hck.log("hello")            # must not raise, must not touch the victim
+        self.assertEqual(target.read_text(), "keep")
+
+    # CLI mode merges instead of overwriting, and keeps the file private
+    def test_cli_save_merges_and_is_private(self):
+        out = self.d / "keys.json"
+        out.write_text(json.dumps({"keys_by_db": {"old.db": "aa"}, "keys_by_salt": {"s": "aa"}}))
+        cap = hck.Capture({}, seconds=1, already={"new.db": "bb"})
+        with mock.patch.object(hck, "OUT_PATH", str(out)):
+            cap.save()
+        d = json.loads(out.read_text())
+        self.assertEqual(d["keys_by_db"], {"old.db": "aa", "new.db": "bb"})
+        self.assertEqual(d["keys_by_salt"], {"s": "aa"})
+        if os.name == "posix":
+            self.assertEqual(out.stat().st_mode & 0o777, 0o600)
+
+    # 7. concurrent merges don't lose keys; file is 0600
+    def test_concurrent_merge_keeps_everything(self):
+        import threading
+        path = self.d / "decrypted_keys.json"
+        ts = [threading.Thread(target=live_key.merge_keys, args=({f"db{i}.db": f"{i:02x}"}, {}, None, path))
+              for i in range(20)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        self.assertEqual(len(json.loads(path.read_text())["keys_by_db"]), 20)
+        if os.name == "posix":
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    # 9. only a scan that really ran and came up short hands over to live capture
+    def test_scan_suggests_live(self):
+        f = live_key.scan_suggests_live
+        self.assertTrue(f("[ERR] no key matched any DB salt.", 0, 10))
+        self.assertTrue(f("0:120: execution error: [info] scanning (4)", 0, 10))
+        self.assertFalse(f("0:120: execution error: User canceled. (-128)", 0, 10))
+        self.assertFalse(f("0:99: execution error: [ERR] task_for_pid denied. (3)", 0, 10))
+        self.assertFalse(f("[ERR] task_for_pid denied.", 0, 10))
+        self.assertFalse(f("[ERR] no WeChat process found — start WeChat", 0, 10))
+        self.assertTrue(f("[OK] matched 3 of 10 encrypted DBs", 3, 10))
+        self.assertFalse(f("[OK] matched 10 of 10 encrypted DBs", 10, 10))
+
+
+class JobReviewFixesTest(LiveKeyJobTest):
+    """Job-level regressions from the #28 review (reuses LiveKeyJobTest's fixtures)."""
+
+    # 3. two concurrent starts → one capture
+    def test_concurrent_start_claims_once(self):
+        import threading
+        gate = threading.Event()
+        orig = self.job._salts
+
+        def slow_salts(p):
+            gate.wait(2)
+            return orig(p)
+
+        self.job._salts = slow_salts
+        self.plan = [(0, {})]
+        results = []
+        ts = [threading.Thread(target=lambda: results.append(self.job.start(60))) for _ in range(2)]
+        for t in ts:
+            t.start()
+        gate.set()
+        for t in ts:
+            t.join()
+        self._wait()
+        self.assertEqual(sum(1 for r in results if r.get("already_running")), 1)
+        self.assertEqual(len(self.calls), 1)
+
+    # 5. the child's own error code reaches the UI
+    def test_child_error_is_passed_through(self):
+        self.plan = [(1, {}, {"phase": "error", "error": "wechat-not-running", "new": []})]
+        self.job.start(60)
+        st = self._wait()
+        self.assertEqual(st["phase"], "error")
+        self.assertEqual(st["error"], "wechat-not-running")
+
+    # 8. keys from the child are re-verified against page 1
+    def test_unverifiable_key_from_child_is_dropped(self):
+        self.plan = [(0, {"session/session.db": "00" * 32, "message/message_0.db": self.k2.hex()})]
+        self.job.start(60)
+        st = self._wait()
+        saved = json.loads(self.keys_file.read_text())["keys_by_db"]
+        self.assertEqual(saved, {"message/message_0.db": self.k2.hex()})
+        self.assertEqual(st["new"], ["message/message_0.db"])
+
+    # 2. cancel while elevated: never kill osascript once the root child runs
+    def test_cancel_elevated_after_child_started_does_not_kill(self):
+        proc = FakeProc(["x"], None, {})
+        stop = self.d / "job" / "stop"
+        stop.parent.mkdir()
+        (stop.parent / "progress.json").write_text("{}")
+        self.job._proc, self.job._proc_elevated, self.job._stop_file = proc, True, stop
+        self.job.cancel()
+        self.assertFalse(proc.killed)
+        self.assertTrue(stop.exists())
+
+    def test_cancel_elevated_while_password_dialog_up_kills_osascript(self):
+        proc = FakeProc(["x"], None, {})
+        stop = self.d / "job" / "stop"
+        stop.parent.mkdir()
+        self.job._proc, self.job._proc_elevated, self.job._stop_file = proc, True, stop
+        self.job.cancel()
+        self.assertTrue(proc.killed)
+        self.assertTrue(stop.exists())
+
+    # 4. watchdog: a child that never finishes is asked to stop, then killed
+    def test_watchdog_stops_runaway_child(self):
+        t = [0.0]
+        self.job._clock = lambda: t[0]
+        self.job._poll = 0
+        procs = []
+
+        class Hung(FakeProc):
+            def poll(self_inner):
+                t[0] += 10
+                return self_inner._rc if self_inner.killed else None
+
+        def popen(argv, **kw):
+            self.calls.append(argv)
+            prog = Path(argv[argv.index("--progress") + 1])
+            prog.write_text(json.dumps({"phase": "capturing", "new": []}))
+            procs.append(Hung(argv, None, {}))
+            procs[-1].stop_file = Path(argv[argv.index("--stop-file") + 1])
+            return procs[-1]
+
+        orig_request_stop = self.job._request_stop
+        asked = []
+        self.job._request_stop = lambda: (asked.append(t[0]), orig_request_stop())
+        self.job._popen = popen
+        self.job.start(15)
+        st = self._wait()
+        self.assertFalse(st["running"])
+        self.assertTrue(asked)                 # asked to stop first …
+        self.assertTrue(procs[0].killed)       # … then killed after STOP_WAIT

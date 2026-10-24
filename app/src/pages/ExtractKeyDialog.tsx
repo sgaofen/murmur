@@ -114,11 +114,14 @@ export function ExtractKeyDialog({ open, onClose, onSuccess }: Props) {
     }}>
       <div style={{
         width: 600, maxWidth: '94%',
+        // Live capture adds a checklist + countdown; scroll inside the card
+        // instead of clipping it on small windows.
+        maxHeight: 'calc(100vh - 48px)', overflowY: 'auto',
         background: 'var(--et-paper)',
         borderRadius: 'var(--et-r-lg)',
         boxShadow: 'var(--et-shadow-3)',
         border: '0.5px solid var(--et-line-2)',
-        overflow: 'hidden', position: 'relative',
+        position: 'relative',
       }}>
         <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 6, background: 'var(--et-orange)' }} />
         <button onClick={onClose} style={{

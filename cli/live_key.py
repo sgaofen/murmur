@@ -24,6 +24,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -35,13 +36,25 @@ from pathlib import Path
 from typing import Callable, Optional
 
 CLI_DIR = Path(__file__).resolve().parent
-FRIDA_REQ = "frida>=17.0"
+# Pinned to the series the hook was checked against (frida 17 Module API).
+FRIDA_REQ = "frida==17.24.*"
 DEFAULT_SECONDS = 90
 MIN_SECONDS = 15
 MAX_SECONDS = 600
 
 EXIT_ATTACH_DENIED = 5
 EXIT_NO_FRIDA = 6
+
+# Hard cap on top of --seconds: attach + teardown, plus time spent on the
+# macOS password dialog.
+WATCHDOG_GRACE = 60
+AUTH_TIMEOUT = 300
+# After asking a root child to stop, how long to wait for it to finish
+# before cleaning up its temp dir anyway (it also exits on its own once
+# the dir is gone).
+STOP_WAIT = 20
+
+_MERGE_LOCK = threading.Lock()
 
 
 def parse_version(v: Optional[str]) -> tuple:
@@ -59,6 +72,34 @@ def version_needs_live_capture(v: Optional[str]) -> bool:
     the memory scan usually finds nothing there."""
     pv = parse_version(v)
     return bool(pv) and pv >= (4, 1, 9)
+
+
+# extract_key_mac.py exit codes: 2 no profile / DBs, 3 task_for_pid denied
+# (not re-signed), 4 scan ran but no key matched.
+SCAN_EXIT_NO_MATCH = 4
+_OSA_EXIT = re.compile(r"execution error:.*\((-?\d+)\)\s*$", re.S)
+
+
+def scan_suggests_live(scan_output: str, matched: int, total: int) -> bool:
+    """Should a finished memory scan (extract_key_mac.py) hand over to live
+    capture? Only if the scan actually ran against WeChat and came up short
+    — not when it never got that far (password dialog cancelled, attach
+    denied because WeChat isn't re-signed, WeChat not running, …).
+
+    Run through `osascript … with administrator privileges`, a failing
+    script's stdout is usually lost and only "execution error: … (N)" is
+    left, so the exit code is checked as well as the script's own text."""
+    out = (scan_output or "").strip()
+    m = _OSA_EXIT.search(out)
+    if m:
+        return int(m.group(1)) == SCAN_EXIT_NO_MATCH
+    blockers = ("User canceled", "task_for_pid denied", "no WeChat process found",
+                "no WeChat profile", "no encrypted DBs")
+    if any(b in out for b in blockers):
+        return False
+    if matched == 0:
+        return "no key matched any DB salt" in out
+    return matched < total
 
 
 def keys_path() -> Path:
@@ -205,6 +246,12 @@ def merge_keys(new_keys: dict, salt_by_rel: dict, wxid: Optional[str],
     """Merge {rel: key_hex} into decrypted_keys.json without dropping
     anything found before. Returns the merged payload."""
     path = path or keys_path()
+    with _MERGE_LOCK:
+        return _merge_keys_locked(new_keys, salt_by_rel, wxid, path)
+
+
+def _merge_keys_locked(new_keys: dict, salt_by_rel: dict, wxid: Optional[str],
+                       path: Path) -> dict:
     cur = load_keys(path)
     by_db = dict(cur.get("keys_by_db") or {})
     by_salt = dict(cur.get("keys_by_salt") or {})
@@ -220,9 +267,15 @@ def merge_keys(new_keys: dict, salt_by_rel: dict, wxid: Optional[str],
         "keys_by_salt": by_salt,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + f".tmp-{os.getpid()}")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp = path.with_name(path.name + f".tmp-{os.getpid()}-{os.urandom(4).hex()}")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(json.dumps(payload, ensure_ascii=False, indent=2))
     os.replace(tmp, path)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
     return payload
 
 
@@ -232,7 +285,8 @@ def _runner_argv(tmp_dir: Path, *args: str) -> list[str]:
     """argv for hook_cc_key_frida — frozen etcli subcommand, or a copy of the
     script in /tmp (root Python may be denied the repo path by TCC)."""
     if is_frozen():
-        return [sys.executable, "hook-cc-key-frida", *args]
+        # "--" so etcli's argparse.REMAINDER doesn't choke on "--seconds".
+        return [sys.executable, "hook-cc-key-frida", "--", *args]
     dst = tmp_dir / "hook_cc_key_frida.py"
     shutil.copy2(CLI_DIR / "hook_cc_key_frida.py", dst)
     try:
@@ -250,6 +304,10 @@ def _elevated_cmd(argv: list[str], pythonpath: Optional[str]) -> list[str]:
     return ["osascript", "-e", f'do shell script "{inner_as}" with administrator privileges']
 
 
+class _StartError(Exception):
+    pass
+
+
 class LiveKeyJob:
     """One live-capture round at a time; the UI polls status()."""
 
@@ -265,8 +323,10 @@ class LiveKeyJob:
         self._poll = poll_interval
         self._lock = threading.Lock()
         self._proc = None
+        self._proc_elevated = False
         self._stop_file: Optional[Path] = None
         self._cancelled = False
+        self._clock = time.time
         self.state = self._idle_state()
 
     @staticmethod
@@ -275,6 +335,7 @@ class LiveKeyJob:
             "running": False, "phase": "idle", "seconds": 0, "remaining": None,
             "total": 0, "known": 0, "matched_count": 0, "new": [], "hits": 0,
             "elevated": False, "error": None, "log": "", "round": 0,
+            "child_phase": None, "child_error": None,
         }
 
     # --- helpers -------------------------------------------------------
@@ -311,23 +372,31 @@ class LiveKeyJob:
     # --- control -------------------------------------------------------
     def start(self, seconds: int = DEFAULT_SECONDS) -> dict:
         seconds = max(MIN_SECONDS, min(MAX_SECONDS, int(seconds or DEFAULT_SECONDS)))
+        # Claim the job under the lock before any slow work, so two
+        # concurrent requests can never start two captures.
         with self._lock:
             if self.state["running"]:
                 return {"ok": True, "already_running": True}
-        profiles = self._profiles()
-        if not profiles:
-            return {"ok": False, "error": "未找到 WeChat 账号目录（请先在微信里登录一次）"}
-        prof = profiles[0]
-        salt_map = self._salts(prof)
-        if not salt_map:
-            return {"ok": False, "error": "没找到加密数据库 — 让微信完成首次同步后再试"}
-        pending, known = split_pending(salt_map, load_keys(self._kpath()))
-        with self._lock:
             rnd = self.state.get("round", 0) + 1
             self.state = dict(self._idle_state(), running=True, phase="starting",
-                              seconds=seconds, total=len(salt_map), known=len(known),
-                              matched_count=len(known), round=rnd)
+                              seconds=seconds, round=rnd)
             self._cancelled = False
+        try:
+            profiles = self._profiles()
+            if not profiles:
+                raise _StartError("未找到 WeChat 账号目录（请先在微信里登录一次）")
+            prof = profiles[0]
+            salt_map = self._salts(prof)
+            if not salt_map:
+                raise _StartError("没找到加密数据库 — 让微信完成首次同步后再试")
+            pending, known = split_pending(salt_map, load_keys(self._kpath()))
+        except Exception as e:
+            msg = str(e) if isinstance(e, _StartError) else f"{type(e).__name__}: {e}"
+            with self._lock:
+                self.state.update(running=False, phase="error", error=msg)
+            return {"ok": False, "error": msg}
+        with self._lock:
+            self.state.update(total=len(salt_map), known=len(known), matched_count=len(known))
         if not pending:
             with self._lock:
                 self.state.update(running=False, phase="done")
@@ -340,16 +409,24 @@ class LiveKeyJob:
     def cancel(self) -> dict:
         with self._lock:
             self._cancelled = True
-            stop, proc = self._stop_file, self._proc
-            phase = self.state["phase"]
+            stop, proc, elevated = self._stop_file, self._proc, self._proc_elevated
         if stop is not None:
             try:
                 stop.write_text("stop", encoding="utf-8")
             except OSError:
                 pass
-        # While waiting for the password dialog there is nothing to stop
-        # gracefully; kill osascript (the dialog goes away with it).
-        if proc is not None and phase in ("auth", "starting", "attaching"):
+        if proc is None:
+            return {"ok": True}
+        if not elevated:
+            # Our own process: the stop file ends it cleanly, kill is the backstop.
+            return {"ok": True}
+        # Elevated: killing osascript would NOT kill the root child it
+        # spawned (and we can't signal root). Only kill it while the
+        # password dialog is still up, i.e. before the child has written
+        # any progress — the dialog goes away with osascript. If the child
+        # sneaks in anyway it sees the stop file and exits.
+        progress = stop.parent / "progress.json" if stop is not None else None
+        if progress is not None and not progress.exists():
             try:
                 proc.kill()
             except Exception:
@@ -368,6 +445,8 @@ class LiveKeyJob:
             return
         new = list(p.get("new") or [])
         upd = {
+            "child_phase": p.get("phase"),
+            "child_error": p.get("error"),
             "remaining": p.get("remaining"),
             "hits": p.get("hits", 0),
             "new": new,
@@ -390,18 +469,68 @@ class LiveKeyJob:
                            text=True, encoding="utf-8", errors="replace", env=env)
         with self._lock:
             self._proc = proc
+            self._proc_elevated = elevated
         out_chunks: list[str] = []
         reader = threading.Thread(target=lambda: out_chunks.append(proc.stdout.read() if proc.stdout else ""),
                                   daemon=True)
         reader.start()
+        started = self._clock()
+        hooked_at = None
+        stop_asked_at = None
         while proc.poll() is None:
             self._read_progress(progress, known)
+            now = self._clock()
+            with self._lock:
+                child_phase = self.state.get("child_phase")
+            if hooked_at is None and child_phase in ("capturing", "waiting-wechat"):
+                hooked_at = now
+            # Watchdog: the child's own timer should end it at `seconds`;
+            # if it doesn't (stuck attach, password dialog left open), ask it
+            # to stop, then kill what we're allowed to kill.
+            limit = (hooked_at + self.state["seconds"] + WATCHDOG_GRACE) if hooked_at is not None \
+                else (started + AUTH_TIMEOUT + self.state["seconds"] + WATCHDOG_GRACE)
+            if now > limit and stop_asked_at is None:
+                stop_asked_at = now
+                self._request_stop()
+            elif stop_asked_at is not None and now - stop_asked_at > STOP_WAIT:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                break
             time.sleep(self._poll)
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            pass
         reader.join(timeout=2)
         self._read_progress(progress, known)
         with self._lock:
             self._proc = None
         return proc.returncode, "".join(out_chunks)
+
+    def _request_stop(self):
+        with self._lock:
+            stop = self._stop_file
+        if stop is not None:
+            try:
+                stop.write_text("stop", encoding="utf-8")
+            except OSError:
+                pass
+
+    def _wait_child_finished(self, progress: Path, timeout: float):
+        """An elevated child can outlive osascript. Before deleting its temp
+        dir, give it time to notice the stop file and write its final
+        progress ("done"/"error")."""
+        deadline = self._clock() + timeout
+        while self._clock() < deadline:
+            try:
+                ph = json.loads(progress.read_text(encoding="utf-8")).get("phase")
+            except (OSError, ValueError):
+                return  # never started (dialog cancelled) — nothing to wait for
+            if ph in ("done", "error"):
+                return
+            time.sleep(self._poll)
 
     def _run(self, prof, pending: dict, salt_by_rel: dict, seconds: int):
         tmp_dir = Path(tempfile.mkdtemp(prefix="murmur_live_key_"))
@@ -417,6 +546,7 @@ class LiveKeyJob:
             self._stop_file = stop
             known = self.state["known"]
         log = ""
+        elevated = False
         try:
             pages.write_text(json.dumps({
                 "__wxid__": getattr(prof, "wxid", None),
@@ -425,23 +555,37 @@ class LiveKeyJob:
             pages.chmod(0o644)
             argv = _runner_argv(tmp_dir, "--seconds", str(seconds), "--pages", str(pages),
                                 "--out-keys", str(out_keys), "--progress", str(progress),
-                                "--stop-file", str(stop))
+                                "--stop-file", str(stop), "--parent-pid", str(os.getpid()),
+                                "--log", str(tmp_dir / "capture.log"))
             pythonpath = None if is_frozen() else frida_location()
             rc, log = self._run_once(argv, progress, known, False, pythonpath)
             if rc == EXIT_ATTACH_DENIED and not self._cancelled:
+                try:
+                    progress.unlink()  # cancel() uses its absence to mean "dialog still up"
+                except OSError:
+                    pass
+                self._set(child_phase=None, child_error=None)
+                elevated = True
                 rc, out2 = self._run_once(argv, progress, known, True, pythonpath)
                 log += "\n--- 以管理员身份重试 ---\n" + out2
+                self._wait_child_finished(progress, STOP_WAIT)
             new = {}
             try:
                 new = (json.loads(out_keys.read_text(encoding="utf-8")).get("keys_by_db") or {})
             except (OSError, ValueError):
                 pass
-            # Only trust keys for DBs we asked about.
-            new = {rel: k for rel, k in new.items() if rel in pending}
+            # Only trust keys for DBs we asked about, and re-check each one
+            # against the page 1 we hold (cheap: two HMACs).
+            new = {rel: k for rel, k in new.items()
+                   if rel in pending and isinstance(k, str) and _verify(pending[rel], k)}
             if new:
                 merge_keys(new, salt_by_rel, getattr(prof, "wxid", None), self._kpath())
+            with self._lock:
+                child_error = self.state.get("child_error")
             error = None
-            if rc == EXIT_NO_FRIDA:
+            if child_error and not self._cancelled:
+                error = child_error  # e.g. wechat-not-running, no-dbs, attach-denied
+            elif rc == EXIT_NO_FRIDA:
                 error = "frida-missing"
             elif rc == EXIT_ATTACH_DENIED:
                 error = "attach-denied"
@@ -454,6 +598,11 @@ class LiveKeyJob:
             self._set(running=False, phase="error", error=f"{type(e).__name__}: {e}",
                       log=log[-4000:])
         finally:
+            if elevated:
+                # Make sure a root child that outlived osascript stops before
+                # we take its temp dir away (it also exits once the dir is gone).
+                self._request_stop()
+                self._wait_child_finished(progress, STOP_WAIT)
             with self._lock:
                 self._stop_file = None
             shutil.rmtree(tmp_dir, ignore_errors=True)

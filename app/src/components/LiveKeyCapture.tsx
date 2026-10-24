@@ -47,6 +47,7 @@ export function LiveKeyCapture({ onDecrypt, reason = 'manual', wechatVersion, on
     try {
       const s = await getLiveKeyStatus({ coverage });
       setSt(prev => (coverage || !prev?.coverage ? s : { ...s, coverage: prev.coverage }));
+      setErr(null);  // a transient network error shouldn't stick once polling recovers
       return s;
     } catch (e: any) {
       setErr(e?.message || String(e));
@@ -171,7 +172,11 @@ export function LiveKeyCapture({ onDecrypt, reason = 'manual', wechatVersion, on
       )}
 
       {job.running && (
-        <Running status={st} matched={matched} total={total} onStop={() => void cancelLiveKey().then(() => refresh(false))} />
+        <Running status={st} matched={matched} total={total} onStop={() => {
+          cancelLiveKey()
+            .then(() => refresh(false))
+            .catch((e: any) => setErr(e?.message || String(e)));
+        }} />
       )}
 
       {err && <div style={{ marginTop: 10, fontSize: 12, color: 'var(--et-rose)' }}>{err}</div>}
@@ -284,6 +289,7 @@ function JobError({ error, log }: { error: string | null; log: string }) {
     error === 'attach-denied' ? '没能挂到微信进程上：请先在引导里做「重签名」，并确认微信是重签名之后重新打开的。' :
     error === 'auth-cancelled' ? '系统密码窗口被取消了。再点一次开始，输入开机密码即可。' :
     error === 'wechat-not-running' ? '微信没在运行，请先打开并登录微信。' :
+    error === 'no-dbs' ? '没找到微信的加密数据库，请确认微信已经登录并完成首次同步。' :
     `抓取失败：${error || '未知错误'}`;
   return (
     <div style={{

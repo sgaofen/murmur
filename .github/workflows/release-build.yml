@@ -135,6 +135,9 @@ jobs:
         run: |
           set -euo pipefail
           test -x app/src-tauri/etcli/etcli
+          # Live key capture subcommand must parse its forwarded args (needs "--")
+          # and find the bundled frida.
+          app/src-tauri/etcli/etcli hook-cc-key-frida -- --help >/dev/null
           app/src-tauri/etcli/etcli serve --port 19100 >/tmp/murmur-backend-smoke.log 2>&1 &
           pid=$!
           trap 'kill "$pid" 2>/dev/null || true' EXIT
