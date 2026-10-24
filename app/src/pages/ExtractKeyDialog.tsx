@@ -1,7 +1,8 @@
 // 「读取密钥」 from the home page: grab the WeChat key again (Windows: login
 // hook; Mac: memory scan, or live capture on 4.1.9+), then the caller runs
 // the decrypt. Same pieces as the onboarding (onboarding/*): UI-1 Dialog +
-// Stepper, the shared Mac method choice, and catalog-driven errors.
+// Stepper, the shared Mac method choice, and catalog-driven errors — laid out
+// as a compact instrument panel (step bar across, readouts, labelled notes).
 import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { extractKey, getDiagnose, saveKey } from '../data/api';
@@ -9,11 +10,11 @@ import type { Diagnose } from '../data/api';
 import { maskText } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
 import { LiveKeyCapture } from '../components/LiveKeyCapture';
-import { Button, Callout, Card, Dialog, Stepper } from '../ui';
+import { Button, Dialog, Stepper } from '../ui';
 import type { StepItem } from '../ui';
 import { keyExtractFailureCode, liveRecommended } from '../onboarding/flow';
 import { createActionGuard } from '../onboarding/guard';
-import { describeError, Lead, logTail, StepError, Working } from '../onboarding/parts';
+import { clock, describeError, Lead, logTail, Note, Ops, Segs, StepError, Working } from '../onboarding/parts';
 import { MacKeyChoice } from '../onboarding/KeySteps';
 
 interface Props {
@@ -213,7 +214,7 @@ export function ExtractKeyDialog({ open, onClose, onSuccess }: Props) {
     <Dialog
       open={open}
       onClose={onClose}
-      size="md"
+      size="lg"
       accent
       // Busy (scan / capture running): Esc / ✕ stay off until it settles.
       dismissible={!busy}
@@ -222,10 +223,12 @@ export function ExtractKeyDialog({ open, onClose, onSuccess }: Props) {
       eyebrow="初始化 · 读取密钥"
       title={title}
     >
-      <div className="ob-main" ref={mainRef}>
+      <div ref={mainRef}>
         <Stepper className="ob-key-stepper" steps={STEPS} current={current} error={phase === 'error'}
           onStepClick={busy ? undefined : k => { if (k === 'prep') setPhase('intro'); }} />
-        {body}
+        <div className="ob-dialog-main" key={phase}>
+          {body}
+        </div>
       </div>
     </Dialog>
   );
@@ -235,52 +238,53 @@ function WinIntro({ onStart }: { onStart: () => void }) {
   return (
     <>
       <Lead>Windows 版抓的是登录事件。请先把微信退到登录页，但不要关闭微信程序，再回 Murmur 开始。</Lead>
-      <Card variant="sunken" padding="sm">
-        <ol className="ob-list">
-          <li>
-            <strong>先把微信退到登录页</strong>
-            <div className="ob-muted">只退出账号，不要关闭微信程序；任务管理器里应该还有 Weixin.exe 或 WeChat.exe。</div>
-          </li>
-          <li>
-            <strong>回 Murmur 点开始抓密钥</strong>
-            <div className="ob-muted">我会把 hook 装到当前微信进程，然后等下一次登录事件。</div>
-          </li>
-          <li>
-            <strong>立刻回微信扫码 / 确认登录</strong>
-            <div className="ob-muted">读到密钥后会自动保存，以后不用再做这步；密钥只存在你的电脑上，不会上传。</div>
-          </li>
-        </ol>
-      </Card>
-      <Callout tone="warning" compact className="ui-mt-3">
+      <Ops items={[
+        { t: '先把微信退到登录页', d: '只退出账号，不要关闭微信程序；任务管理器里应该还有 Weixin.exe 或 WeChat.exe。' },
+        { t: '回 Murmur 点开始抓密钥', d: '我会把 hook 装到当前微信进程，然后等下一次登录事件。' },
+        { t: '立刻回微信扫码 / 确认登录', d: '读到密钥后会自动保存，以后不用再做这步；密钥只存在你的电脑上，不会上传。' },
+      ]} />
+      <Note tone="warning" label="TIMING" className="ui-mt-4">
         准备好了再开始 —— 开始后请立刻回微信登录，90 秒内完成最稳。
-      </Callout>
-      <div className="ob-actions">
-        <Button variant="primary" size="lg" block onClick={onStart}>开始抓密钥</Button>
+      </Note>
+      <div className="ob-actions ob-actions--row">
+        <Button variant="primary" size="lg" onClick={onStart}>开始抓密钥</Button>
       </div>
     </>
   );
 }
 
+const WAIT_MAX = 90;
+
 function WaitingLogin({ isMac, elapsed }: { isMac: boolean; elapsed: number }) {
+  const shown = Math.min(WAIT_MAX, elapsed);
   return (
     <>
-      <Callout tone="accent" title={isMac ? '现在请到微信里点开聊天、群聊和朋友圈' : '现在请回微信完成登录'}>
+      <div className="ob-run" role="progressbar" aria-label="已等待时间" aria-valuemin={0} aria-valuemax={WAIT_MAX} aria-valuenow={shown}>
+        <div className="ob-run__status">
+          <span className="ui-label"><i className="ui-led is-pulse" />WAIT</span>
+          <span className="ob-run__head">{isMac ? '正在扫描本机微信内存' : 'Hook 已就位，等待登录事件'}</span>
+        </div>
+        <div className="ob-run__read">
+          <div className="ui-big ob-run__big">{clock(elapsed)}</div>
+          <div className="ob-run__meta">
+            <div className="ui-label">ELAPSED<b>已等 {elapsed} 秒</b></div>
+            <div className="ui-label">TIMEOUT<b>最多等 {WAIT_MAX} 秒</b></div>
+          </div>
+        </div>
+        <Segs n={45} on={shown / 2} className="ob-segs--round" />
+        <div className="ob-scale" aria-hidden="true"><span>0 S</span><span>45 S</span><span>90 S</span></div>
+      </div>
+      <Note tone="accent" label="NOW" className="ui-mt-4"
+        title={isMac ? '现在请到微信里点开聊天、群聊和朋友圈' : '现在请回微信完成登录'}>
         {isMac
           ? 'Murmur 正在扫描本机微信内存。Mac 微信是按需打开数据库的：多点几个对话和朋友圈，能让更多密钥出现在内存里。'
           : 'Hook 已经在等登录事件。请回微信扫码或确认登录；如果还停在已登录状态，先退出到登录页再登录一次。登录成功的瞬间，我这边就能拿到密钥。'}
-      </Callout>
-      <div className="ob-progress ui-mt-4" role="progressbar" aria-valuemin={0} aria-valuemax={90} aria-valuenow={Math.min(90, elapsed)}>
-        <div className="ob-progress__bar" style={{ width: `${Math.min(95, elapsed * 1.2)}%` }} />
-      </div>
-      <div className="ob-progress-meta">
-        <span>已等 {elapsed} 秒</span>
-        <span>最多等 90 秒</span>
-      </div>
-      <div className="ob-muted ui-mt-4">
+      </Note>
+      <p className="ob-muted ui-mt-3">
         {isMac
           ? '不需要退出登录，也不需要关闭微信。如果这次没扫到，回微信多打开几个聊天后再试一次。'
           : '看到二维码或登录确认是正常的，按微信提示完成即可。看不到微信窗口？点一下任务栏里的微信图标。'}
-      </div>
+      </p>
     </>
   );
 }
@@ -288,14 +292,21 @@ function WaitingLogin({ isMac, elapsed }: { isMac: boolean; elapsed: number }) {
 function Success({ keyHex, macKeysCount, isMac, onClose }: { keyHex: string | null; macKeysCount: number; isMac: boolean; onClose: () => void }) {
   return (
     <>
-      <Callout tone="success" title={isMac ? `已取得 ${macKeysCount || '多'} 个数据库密钥` : '已取得并验证密钥'}>
+      <div className="ob-done ob-done--sm">
+        <div className="ui-big ob-done__big">{isMac && macKeysCount ? String(macKeysCount).padStart(2, '0') : 'OK'}</div>
+        <div className="ob-done__meta">
+          <div className="ui-label"><i className="ui-led" />{isMac ? 'KEYS' : 'KEY'}<b>{isMac ? '个数据库密钥' : '主密钥 · 已验证'}</b></div>
+          <div className="ui-label">SAVED<b>只存在这台电脑上</b></div>
+        </div>
+      </div>
+      <Note tone="success" label="PASS" title={isMac ? `已取得 ${macKeysCount || '多'} 个数据库密钥` : '已取得并验证密钥'}>
         {isMac
           ? '已保存到 ~/.murmur/decrypted_keys.json —— 现在可以更新并重新解密最新数据。'
           : '已保存到 ~/.murmur/config.json —— 以后启动 Murmur 直接用，不用再读。'}
         {!isMac && keyHex && <div className="ob-well">{maskText(keyHex)}</div>}
-      </Callout>
-      <div className="ob-actions">
-        <Button variant="primary" size="lg" block onClick={onClose}>{isMac ? '更新最新数据' : '开始用 Murmur'}</Button>
+      </Note>
+      <div className="ob-actions ob-actions--row">
+        <Button variant="primary" size="lg" onClick={onClose}>{isMac ? '更新最新数据' : '开始用 Murmur'}</Button>
       </div>
     </>
   );

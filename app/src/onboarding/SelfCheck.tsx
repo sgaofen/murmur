@@ -4,11 +4,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { getLiveKeyStatus, installFrida, openFullDiskAccess } from '../data/api';
 import type { Diagnose } from '../data/api';
-import { Button, Callout } from '../ui';
+import { Button } from '../ui';
 import { IconRefresh } from '../ui/icons';
 import { blockingCount, buildChecks, routeStep, STEP_LABEL } from './flow';
 import type { CheckAction, Route } from './flow';
-import { CheckList, CheckListSkeleton, describeError, InlineError, Lead } from './parts';
+import { CheckList, CheckListSkeleton, describeError, InlineError, Lead, Note } from './parts';
 
 interface Props {
   diag: Diagnose | null;
@@ -86,29 +86,30 @@ export function SelfCheck({ diag, checking, route, onContinue, onRecheck, onGoto
       {diag && !checking ? <CheckList rows={rows} onAction={act} busy={busy} /> : <CheckListSkeleton rows={6} />}
 
       {fdaOpened && (
-        <Callout tone="info" compact className="ui-mt-3">
+        <Note tone="info" label="NOTE" className="ui-mt-3">
           在系统设置里打开 Murmur 的开关后，要<strong>完全退出 Murmur（⌘Q）再重新打开</strong>，授权才会生效。
-        </Callout>
+        </Note>
       )}
       {actionErr && <InlineError code={actionErr.code} raw={actionErr.raw} className="ui-mt-3" />}
 
       {diag && !checking && next && (
-        <Callout className="ob-summary" tone={blocking > 0 ? 'warning' : 'success'}
+        <Note className="ob-summary" tone={blocking > 0 ? 'warning' : 'success'}
+          label={blocking > 0 ? 'HOLD' : 'NEXT'}
           title={blocking > 0 ? `${blocking} 项需要处理`
             : ready ? '已经有解密好的数据'
             : warns > 0 ? `可以继续，有 ${warns} 项留意一下` : '环境没问题'}>
-          {ready ? '可以直接进入 Murmur；想重新抓密钥或重新解密，点左边对应的步骤。'
+          {ready ? '可以直接进入 Murmur；想重新抓密钥或重新解密，点上面对应的步骤。'
             : `下一步：${STEP_LABEL[next]}。`}
-        </Callout>
+        </Note>
       )}
 
       <div className="ob-actions ob-actions--row">
+        <Button variant="primary" size="lg" onClick={onContinue} disabled={!diag || checking || !!busy}>
+          {ready ? '继续：完成' : next ? `继续：${STEP_LABEL[next]}` : '继续'}
+        </Button>
         <Button variant="secondary" size="lg" icon={<IconRefresh size={16} />} onClick={onRecheck}
           loading={checking} disabled={!!busy}>
           重新检测
-        </Button>
-        <Button variant="primary" size="lg" onClick={onContinue} disabled={!diag || checking || !!busy}>
-          {ready ? '继续：完成' : next ? `继续：${STEP_LABEL[next]}` : '继续'}
         </Button>
       </div>
     </>

@@ -1,6 +1,9 @@
+// First-run loading screen · direction B「仪器」: status strip, one big
+// percentage readout over a segmented meter, the rotating status line.
 import { useEffect, useState } from 'react';
-import { ScanFrame } from '../components/ScanFrame';
-import { Stamp } from '../components/Stamp';
+import './Loading.css';
+
+const SEGS = 48;
 
 interface Props {
   onDone?: () => void;
@@ -31,50 +34,38 @@ export function LoadingPage({ onDone }: Props) {
     return () => clearInterval(t);
   }, [lines.length]);
 
+  const shown = Math.round(pct);
+  const lit = Math.round((Math.min(100, pct) / 100) * SEGS);
   return (
-    <div className="et-root" style={{
-      background: 'var(--et-bg)', minHeight: '100vh',
-      display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-      padding: '48px 24px', position: 'relative', overflow: 'hidden',
-    }}>
-      <div style={{ position: 'absolute', top: 32, right: 48, transform: 'rotate(8deg)', opacity: 0.8 }}>
-        <Stamp size={64} label="MURMUR · 2026" />
-      </div>
-      <div style={{ position: 'absolute', top: 32, left: 48, display: 'flex', alignItems: 'center', gap: 8 }}>
-        <svg width="20" height="20" viewBox="0 0 22 22">
-          <circle cx="11" cy="11" r="9.5" fill="none" stroke="var(--et-orange)" strokeWidth="1.2" />
-          <circle cx="11" cy="11" r="5.5" fill="none" stroke="var(--et-orange)" strokeWidth="1.2" />
-          <circle cx="11" cy="11" r="1.6" fill="var(--et-orange)" />
-        </svg>
-        <span className="et-serif" style={{ fontSize: 15, fontWeight: 600, color: 'var(--et-ink)' }}>Murmur 微语</span>
-      </div>
-      <ScanFrame size={240} />
-      <div className="et-h1" style={{ marginTop: 36, color: 'var(--et-ink)', textAlign: 'center', maxWidth: 520 }}>
-        {lines[li]}
-      </div>
-      <div style={{ marginTop: 28, width: 420, maxWidth: '80%' }}>
-        <div style={{ height: 6, background: 'rgba(26,43,74,0.08)', borderRadius: 999, overflow: 'hidden' }}>
-          <div style={{
-            width: `${pct}%`, height: '100%',
-            background: 'linear-gradient(90deg, var(--et-orange) 0%, var(--et-rose) 100%)',
-            borderRadius: 999, transition: 'width .35s ease',
-          }}/>
-        </div>
-        <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 8 }}>
-          <span className="et-meta">{pct >= 95 ? '马上好' : '大约还有 12 秒'}</span>
-          <span className="et-num" style={{ fontSize: 12, color: 'var(--et-mute)' }}>{Math.round(pct)}%</span>
+    <div className="ld">
+      <header className="ld-strip">
+        <span className="ld-brand">MURMUR<span>微语</span></span>
+        <span className="ld-crumb">BOOT /<b>载入</b></span>
+        <span className="ld-strip__r"><i className="ui-led is-pulse" />LOCAL · 本机</span>
+      </header>
+
+      <div className="ld-stage">
+        <div className="ld-panel" role="progressbar" aria-label="载入进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={shown}>
+          <div className="ui-label">STATUS<b>正在载入</b></div>
+          <div className="ld-read">
+            <div className="ui-big ld-big">{String(shown).padStart(2, '0')}<small>%</small></div>
+            <div className="ld-meta">
+              <div className="ui-label">ETA<b>{pct >= 95 ? '马上好' : '大约还有 12 秒'}</b></div>
+            </div>
+          </div>
+          <div className="ld-segs" aria-hidden="true">
+            {Array.from({ length: SEGS }, (_, i) => <i key={i} className={i < lit ? 'on' : undefined} />)}
+          </div>
+          <div className="ld-scale" aria-hidden="true"><span>0</span><span>50</span><span>100</span></div>
+          <p className="ld-line" aria-live="polite" key={li}>{lines[li]}</p>
+          <div className="ld-local">
+            <span className="ui-label">LOCAL</span>
+            <span>这一切都在你的电脑上完成，不会上传任何内容到云端。</span>
+          </div>
         </div>
       </div>
-      <div style={{ marginTop: 36, padding: '14px 22px',
-        background: 'var(--et-paper)', border: '0.5px solid var(--et-line-2)',
-        borderRadius: 'var(--et-r)', maxWidth: 480, textAlign: 'center' }}>
-        <span className="et-serif" style={{ fontSize: 14, color: 'var(--et-ink-soft)', fontStyle: 'italic' }}>
-          「这一切都在你的电脑上完成，不会上传任何内容到云端。」
-        </span>
-      </div>
-      <div className="et-meta" style={{ position: 'absolute', bottom: 24, color: 'var(--et-faint)' }}>
-        首次会慢一点点 · 之后再打开通常 3 秒之内
-      </div>
+
+      <footer className="ld-foot">首次会慢一点点 · 之后再打开通常 3 秒之内</footer>
     </div>
   );
 }

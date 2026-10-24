@@ -9,7 +9,7 @@
  * the decrypted databases on disk. */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
-import { Button } from '../ui';
+import { Button, Module } from '../ui';
 import { IconEye, IconEyeOff } from '../ui/icons';
 import {
   APP_LOCK_REQUEST_EVENT, APP_LOCK_STATUS_EVENT, APP_LOCKED_EVENT, getAppLockStatus, lockApp, reportActivity,
@@ -212,56 +212,84 @@ function LockScreen({ initialRetry, syncFailed, onUnlocked }: {
 
   return (
     <div className="app-lock" role="dialog" aria-modal="true" aria-labelledby="app-lock-title">
-      <form className="app-lock__card" onSubmit={submit}>
-        <svg className="app-lock__mark" width="40" height="40" viewBox="0 0 22 22" aria-hidden="true">
-          <circle cx="11" cy="11" r="9.5" fill="none" stroke="currentColor" strokeWidth="1.2" />
-          <circle cx="11" cy="11" r="5.5" fill="none" stroke="currentColor" strokeWidth="1.2" />
-          <circle cx="11" cy="11" r="1.6" fill="currentColor" />
-        </svg>
-        <h1 id="app-lock-title" className="app-lock__title">Murmur 已锁定</h1>
-        <p className="app-lock__lede">输入应用锁密码继续</p>
-        {syncFailed && (
-          <p className="app-lock__sync" role="status">还没能通知本地服务上锁，正在重试…</p>
-        )}
+      <header className="app-lock__strip">
+        <span className="app-lock__brand">MURMUR<span>微语</span></span>
+        <span className="app-lock__crumb">LOCK /<b>已锁定</b></span>
+        <span className="app-lock__state"><i className="ui-led ui-led--warn" />LOCKED</span>
+      </header>
 
-        <div className="app-lock-field">
-          <input
-            ref={input}
-            className="app-lock-input"
-            type={show ? 'text' : 'password'}
-            autoFocus
-            autoComplete="current-password"
-            aria-label="应用锁密码"
-            placeholder="密码"
-            value={password}
-            disabled={wait > 0}
-            onChange={e => { setPassword(e.target.value); setError(null); }}
-          />
-          <button type="button" className="app-lock-field__eye" onClick={() => setShow(v => !v)}
-                  aria-label={show ? '隐藏密码' : '显示密码'} title={show ? '隐藏密码' : '显示密码'}>
-            {show ? <IconEyeOff size={16} /> : <IconEye size={16} />}
-          </button>
-        </div>
+      <div className="app-lock__stage">
+        <LockClock />
+        <Module className="app-lock__mod" id="—" title="应用锁" en="APP LOCK" crop="bottom"
+          right={<span className="app-lock__auth">{wait > 0 ? `WAIT ${wait} S` : 'AUTH REQUIRED'}</span>}>
+          <form className="app-lock__card" onSubmit={submit}>
+            <div className="ui-label">STATUS<b>需要密码</b></div>
+            <h1 id="app-lock-title" className="app-lock__title">Murmur 已锁定</h1>
+            <p className="app-lock__lede">输入应用锁密码继续</p>
+            {syncFailed && (
+              <p className="app-lock__sync" role="status">还没能通知本地服务上锁，正在重试…</p>
+            )}
 
-        <Button type="submit" variant="primary" block loading={busy} disabled={!password || wait > 0}>
-          {wait > 0 ? `${wait} 秒后可重试` : '解锁'}
-        </Button>
-        <div className="app-lock__error" role="status" aria-live="polite">
-          {error && (wait > 0 ? `${error}，请 ${wait} 秒后再试` : error)}
-        </div>
+            <div className="app-lock-field app-lock-field--prompt">
+              <span className="app-lock-field__p" aria-hidden="true">PASS</span>
+              <input
+                ref={input}
+                className="app-lock-input"
+                type={show ? 'text' : 'password'}
+                autoFocus
+                autoComplete="current-password"
+                aria-label="应用锁密码"
+                placeholder="密码"
+                value={password}
+                disabled={wait > 0}
+                onChange={e => { setPassword(e.target.value); setError(null); }}
+              />
+              <button type="button" className="app-lock-field__eye" onClick={() => setShow(v => !v)}
+                      aria-label={show ? '隐藏密码' : '显示密码'} title={show ? '隐藏密码' : '显示密码'}>
+                {show ? <IconEyeOff size={16} /> : <IconEye size={16} />}
+              </button>
+            </div>
 
-        <button type="button" className="app-lock__link" onClick={() => setForgot(v => !v)} aria-expanded={forgot}>
-          忘记密码？
-        </button>
-        {forgot && (
-          <div className="app-lock__forgot">
-            完全退出 Murmur，删除 <code>{resetHint()}</code> 这个文件，再打开 Murmur，应用锁就关闭了，聊天数据不受影响。之后可以在「设置 → 应用锁」重新设置密码。
-          </div>
-        )}
-      </form>
-      <p className="app-lock__note">
-        应用锁用来防止别人打开 Murmur 翻看，不会加密电脑上已经解密的聊天数据。
-      </p>
+            <Button type="submit" variant="primary" size="lg" block loading={busy} disabled={!password || wait > 0}>
+              {wait > 0 ? `${wait} 秒后可重试` : '解锁'}
+            </Button>
+            <div className="app-lock__error" role="status" aria-live="polite">
+              {error && (wait > 0 ? `${error}，请 ${wait} 秒后再试` : error)}
+            </div>
+
+            <button type="button" className="app-lock__link" onClick={() => setForgot(v => !v)} aria-expanded={forgot}>
+              忘记密码？
+            </button>
+            {forgot && (
+              <div className="app-lock__forgot">
+                完全退出 Murmur，删除 <code>{resetHint()}</code> 这个文件，再打开 Murmur，应用锁就关闭了，聊天数据不受影响。之后可以在「设置 → 应用锁」重新设置密码。
+              </div>
+            )}
+          </form>
+        </Module>
+        <p className="app-lock__note">
+          应用锁用来防止别人打开 Murmur 翻看，不会加密电脑上已经解密的聊天数据。
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/** Big wall clock over the lock module — purely decorative, own 1 s tick. */
+function LockClock() {
+  const [d, setD] = useState(() => new Date());
+  useEffect(() => {
+    const t = window.setInterval(() => setD(new Date()), 1000);
+    return () => window.clearInterval(t);
+  }, []);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return (
+    <div className="app-lock__clock" aria-hidden="true">
+      <div className="ui-big app-lock__time">{p(d.getHours())}:{p(d.getMinutes())}</div>
+      <div className="app-lock__date">
+        <span>{d.getFullYear()}-{p(d.getMonth() + 1)}-{p(d.getDate())}</span>
+        <span>{p(d.getHours())}:{p(d.getMinutes())}:{p(d.getSeconds())}</span>
+      </div>
     </div>
   );
 }
