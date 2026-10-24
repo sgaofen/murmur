@@ -26,7 +26,7 @@ const DURATIONS = [120, 180, 300];
 const CORE_DBS = ['session/session.db', 'contact/contact.db'];
 
 const TODO: Array<[string, string]> = [
-  ['在副本微信里扫码 / 确认登录（会复用你当前的登录）', '登录时就会派生各库密钥'],
+  ['在副本微信里扫码 / 确认登录（副本可能要求重新登录）', '登录时就会派生各库密钥'],
   ['给文件传输助手发一条消息', '会话库和消息库'],
   ['点开几个对话，打开通讯录、朋友圈', '补齐其余分库'],
 ];
@@ -84,7 +84,10 @@ export function PrivateCopyCapture({ onDecrypt, onBack }: Props) {
     setErr(null);
     try {
       const r = await deletePrivateCopy();
-      if (!r.ok) setErr(r.error === 'running' ? '抓取还在进行，先停止再删除。' : (r.error || '删除失败'));
+      if (!r.ok) setErr(
+        r.error === 'running' ? '抓取还在进行，先停止再删除。'
+          : r.error === 'copy-running' ? '微信副本还在运行且无法自动结束，请先在程序坞里退出副本再删除。'
+            : (r.error || '删除失败'));
       await refresh(false);
     } catch (e: any) {
       setErr(e?.message || String(e));
@@ -153,7 +156,7 @@ export function PrivateCopyCapture({ onDecrypt, onBack }: Props) {
             💡 点开始后 Murmur 会把微信复制一份到自己的目录、重签名后打开这份<strong>副本</strong>，
             不会动你的 <code>/Applications/WeChat.app</code>。副本打开后请在里面登录并随便用一下，密钥到手就行。<br/>
             风控提示：复制并重签名、注入微信进程这类操作有被腾讯检测到的可能，极端情况下可能触发账号安全提醒或限制。
-            副本是独立 App，建议先退出正在运行的微信。Murmur 只处理本机、你本人的数据，不上传任何内容；介意的话请不要继续。
+            开始前<strong>必须先完全退出原版微信</strong>（副本可能和原版共用同一份聊天数据），每轮结束时 Murmur 会自动关掉副本。Murmur 只处理本机、你本人的数据，不上传任何内容；介意的话请不要继续。
           </div>
           {finished && matched > 0 ? (
             <>

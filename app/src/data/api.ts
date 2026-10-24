@@ -458,7 +458,9 @@ export async function getLiveKeyStatus(opts: { coverage?: boolean } = {}): Promi
 }
 
 export async function startLiveKey(seconds: number): Promise<{
-  ok: boolean; started?: boolean; complete?: boolean; already_running?: boolean; error?: string; code?: string;
+  ok: boolean; started?: boolean; complete?: boolean; already_running?: boolean; error?: string;
+  /** 'copy-running' | 'original-running' */
+  code?: string; code?: string;
 }> {
   return j('/api/live-key/start', {
     method: 'POST',
@@ -512,6 +514,8 @@ export async function getPrivateCopyStatus(opts: { coverage?: boolean } = {}): P
 
 export async function startPrivateCopy(seconds: number): Promise<{
   ok: boolean; started?: boolean; complete?: boolean; already_running?: boolean; error?: string;
+  /** 'copy-running' | 'original-running' */
+  code?: string;
 }> {
   return j('/api/private-copy/start', {
     method: 'POST',
@@ -524,7 +528,7 @@ export async function cancelPrivateCopy(): Promise<{ ok: boolean }> {
   return j('/api/private-copy/cancel', { method: 'POST' });
 }
 
-export async function deletePrivateCopy(): Promise<{ ok: boolean; deleted?: boolean; error?: string }> {
+export async function deletePrivateCopy(): Promise<{ ok: boolean; deleted?: boolean; error?: string; pids?: number[] }> {
   return j('/api/private-copy/delete', { method: 'POST' });
 }
 

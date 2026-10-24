@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -56,11 +57,19 @@ class FakeProc:
     def __init__(self):
         self.terminated = False
 
+        self.killed = False
+
     def terminate(self):
         self.terminated = True
 
+    def kill(self):
+        self.killed = True
+
     def poll(self):
-        return None
+        return 0 if (self.terminated or self.killed) else None
+
+    def wait(self, timeout=None):
+        return self.poll()
 
 
 # ------------------------------------------------------- pure helpers ----
@@ -333,6 +342,247 @@ class JobTest(unittest.TestCase):
                 return
             time.sleep(0.02)
         self.fail("job did not finish")
+
+
+# ------------------------------------------------- process lifecycle ----
+
+class FakeOS:
+    """A tiny fake process table: the copy's main process (what Popen returns)
+    plus a helper it spawned (crashpad_handler-like) — both live under the
+    copy dir — and optionally the original WeChat. `stubborn` processes ignore
+    SIGTERM / terminate() and only die on SIGKILL / kill(); `immortal` ones
+    never die (e.g. stuck in the kernel)."""
+
+    def __init__(self):
+        self.procs = {}  # pid -> {"cmd", "alive", "stubborn", "immortal"}
+        self.next_pid = 1000
+        self.signals = []
+
+    def spawn(self, cmd, stubborn=False, immortal=False):
+        pid = self.next_pid
+        self.next_pid += 1
+        self.procs[pid] = {"cmd": cmd, "alive": True,
+                           "stubborn": stubborn, "immortal": immortal}
+        return pid
+
+    def alive(self, pid):
+        return self.procs.get(pid, {}).get("alive", False)
+
+    def list_procs(self):
+        return [(pid, p["cmd"]) for pid, p in self.procs.items() if p["alive"]]
+
+    def kill(self, pid, sig):
+        self.signals.append((pid, sig))
+        p = self.procs.get(pid)
+        if p is None or not p["alive"]:
+            raise ProcessLookupError(pid)
+        if p["immortal"]:
+            return
+        if sig == mpc._SIGKILL or not p["stubborn"]:
+            p["alive"] = False
+
+
+class FakeOSProc:
+    """Popen-like handle onto a FakeOS process."""
+
+    def __init__(self, fos, pid):
+        self.fos = fos
+        self.pid = pid
+
+    def poll(self):
+        return None if self.fos.alive(self.pid) else 0
+
+    def terminate(self):
+        if self.fos.alive(self.pid):
+            self.fos.kill(self.pid, mpc._SIGTERM)
+
+    def kill(self):
+        if self.fos.alive(self.pid):
+            self.fos.kill(self.pid, mpc._SIGKILL)
+
+    def wait(self, timeout=None):
+        if self.fos.alive(self.pid):
+            raise subprocess.TimeoutExpired("fake", timeout)
+        return 0
+
+
+class ProcessLifecycleTest(unittest.TestCase):
+    """The copy must never outlive a round: it keeps appending every key and
+    the passphrase to candidates.txt in plaintext, and a later round / delete
+    would rmtree a running app."""
+
+    setUp = JobTest.setUp
+    tearDown = JobTest.tearDown
+    _salt_map = JobTest._salt_map
+    _wait = JobTest._wait
+
+    def _job(self, salt_map, fos, write_candidates=True, stubborn=False,
+             rounds=2, pw=b"pp"):
+        self.launched = []
+
+        def popen(argv, env=None, **kw):
+            out = Path(env["MURMUR_KEYCAP_OUT"])
+            if write_candidates:
+                out.write_text("pbkdf 5 %d %s %s\n" % (rounds, pw.hex(), "00" * 32))
+            else:
+                out.write_text("key %s\n" % ("11" * 32))
+            pid = fos.spawn(argv[0], stubborn=stubborn)
+            # The copy forks a helper of its own, also under the copy dir.
+            helper = str(Path(argv[0]).parent.parent / "Frameworks" / "crashpad_handler")
+            fos.spawn(helper, stubborn=stubborn)
+            self.launched.append(pid)
+            return FakeOSProc(fos, pid)
+
+        return mpc.PrivateCopyJob(
+            popen=popen,
+            run=lambda *a, **k: type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
+            discover_profiles=lambda: [FakeProfile()],
+            collect_salts=lambda prof: salt_map,
+            find_app=lambda: self.src_app,
+            dylib=lambda: self.dylib,
+            keys_file=self.keys_file,
+            copy_dir=self.copy_dir,
+            poll_interval=0.01,
+            list_procs=fos.list_procs,
+            kill=fos.kill,
+            stop_timeout=0.05,
+        )
+
+    def _copy_alive(self, fos):
+        root = str(self.copy_dir)
+        return [pid for pid, cmd in fos.list_procs() if cmd.startswith(root)]
+
+    def test_copy_stopped_after_successful_round(self):
+        fos = FakeOS()
+        job = self._job(self._salt_map(b"pp", 2), fos)
+        self.assertTrue(job.start(seconds=30).get("started"))
+        self._wait(job)
+        self.assertEqual(job.status()["phase"], "done")
+        self.assertEqual(self._copy_alive(fos), [])
+        self.assertFalse((self.copy_dir / "candidates.txt").exists())
+
+    def test_copy_stopped_after_timeout(self):
+        fos = FakeOS()
+        job = self._job(self._salt_map(b"pp", 2), fos, write_candidates=False)
+        ticks = iter(range(0, 1_000_000, 10_000))
+        job._clock = lambda: next(ticks)
+        job.start(seconds=30)
+        self._wait(job)
+        self.assertEqual(job.status()["error"], "no-keys")
+        self.assertEqual(self._copy_alive(fos), [])
+        self.assertFalse((self.copy_dir / "candidates.txt").exists())
+
+    def test_stubborn_copy_is_killed(self):
+        fos = FakeOS()
+        job = self._job(self._salt_map(b"pp", 2), fos, stubborn=True)
+        job.start(seconds=30)
+        self._wait(job)
+        self.assertEqual(self._copy_alive(fos), [])
+        self.assertIn(mpc._SIGKILL, [sig for _, sig in fos.signals])
+
+    def test_cancel_stops_copy(self):
+        fos = FakeOS()
+        job = self._job(self._salt_map(b"pp", 2), fos, write_candidates=False)
+        job.start(seconds=30)
+        end = time.time() + 5
+        while not self.launched and time.time() < end:
+            time.sleep(0.01)
+        job.cancel()
+        self._wait(job)
+        self.assertEqual(self._copy_alive(fos), [])
+        self.assertFalse((self.copy_dir / "candidates.txt").exists())
+
+    def _leftover_copy(self, fos, immortal=False):
+        """A copy launched by an earlier Murmur session, still running."""
+        exe = self.copy_dir / "WeChat.app" / "Contents" / "MacOS" / "WeChat"
+        exe.parent.mkdir(parents=True)
+        exe.write_text("#!/bin/sh\n")
+        (self.copy_dir / "candidates.txt").write_text("key %s\n" % ("22" * 32))
+        return fos.spawn(str(exe), immortal=immortal)
+
+    def test_start_stops_leftover_copy_before_rmtree(self):
+        fos = FakeOS()
+        old = self._leftover_copy(fos)
+        job = self._job(self._salt_map(b"pp", 2), fos)
+        self.assertTrue(job.start(seconds=30).get("started"))
+        self._wait(job)
+        self.assertFalse(fos.alive(old))
+        self.assertEqual(self._copy_alive(fos), [])
+
+    def test_start_refuses_when_copy_cannot_be_stopped(self):
+        fos = FakeOS()
+        self._leftover_copy(fos, immortal=True)
+        job = self._job(self._salt_map(b"pp", 2), fos)
+        r = job.start(seconds=30)
+        self.assertFalse(r["ok"])
+        self.assertEqual(r.get("code"), "copy-running")
+        # Never rmtree'd the running app.
+        self.assertTrue((self.copy_dir / "WeChat.app" / "Contents" / "MacOS" / "WeChat").exists())
+        self.assertEqual(self.launched, [])
+
+    def test_delete_stops_leftover_copy_then_deletes(self):
+        fos = FakeOS()
+        old = self._leftover_copy(fos)
+        job = self._job(self._salt_map(b"pp", 2), fos)
+        r = job.delete_copy()
+        self.assertTrue(r["ok"])
+        self.assertFalse(fos.alive(old))
+        self.assertFalse(self.copy_dir.exists())
+
+    def test_delete_refuses_when_copy_cannot_be_stopped(self):
+        fos = FakeOS()
+        self._leftover_copy(fos, immortal=True)
+        job = self._job(self._salt_map(b"pp", 2), fos)
+        r = job.delete_copy()
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["error"], "copy-running")
+        self.assertTrue((self.copy_dir / "WeChat.app").exists())
+        # The plaintext capture file is still scrubbed.
+        self.assertFalse((self.copy_dir / "candidates.txt").exists())
+
+    def test_start_refuses_while_original_wechat_runs(self):
+        fos = FakeOS()
+        fos.spawn(str(self.src_app / "Contents" / "MacOS" / "WeChat"))
+        job = self._job(self._salt_map(b"pp", 2), fos)
+        r = job.start(seconds=30)
+        self.assertFalse(r["ok"])
+        self.assertEqual(r.get("code"), "original-running")
+        self.assertIn("退出", r["error"])
+        self.assertEqual(self.launched, [])
+        self.assertFalse(self.copy_dir.exists())
+        self.assertEqual(job.status()["phase"], "error")
+
+    def test_original_check_ignores_the_copy_and_other_apps(self):
+        fos = FakeOS()
+        fos.spawn("/Applications/WeChatOther.app/Contents/MacOS/WeChatOther")
+        fos.spawn(str(self.root / "src" / "WeChat.app.bak" / "Contents" / "MacOS" / "WeChat"))
+        self._leftover_copy(fos)
+        job = self._job(self._salt_map(b"pp", 2), fos)
+        self.assertEqual(job.original_pids(self.src_app), [])
+
+
+class ListProcsTest(unittest.TestCase):
+    def test_parses_ps_output(self):
+        out = ("  1 /sbin/launchd\n"
+               "4321 /Users/a b/.murmur/wechat-copy/WeChat.app/Contents/MacOS/WeChat -x\n"
+               "garbage line\n")
+        seen = {}
+
+        def run(argv, **kw):
+            seen["argv"] = argv
+            return type("R", (), {"returncode": 0, "stdout": out, "stderr": ""})()
+
+        procs = mpc.list_processes(run)
+        self.assertEqual(seen["argv"][0], "ps")
+        self.assertEqual(procs[0], (1, "/sbin/launchd"))
+        self.assertEqual(procs[1][0], 4321)
+        self.assertTrue(procs[1][1].startswith("/Users/a b/.murmur/wechat-copy/"))
+        self.assertEqual(len(procs), 2)
+
+    def test_ps_failure_is_empty(self):
+        def run(argv, **kw):
+            raise OSError("no ps")
+        self.assertEqual(mpc.list_processes(run), [])
 
 
 if __name__ == "__main__":
