@@ -13,6 +13,7 @@ import { useBatchTracker } from '../components/extras/BatchTracker';
 import type { BatchHandle } from '../components/extras/BatchTracker';
 import { ProfileSwitcher } from '../components/ProfileSwitcher';
 import { useActivePlatform } from '../utils/activeProfile';
+import { useTheme } from '../ui/theme';
 
 const TIER_COLORS: Record<string, string> = {
   self: '#FFE6CF', A: '#FF6B47', B: '#E8B57A',
@@ -255,7 +256,9 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
     if (s) { setSelected(null); setSelectedEdge(null); }
     setSpotlight(s);
   }, []);
-  const [dark, setDark] = useState(false);
+  // Follows the app-wide theme; the in-page ☼/☾ button writes back to it.
+  const { resolved: theme, toggle: toggleTheme } = useTheme();
+  const dark = theme === 'dark';
   const [autoRotate, setAutoRotate] = useState(true);
   const [autoRotateResumeSignal, setAutoRotateResumeSignal] = useState(0);
   const [topN, setTopN] = useState<number>(() => {
@@ -432,7 +435,7 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
           }} title="一次跑完关系网里所有重要朋友对的 AI 分析">
             🤖 批量分析关系{batch && batchStatus?.running ? ` (${batchStatus.pairs_done ?? batchStatus.n_pairs} 已完成)` : ''}
           </button>
-          <button onClick={() => setDark(d => !d)} style={chromeBtn(dark)}>
+          <button onClick={toggleTheme} style={chromeBtn(dark)}>
             {dark ? '☼ 亮' : '☾ 暗'}
           </button>
         </div>

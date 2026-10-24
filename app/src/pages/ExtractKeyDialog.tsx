@@ -3,6 +3,7 @@ import { extractKey, getDiagnose, saveKey } from '../data/api';
 import { maskText } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
 import { LiveKeyCapture } from '../components/LiveKeyCapture';
+import { Button, Callout } from '../ui';
 
 interface Props {
   open: boolean;
@@ -125,7 +126,7 @@ export function ExtractKeyDialog({ open, onClose, onSuccess }: Props) {
       }}>
         <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 6, background: 'var(--et-orange)' }} />
         <button onClick={onClose} style={{
-          position: 'absolute', top: 14, right: 14, all: 'unset', cursor: 'pointer',
+          all: 'unset', position: 'absolute', top: 14, right: 14, cursor: 'pointer',
           width: 28, height: 28, borderRadius: 8, color: 'var(--et-mute)',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
         }}>
@@ -208,31 +209,17 @@ function Intro({ isMac, onStart, onLive }: { isMac: boolean; onStart: () => void
                 body="点开始后立刻回微信扫码/确认登录；密钥只存在你的电脑上，不会上传。" />
         </>
       )}
-      <div style={{
-        marginTop: 16, padding: '12px 14px',
-        background: 'rgba(232, 181, 122, 0.18)',
-        border: '0.5px solid rgba(138, 90, 28, 0.3)',
-        borderRadius: 10, fontSize: 12, color: '#8a5a1c',
-      }}>
+      <Callout tone="warning" compact className="ui-mt-4">
         {isMac
           ? '准备好了再开始 —— 这个流程不会关闭微信，只会扫描本机 WeChat 内存。'
           : '准备好了再开始 —— 开始后请立刻回微信登录，90 秒内完成最稳。'}
+      </Callout>
+      <div className="ui-stack ui-mt-4">
+        <Button variant="primary" size="lg" block onClick={onStart}>{isMac ? '开始现场抓取' : '开始抓密钥'}</Button>
+        {isMac && (
+          <Button variant="secondary" size="lg" block onClick={onLive}>微信 4.1.9 及以上：用「实时抓取」（内存扫不到时用这个）</Button>
+        )}
       </div>
-      <button onClick={onStart} style={{
-        all: 'unset', cursor: 'pointer', display: 'block', width: '100%',
-        textAlign: 'center', padding: '14px 0', marginTop: 14,
-        background: 'var(--et-orange)', color: '#fff',
-        borderRadius: 'var(--et-r)', fontSize: 14, fontWeight: 600,
-        boxShadow: '0 6px 16px rgba(255,107,71,0.32)',
-      }}>{isMac ? '开始现场抓取' : '开始抓密钥'}</button>
-      {isMac && (
-        <button onClick={onLive} style={{
-          all: 'unset', cursor: 'pointer', display: 'block', width: '100%',
-          textAlign: 'center', padding: '12px 0', marginTop: 8,
-          border: '1px solid var(--et-line-2)', color: 'var(--et-ink)',
-          borderRadius: 'var(--et-r)', fontSize: 13, fontWeight: 600,
-        }}>微信 4.1.9 及以上：用「实时抓取」（内存扫不到时用这个）</button>
-      )}
     </>
   );
 }
