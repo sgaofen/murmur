@@ -18,8 +18,10 @@ import { invokeAgent, getInvokeStream, getYearbook, type YearData } from '../../
 import type { Friend } from '../../data/types';
 import { displayName, isPrivacyMode, maskText } from '../../utils/privacy';
 import { usePrivacy } from '../../utils/usePrivacy';
-import { ArrowLeft, Copy, Refresh, Close, Quote } from '../../utils/icons';
+import { Copy, Refresh, Close, Quote } from '../../utils/icons';
 import { agentDisplayName as agentNameFor } from '../../utils/agents';
+import { PageHeader } from '../../shell/PageHeader';
+import { Button, ErrorState } from '../../ui';
 
 interface Props {
   friend: Friend;
@@ -151,45 +153,97 @@ export function RelationshipReportView({ friend, cli, onClose }: Props) {
   }, [cli, friend.id]);
 
   const chapters = useMemo(() => (output ? parseChapters(output) : []), [output]);
+
+  // Rail highlight: the last chapter whose top has passed a reading line.
+  // (Per-chapter IntersectionObservers raced each other and were rebuilt on
+  // every timer tick.) Picking a chapter in the rail pins it until the reader
+  // scrolls by hand — near the end of the page it may not reach the line.
+  const pinnedChapter = useRef(false);
+  useEffect(() => {
+    if (!chapters.length) return;
+    let raf = 0;
+    const measure = () => {
+      raf = 0;
+      if (pinnedChapter.current) return;
+      const line = window.innerHeight * 0.3;
+      let cur = chapters[0].num;
+      for (const c of chapters) {
+        const el = document.getElementById(`chapter-${c.num}`);
+        if (el && el.getBoundingClientRect().top <= line) cur = c.num;
+      }
+      setActiveChapter(cur);
+    };
+    const onScroll = () => { if (!raf) raf = window.requestAnimationFrame(measure); };
+    const unpin = () => { pinnedChapter.current = false; };
+    window.addEventListener('scroll', onScroll, { capture: true, passive: true });
+    window.addEventListener('wheel', unpin, { passive: true });
+    window.addEventListener('touchmove', unpin, { passive: true });
+    window.addEventListener('keydown', unpin);
+    onScroll();
+    return () => {
+      if (raf) window.cancelAnimationFrame(raf);
+      window.removeEventListener('scroll', onScroll, { capture: true });
+      window.removeEventListener('wheel', unpin);
+      window.removeEventListener('touchmove', unpin);
+      window.removeEventListener('keydown', unpin);
+    };
+  }, [chapters]);
+  const pickChapter = (n: string) => {
+    pinnedChapter.current = true;
+    setActiveChapter(n);
+  };
   const agentDisplayName = agentNameFor(cli);
   const friendName = displayName(friend.id, friend.name);
   const evidence = deriveEvidence(year);
+  // One header for every phase: the shell's top bar, with a single back
+  // button that returns to the friend page (no second in-page 「返回」).
+  const header = (
+    <PageHeader
+      back={{ label: '朋友页', onClick: onClose }}
+      title={`与 ${friendName} 的关系画像`}
+      subtitle={phase === 'running' ? `${agentDisplayName} 正在分析 · ${secs} 秒`
+        : phase === 'error' ? `${agentDisplayName} · 分析失败`
+          : `${agentDisplayName} · 已生成 · 用时 ${secs} 秒`}
+    />
+  );
 
   if (phase === 'running') {
     return (
-      <Streaming
-        friend={friend}
-        agentName={agentDisplayName}
-        text={streamed || waitingText(agentDisplayName, stage, secs)}
-        secs={secs}
-        evidence={evidence}
-        onClose={onClose}
-      />
+      <>
+        {header}
+        <Streaming
+          friend={friend}
+          agentName={agentDisplayName}
+          text={streamed || waitingText(agentDisplayName, stage, secs)}
+          secs={secs}
+          evidence={evidence}
+        />
+      </>
     );
   }
   if (phase === 'error') {
     return (
-      <div style={{ padding: 28 }}>
-        <BackBtn onClose={onClose} />
-        <div className="et-h2" style={{ marginTop: 18, color: 'var(--et-rose)' }}>分析失败</div>
-        <pre style={{ marginTop: 12, padding: 12, background: 'var(--et-paper-2)', borderRadius: 8, fontSize: 12, whiteSpace: 'pre-wrap' }}>
-          {maskText(error || '')}
-        </pre>
-      </div>
+      <>
+        {header}
+        <ErrorState
+          layout="page"
+          title="分析失败"
+          reason={`${agentDisplayName} 没有完成这次分析。`}
+          details={<pre>{maskText(error || '')}</pre>}
+          detailsLabel="错误信息"
+          actions={<Button onClick={onClose}>回到朋友页</Button>}
+        />
+      </>
     );
   }
 
   return (
     <div className="et-root" style={{ background: 'var(--et-bg)', minHeight: '100%' }}>
-      <header style={{ padding: '24px 28px 0', display: 'flex', alignItems: 'center', gap: 10 }}>
-        <BackBtn onClose={onClose} />
-        <div className="et-meta" style={{ marginLeft: 'auto' }}>已生成 · 用时 {secs} 秒</div>
-      </header>
-
+      {header}
       <section
         className="et-paper-grain"
         style={{
-          margin: '18px 28px 0',
+          margin: '24px 28px 0',
           padding: '40px 44px 28px',
           background: 'var(--et-paper)',
           border: '0.5px solid var(--et-line-2)',
@@ -229,7 +283,7 @@ export function RelationshipReportView({ friend, cli, onClose }: Props) {
           padding: '24px 28px 32px',
         }}
       >
-        <ChapterRail chapters={chapters} active={activeChapter} onPick={setActiveChapter} />
+        <ChapterRail chapters={chapters} active={activeChapter} onPick={pickChapter} />
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 18, minWidth: 0 }}>
           {chapters.length > 0 ? chapters.map(c => (
@@ -238,7 +292,6 @@ export function RelationshipReportView({ friend, cli, onClose }: Props) {
               num={c.num}
               title={c.title}
               body={c.body}
-              onIntersect={() => setActiveChapter(c.num)}
             />
           )) : (
             <div
@@ -355,7 +408,7 @@ function ChapterRail({
       aria-label="chapters"
       style={{
         position: 'sticky',
-        top: 24,
+        top: 'calc(var(--shell-top, 0px) + 24px)',
         alignSelf: 'start',
         display: 'flex',
         flexDirection: 'column',
@@ -415,23 +468,7 @@ function ChapterRail({
   );
 }
 
-function ReportChapter({
-  num, title, body, onIntersect,
-}: Chapter & { onIntersect?: () => void }) {
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!ref.current || !onIntersect) return;
-    const io = new IntersectionObserver(
-      entries => {
-        for (const e of entries) {
-          if (e.isIntersecting && e.intersectionRatio > 0.4) onIntersect();
-        }
-      },
-      { threshold: [0, 0.4, 1] }
-    );
-    io.observe(ref.current);
-    return () => io.disconnect();
-  }, [onIntersect]);
+function ReportChapter({ num, title, body }: Chapter) {
 
   const quoteMatch = body.match(/[「"]([^」"]{8,80})[」"]/);
   const quote = quoteMatch ? quoteMatch[1] : null;
@@ -439,7 +476,6 @@ function ReportChapter({
 
   return (
     <article
-      ref={ref}
       id={`chapter-${num}`}
       style={{
         background: 'var(--et-paper)',
@@ -449,7 +485,7 @@ function ReportChapter({
         display: 'grid',
         gridTemplateColumns: '64px 1fr',
         gap: 20,
-        scrollMarginTop: 24,
+        scrollMarginTop: 'calc(var(--shell-top, 0px) + 24px)',
       }}
     >
       <div
@@ -491,17 +527,16 @@ function ReportChapter({
 }
 
 function Streaming({
-  friend, agentName, text, secs, evidence, onClose,
+  friend, agentName, text, secs, evidence,
 }: {
   friend: Friend; agentName: string; text: string; secs: number;
-  evidence: Evidence; onClose: () => void;
+  evidence: Evidence;
 }) {
   void usePrivacy();
   const friendName = displayName(friend.id, friend.name);
   return (
     <div className="et-root" style={{ background: 'var(--et-bg)', minHeight: '100%', padding: '24px 28px 32px' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
-        <BackBtn onClose={onClose} />
         <span style={{ width: 10, height: 10, borderRadius: '50%', background: 'var(--et-orange)', animation: 'et-pulse 1.4s ease-in-out infinite' }} />
         <div className="et-h2" style={{ color: 'var(--et-ink)' }}>
           {agentName} 正在分析 与 {friendName} 的关系
@@ -542,17 +577,6 @@ function waitingText(agentName: string, stage: string, secs: number) {
   if (secs >= 120) return `资料已经交给 ${agentName}。它可能正在排队或完整思考，部分 CLI 会到结束时才一次性输出内容；你可以先返回继续浏览，后台分析不会被取消。`;
   if (secs >= 30)  return `${agentName} 已启动，正在等待第一段输出。批量任务或模型响应慢时，这里可能会安静一会儿。`;
   return `(${stage}...)`;
-}
-
-function BackBtn({ onClose }: { onClose: () => void }) {
-  return (
-    <button onClick={onClose} style={{
-      all: 'unset', cursor: 'pointer', fontSize: 13, color: 'var(--et-mute)',
-      display: 'inline-flex', alignItems: 'center', gap: 6,
-    }}>
-      <ArrowLeft size={14} /> 返回
-    </button>
-  );
 }
 
 function ReportBtn({ label, icon, onClick }: { label: string; icon: React.ReactNode; onClick?: () => void }) {

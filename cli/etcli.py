@@ -4899,6 +4899,25 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             )
             payload["index"] = idx.status()
             return self._send_json(payload)
+        if path == "/api/chat/messages":
+            # Paged history for the chat page (cli/chat_view.py).
+            import chat_view as _cv
+            import search_index as _si
+            chat = (qs.get("chat", [""])[0] or "").strip()
+            if not chat:
+                return self._send_json({"error": "chat required"}, 400)
+            try:
+                at = _si.parse_time_param(qs.get("at", [None])[0])
+                payload = _cv.chat_page(
+                    self.store, chat,
+                    before=qs.get("before", [None])[0], after=qs.get("after", [None])[0],
+                    around=qs.get("around", [None])[0], at=at,
+                    limit=int(qs.get("limit", [_cv.DEFAULT_LIMIT])[0]),
+                    media_index_path=_paths.media_index_path(),
+                )
+            except ValueError as e:
+                return self._send_json({"error": "bad_param", "message": str(e)}, 400)
+            return self._send_json(payload)
         if path == "/api/graph":
             scope = qs.get("scope", ["private"])[0]
             min_private = int(qs.get("min_private", [10])[0])

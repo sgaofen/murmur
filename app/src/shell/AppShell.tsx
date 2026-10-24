@@ -43,7 +43,7 @@ const MAIN_NAV: NavItem[] = [
   { key: 'annual', label: '年度', href: '#annual', icon: <IconCalendar size={ICON} />, hint: '年度总览：所有朋友 + 所有聊天' },
   { key: 'reports', label: '报告', href: '#reports', icon: <IconReport size={ICON} />, hint: 'AI 关系档案' },
   { key: 'table', label: '离线证据表', href: '#table', icon: <IconTable size={ICON} />, hint: '朋友信号矩阵：纯本地统计，无需 AI' },
-  { key: 'search', label: '搜索', href: '#search', icon: <IconSearch size={ICON} />, hint: '搜索全部聊天记录（即将推出）', badge: '即将推出' },
+  { key: 'search', label: '搜索', href: '#search', icon: <IconSearch size={ICON} />, hint: '搜索全部聊天记录，点结果跳到原消息' },
 ];
 
 const SETTINGS_NAV: NavItem = {
