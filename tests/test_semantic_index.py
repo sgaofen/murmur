@@ -281,6 +281,108 @@ class BuildTest(_Base):
         self.assertIn("model exploded", st["last_error"])
 
 
+class SaltedEmbedder(FakeEmbedder):
+    """Same model_id as FakeEmbedder but a different vector space (salted hash).
+
+    Stands in for "the index was rebuilt with different vectors" — any stale
+    in-memory matrix then scores visibly differently from the on-disk one.
+    """
+
+    def _vec(self, text):
+        return super()._vec("salt" + (text or ""))
+
+
+class RebuildRegressionTest(_Base):
+    """Review round 2 (#37) blockers — both reproduced before the fix."""
+
+    def _meta(self):
+        c = sqlite3.connect(str(self.idx.path))
+        try:
+            return dict(c.execute("SELECT key, value FROM meta").fetchall())
+        finally:
+            c.close()
+
+    # --- ① full rebuild resets `generation`, colliding with the cached one ---
+
+    def test_full_rebuild_never_reuses_generation(self):
+        self.idx.update()
+        before = self._meta()
+        self.idx.update(full=True)
+        after = self._meta()
+        # The in-memory matrix cache is keyed on these: a full rebuild over the
+        # same data used to land on exactly the same generation number.
+        self.assertNotEqual((before.get("build_id"), before.get("generation")),
+                            (after.get("build_id"), after.get("generation")))
+        self.assertGreater(int(after["generation"]), int(before["generation"]))
+
+    def test_full_rebuild_clears_cache(self):
+        self.idx.update()
+        self.idx._cache = ("sentinel", "ids", "matrix")
+        self.idx.update(full=True)
+        self.assertIsNone(self.idx._cache)
+
+    @unittest.skipUnless(HAVE_NUMPY, "矩阵缓存只在装了 numpy 时启用")
+    def test_full_rebuild_does_not_serve_stale_matrix(self):
+        self.idx.update()
+        self.idx.search("火锅")                    # fills the matrix cache
+        salted = SaltedEmbedder()
+        self.idx._embedder = salted
+        self.idx.update(full=True)                 # new vectors on disk
+        got = self.idx.search("火锅", limit=100)
+        fresh = sem.SemanticIndex(self.kw, self.idx.path, embedder=salted)
+        want = fresh.search("火锅", limit=100)
+        self.assertEqual([(x["chunk"]["id"], x["score"]) for x in got["results"]],
+                         [(x["chunk"]["id"], x["score"]) for x in want["results"]])
+
+    # --- ② keyword-index rebuild renumbers row ids under the semantic index ---
+
+    def _renumber_keyword_index(self):
+        """Realistic trigger: a message lands early in message_0.db, then the
+        keyword index is rebuilt (POST /api/search/rebuild) — every later row
+        id shifts by one while the semantic index still holds the old ids."""
+        c = sqlite3.connect(str(self.data / "message_0.db"))
+        base.add_msg(c, base.ALICE, base.ALICE, base.ts("2024-03-05"), "后来补进来的一条私聊消息")
+        c.commit()
+        c.close()
+        base.bump_mtime(self.data / "message_0.db")
+        self.kw.update(full=True)
+
+    def test_keyword_rebuild_does_not_mix_chats(self):
+        self.idx.update()
+        self._renumber_keyword_index()
+        r = self.idx.search("明天开会", limit=100)
+        bob = [x for x in r["results"] if x["chat"] == base.BOB]
+        self.assertTrue(bob, r["results"])
+        self.assertIn("Hello World 明天开会", [m["text"] for m in bob[0]["chunk"]["messages"]])
+        for x in r["results"]:
+            for m in x["chunk"]["messages"]:
+                self.assertNotIn("后来补进来", m["text"])  # never indexed semantically yet
+
+    def test_keyword_rebuild_chat_filter_holds(self):
+        self.idx.update()
+        self._renumber_keyword_index()
+        r = self.idx.search("开会", chat=base.BOB, limit=100)
+        self.assertTrue(r["results"])
+        for x in r["results"]:
+            self.assertEqual(x["chat"], base.BOB)
+            self.assertEqual([m["sender"] for m in x["chunk"]["messages"]], [base.BOB])
+        r = self.idx.search("晚饭", chat=base.GROUP, limit=100)
+        self.assertTrue(r["results"])
+        for x in r["results"]:
+            self.assertEqual(x["chat"], base.GROUP)
+            self.assertTrue(all(m["locator"]["table"] == base.table_for(base.GROUP)
+                                for m in x["chunk"]["messages"]))
+
+    def test_incremental_after_keyword_rebuild_recovers(self):
+        self.idx.update()
+        self._renumber_keyword_index()
+        self.idx.update()
+        self.assertEqual(sorted(self.covered_ids()), self.kw_ids())
+        r = self.idx.search("后来补进来的私聊消息", chat=base.ALICE)
+        self.assertTrue(any("后来补进来" in m["text"]
+                            for x in r["results"] for m in x["chunk"]["messages"]))
+
+
 class SearchTest(_Base):
     def setUp(self):
         super().setUp()
