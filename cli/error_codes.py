@@ -49,6 +49,9 @@ DISK_IO = "DISK_IO"
 # macOS live key capture (Frida, cli/live_key.py)
 FRIDA_MISSING = "FRIDA_MISSING"
 LIVE_KEY_FAILED = "LIVE_KEY_FAILED"
+# A live-key / private-copy capture round is running; re-signing or a memory
+# scan now would kill WeChat under it (or ask for a second admin password).
+KEY_CAPTURE_BUSY = "KEY_CAPTURE_BUSY"
 
 # QQ
 QQ_DATA_NOT_FOUND = "QQ_DATA_NOT_FOUND"

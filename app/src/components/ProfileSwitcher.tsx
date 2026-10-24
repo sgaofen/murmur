@@ -234,6 +234,57 @@ function Popover({ profiles, activeId, onClose, anchorRef, placement }: {
   const [pos, setPos] = useState<React.CSSProperties | null>(null);
   const privacyOn = usePrivacy();
   const qqSupported = supportsQQOnboarding();
+  const focusedOnce = useRef(false);
+  const focusInside = useRef(false);
+
+  const menuItems = () =>
+    Array.from(popRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? []);
+
+  // Keyboard: the menu is portaled to <body>, so Tab from the trigger would
+  // never reach it. Move focus to the first item once it is placed…
+  useEffect(() => {
+    if (!pos || focusedOnce.current) return;
+    focusedOnce.current = true;
+    menuItems()[0]?.focus({ preventScroll: true });
+  }, [pos]);
+
+  // …and hand it back to the trigger when the menu closes (Esc, Tab, a pick).
+  useEffect(() => {
+    const anchor = anchorRef.current;
+    return () => {
+      const a = document.activeElement;
+      if (focusInside.current || !a || a === document.body) {
+        anchor?.querySelector<HTMLElement>('button')?.focus({ preventScroll: true });
+      }
+    };
+  }, [anchorRef]);
+
+  // Swapping 「添加新账号」 for the platform buttons removes the focused node:
+  // keep focus in the footer (first platform button, or 「添加新账号」 again).
+  const footerRef = useRef<HTMLDivElement>(null);
+  const addingSeen = useRef(false);
+  useEffect(() => {
+    if (!addingSeen.current) { addingSeen.current = true; return; }
+    footerRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus({ preventScroll: true });
+  }, [adding]);
+
+  const onMenuKeyDown = (e: React.KeyboardEvent) => {
+    const list = menuItems();
+    if (!list.length) return;
+    const at = list.indexOf(document.activeElement as HTMLElement);
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      const step = e.key === 'ArrowDown' ? 1 : -1;
+      list[(at + step + list.length) % list.length]?.focus();
+    } else if (e.key === 'Home' || e.key === 'End') {
+      e.preventDefault();
+      list[e.key === 'Home' ? 0 : list.length - 1]?.focus();
+    } else if (e.key === 'Tab') {
+      // Menu pattern: Tab leaves the menu (focus returns to the trigger).
+      e.preventDefault();
+      onClose();
+    }
+  };
 
   // Track the anchor while open (window resize, page scroll, nav collapse).
   useLayoutEffect(() => {
@@ -286,7 +337,11 @@ function Popover({ profiles, activeId, onClose, anchorRef, placement }: {
   };
 
   return createPortal(
-    <div ref={popRef} role="menu" style={{ ...popoverShell, ...pos, visibility: pos ? 'visible' : 'hidden' }}>
+    <div ref={popRef} role="menu" aria-label="切换账号" className="app-account-menu"
+      onKeyDown={onMenuKeyDown}
+      onFocus={() => { focusInside.current = true; }}
+      onBlur={(e) => { focusInside.current = !!popRef.current?.contains(e.relatedTarget as Node | null); }}
+      style={{ ...popoverShell, ...pos, visibility: pos ? 'visible' : 'hidden' }}>
       <div style={popoverHeader}>
         <span className="et-eyebrow">你的账号</span>
         <span className="et-eyebrow" style={{ letterSpacing: '0.08em', color: 'var(--et-faint)', fontSize: 9 }}>
@@ -307,9 +362,9 @@ function Popover({ profiles, activeId, onClose, anchorRef, placement }: {
           />
         ))}
       </div>
-      <div style={popoverFooter}>
+      <div ref={footerRef} style={popoverFooter}>
         {!adding ? (
-          <button type="button" onClick={() => setAdding(true)} style={addBtn}
+          <button type="button" role="menuitem" onClick={() => setAdding(true)} style={addBtn}
             onMouseEnter={(e) => e.currentTarget.style.background = 'var(--et-paper-2)'}
             onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}>
             <span style={{ fontSize: 14, lineHeight: 1, color: 'var(--et-faint)' }}>＋</span>
@@ -330,7 +385,7 @@ function Popover({ profiles, activeId, onClose, anchorRef, placement }: {
                 />
               )}
             </div>
-            <button type="button" onClick={() => setAdding(false)}
+            <button type="button" role="menuitem" onClick={() => setAdding(false)}
               style={{ all: 'unset', cursor: 'pointer', color: 'var(--et-faint)',
                        fontSize: 10.5, marginTop: 6, padding: 2 }}>
               ← 返回
@@ -355,8 +410,13 @@ function ProfileRow({ p, isActive, isLast, hover, privacyOn, onHover, onClick }:
   return (
     <div
       role="menuitem"
-      tabIndex={0}
+      tabIndex={-1}
+      aria-current={isActive || undefined}
+      aria-disabled={p.state === 'extracting' || undefined}
       onClick={onClick}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); }
+      }}
       onMouseEnter={() => onHover(p.id)}
       onMouseLeave={() => onHover(null)}
       style={{
@@ -428,7 +488,7 @@ function ProfileRow({ p, isActive, isLast, hover, privacyOn, onHover, onClick }:
 function PlatformPickButton({ glyph, label, onClick }:
   { glyph: string; label: string; onClick: () => void }) {
   return (
-    <button type="button" onClick={onClick}
+    <button type="button" role="menuitem" onClick={onClick}
       style={{
         all: 'unset', cursor: 'pointer', display: 'flex', alignItems: 'center',
         gap: 8, padding: '10px 12px', background: 'var(--et-paper)',

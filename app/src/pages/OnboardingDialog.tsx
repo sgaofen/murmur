@@ -1,13 +1,29 @@
-import { useEffect, useState } from 'react';
-import { Button, Callout } from '../ui';
-import { errorCode, extractKey, getDiagnose, openFullDiskAccess, refreshData, resignWechat, saveKey, saveWeChatRoot, startDiskScan, getDiskScanStatus, cancelDiskScan } from '../data/api';
-import type { Diagnose, ScanState, ScanFound } from '../data/api';
-import { maskText } from '../utils/privacy';
+// WeChat onboarding (UI-4). A step rail on the left —
+//   环境自检 → 数据目录 → 授权/重签 (Mac) → 取得密钥 → 解密 → 完成
+// — and one screen per step on the right. Any finished step can be clicked
+// to redo just that step. Where a fresh diagnose lands is still the old
+// decision tree (onboarding/flow.ts: routeAfterCheck); every failure renders
+// through the error catalog (onboarding/parts.tsx: StepError).
+import { useEffect, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
+import { extractKey, getDiagnose, getInfo, openFullDiskAccess, refreshData, resignWechat, saveKey } from '../data/api';
+import type { Diagnose } from '../data/api';
 import { usePrivacy } from '../utils/usePrivacy';
-import { DiagBundleButton } from '../components/DiagBundleButton';
-import { ErrorExplain } from '../components/ErrorExplain';
-import { lookupError } from '../data/errorCatalog';
 import { LiveKeyCapture } from '../components/LiveKeyCapture';
+import { Button, Callout, Dialog } from '../ui';
+import { IconReport, IconSparkle } from '../ui/icons';
+import { IconLock } from '../onboarding/icons';
+import {
+  buildChecks, blockingCount, canForceDecrypt, dialogBusy, keyExtractFailureCode, liveRecommended, routeAfterCheck,
+  savedKeyPath, stepsFor, STEP_LABEL, VIEW_STEP,
+} from '../onboarding/flow';
+import type { KeySource, Platform, Route, StepKey, View } from '../onboarding/flow';
+import type { CaptureMethod } from '../onboarding/capture';
+import { createActionGuard } from '../onboarding/guard';
+import { describeError, InlineError, Lead, logTail, StepError, StepRail, Working } from '../onboarding/parts';
+import { SelfCheck } from '../onboarding/SelfCheck';
+import { DataStep, FdaStep } from '../onboarding/DataStep';
+import { AuthStep, MacKeyStep, MacPasteKey, MacWaitLogin, WinKeyStep } from '../onboarding/KeySteps';
 
 interface Props {
   open: boolean;
@@ -16,1249 +32,517 @@ interface Props {
   onPickQQ?: () => void;
   // Non-null when backend reports `bootstrap=true` because EchoStore couldn't
   // construct (e.g. session.db has no SessionTable, file is not a database,
-  // partial-decrypt residue). Renders a banner above Welcome so users see WHY
-  // they were sent back here, instead of silently looping through onboarding.
+  // partial-decrypt residue). Shown above Welcome so users see WHY they were
+  // sent back here, instead of silently looping through onboarding.
   initError?: string | null;
 }
 
-type Phase = 'welcome' | 'diagnose' | 'mac-no-data' | 'mac-paste-key' | 'mac-auto-extract' | 'mac-resign-prompt' | 'mac-resigning' | 'mac-wait-login' | 'mac-fda-needed' | 'win-no-data' | 'win-need-key' | 'win-decrypt' | 'extract-key' | 'mac-live-capture' | 'done' | 'error';
+type Screen = View | 'welcome' | 'error';
+
+interface Failure {
+  step: StepKey;
+  code: string | null;
+  raw?: string | null;
+  log?: string | null;
+  /** Screen 「重试这一步」 goes back to (default: the step's entry screen). */
+  retryView?: View;
+}
+
+function guessPlatform(): Platform {
+  return typeof navigator !== 'undefined' && /Mac|iPhone|iPad|iPod/i.test(navigator.platform) ? 'macos' : 'windows';
+}
 
 export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }: Props) {
   void usePrivacy();
-  const [phase, setPhase] = useState<Phase>('welcome');
-  const [diag, setDiag] = useState<Diagnose | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  // Stable backend error code for `error` (data/errorCatalog.ts); null → raw text only.
-  const [errCode, setErrCode] = useState<string | null>(null);
-  const [progress, setProgress] = useState<string>('');
+  const [screen, setScreen] = useState<Screen>('welcome');
+  const [diag, setDiagState] = useState<Diagnose | null>(null);
+  const diagRef = useRef<Diagnose | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [done, setDone] = useState<ReadonlySet<StepKey>>(() => new Set());
+  const [fail, setFail] = useState<Failure | null>(null);
+  const [progress, setProgress] = useState('');
   const [liveReason, setLiveReason] = useState<'scan-empty' | 'version' | 'manual'>('manual');
+  const [lastForce, setLastForce] = useState(false);
+  const [initCode, setInitCode] = useState<string | null>(null);
+  // 「我已经授权并重启过了」 and TCC still blocks → say so on the FDA screen.
+  const [fdaStillBlocked, setFdaStillBlocked] = useState(false);
+  // A Frida round / Frida install / private-copy round is running (reported by
+  // LiveKeyCapture): lock the step rail and Esc like the spinner screens.
+  const [captureBusy, setCaptureBusy] = useState(false);
+  // 实时抓取 opened from 「先不重签：用免 Frida 方式」 goes straight to that method.
+  const [liveMethod, setLiveMethod] = useState<CaptureMethod | null>(null);
+  // How this run got its key — the 完成 screen says where it was saved.
+  const [keySource, setKeySource] = useState<KeySource>(null);
+  // Every button goes through this: a second click while the first action is
+  // still running (double click) is dropped instead of sending a second request.
+  const [guard] = useState(createActionGuard);
+  const act = (fn: () => unknown) => () => { void guard.run(fn); };
+  const layoutRef = useRef<HTMLDivElement>(null);
+
+  function setDiag(d: Diagnose) {
+    diagRef.current = d;
+    setDiagState(d);
+  }
 
   useEffect(() => {
     if (!open) return;
-    setPhase('welcome');
-    setError(null);
-    setErrCode(null);
+    setScreen('welcome');
+    setFail(null);
+    setDone(new Set());
+    setFdaStillBlocked(false);
+    setKeySource(null);
+    setLiveMethod(null);
   }, [open]);
 
+  // The stuck-data banner: /api/info carries the catalog code for init_error.
   useEffect(() => {
-    if (
-      !open ||
-      phase !== 'win-need-key' ||
-      diag?.platform !== 'windows' ||
-      diag.capabilities.weixin_running !== false
-    ) {
-      return;
-    }
+    if (!open || !initError) { setInitCode(null); return; }
+    let cancelled = false;
+    getInfo()
+      .then(i => { if (!cancelled) setInitCode(i.init_error_code ?? null); })
+      .catch(() => { /* fall back to STORE_INIT_FAILED */ });
+    return () => { cancelled = true; };
+  }, [open, initError]);
 
+  // Windows: while WeChat isn't running, re-check every 2.5 s so 「开始抓密钥」
+  // unlocks by itself once the user opens WeChat.
+  useEffect(() => {
+    if (!open || screen !== 'key' || diag?.platform !== 'windows' || diag.capabilities.weixin_running !== false) return;
     let cancelled = false;
     const timer = window.setInterval(async () => {
       try {
         const d = await getDiagnose();
         if (!cancelled) setDiag(d);
       } catch {
-        // Keep the current diagnostic card visible; the manual button can still retry.
+        // Keep the current card; the manual button can still retry.
       }
     }, 2500);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [open, screen, diag?.platform, diag?.capabilities.weixin_running]);
 
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [open, phase, diag?.platform, diag?.capabilities.weixin_running]);
+  // New screen → start at the top of the scrolling dialog body.
+  useEffect(() => {
+    layoutRef.current?.closest('.ui-dialog__body')?.scrollTo({ top: 0 });
+  }, [screen]);
 
-  if (!open) return null;
+  const platform: Platform = diag?.platform ?? guessPlatform();
+  const steps = stepsFor(platform);
 
-  async function startDiagnose() {
-    setPhase('diagnose');
-    setErrCode(null);
+  // ———————— navigation ————————
+
+  function show(v: View) {
+    setFail(null);
+    setScreen(v);
+  }
+
+  /** Move forward: every step before `v`'s is done, later ones are not (yet). */
+  function advance(v: View) {
+    const order = stepsFor(diagRef.current?.platform ?? guessPlatform());
+    const at = order.indexOf(VIEW_STEP[v]);
+    setDone(new Set(order.slice(0, Math.max(0, at))));
+    show(v);
+  }
+
+  function failAt(step: StepKey, f: Omit<Failure, 'step'>) {
+    setFail({ step, ...f });
+    setScreen('error');
+  }
+
+  function follow(r: Route) {
+    if (r.kind === 'view') advance(r.view);
+    else if (r.kind === 'decrypt') void runDecrypt();
+    else failAt(r.step, { code: r.code });
+  }
+
+  /** Redo one step without touching the others. */
+  function redo(step: StepKey): Promise<void> | void {
+    const d = diagRef.current;
+    if (step === 'check' || !d) return runCheck();
+    if (step === 'data') show(d.platform === 'macos' && d.capabilities.tcc_blocked ? 'fda' : 'data');
+    else if (step === 'auth') show('auth');
+    else if (step === 'key') show('key');
+    else if (step === 'decrypt') show('decrypt');
+    else show('done');
+  }
+
+  function retry(f: Failure): Promise<void> | void {
+    if (f.step === 'decrypt') return runDecrypt({ force: lastForce });
+    if (f.retryView) { show(f.retryView); return; }
+    return redo(f.step);
+  }
+
+  // ———————— actions ————————
+
+  async function runCheck() {
+    show('check');
+    setChecking(true);
     try {
-      const d = await getDiagnose();
-      setDiag(d);
-      const hasDecrypted = d.profiles.some(p => p.has_decrypted_data);
-      const hasWeChatData = d.profiles.length > 0;
-      // Decision tree:
-      if (hasDecrypted) {
-        setPhase('done');  // existing data — just enter the app
-      } else if (d.platform === 'windows' && hasWeChatData && !d.saved_key) {
-        setPhase('win-need-key');  // Win can auto-extract key
-      } else if (d.platform === 'windows' && hasWeChatData && d.saved_key) {
-        // Win with key but no decrypted yet — go straight to decrypt
-        await runDecrypt();
-      } else if (d.platform === 'macos' && d.capabilities.tcc_blocked) {
-        // Highest-priority Mac branch: TCC blocked the backend from reading
-        // ~/Library/Containers/<wechat>. Without this permission nothing else
-        // can succeed — show the FDA-grant flow first.
-        setPhase('mac-fda-needed');
-      } else if (d.platform === 'macos' && hasWeChatData) {
-        if (d.saved_key) {
-          await runDecrypt();
-        } else if (d.capabilities.can_extract_key) {
-          setPhase('mac-auto-extract');
-        } else if (d.capabilities.wechat_hardened === true) {
-          setPhase('mac-resign-prompt');
-        } else {
-          setPhase('mac-paste-key');
-        }
-      } else if (d.platform === 'macos' && !hasWeChatData) {
-        setPhase('mac-no-data');
-      } else if (d.platform === 'windows' && !hasWeChatData) {
-        setPhase('win-no-data');
-      } else {
-        setError('看起来你还没在这台电脑上登录过微信，请先用微信登录一次。');
-        setErrCode('WECHAT_DATA_NOT_FOUND');
-        setPhase('error');
-      }
-    } catch (e: any) {
-      setError(e?.message || String(e));
-      setErrCode(errorCode(e));
-      setPhase('error');
+      setDiag(await getDiagnose());
+    } catch (e) {
+      failAt('check', describeError(e));
+    } finally {
+      setChecking(false);
     }
   }
 
-  async function runDecrypt() {
-    setProgress('正在解密所有微信数据库…');
-    setPhase('win-decrypt');
-    setErrCode(null);
+  /** Re-diagnose and go wherever that lands (after saving a folder / granting FDA). */
+  async function recheckAndFollow(from: StepKey) {
+    setChecking(true);
     try {
-      const r = await refreshData();
-      if (!r.ok) {
-        setError(r.details || '解密失败');
-        setErrCode(r.code ?? 'DECRYPT_FAILED');
-        setPhase('error');
-        return;
-      }
-      // Decrypt subprocess succeeded BUT the backend's auto-promote still
-      // failed — show the real reason instead of pretending success and then
-      // looping back into bootstrap on reload. Common cause: session.db
-      // decrypted but missing SessionTable, or partial decrypt residue.
-      if (r.init_error) {
-        setError(`解密完成但后端无法加载这份数据：${r.init_error}\n\n` +
-                 `常见原因：session.db 损坏 / 表名不匹配 / 解密目录里有上次失败的残留文件。\n` +
-                 `建议：完全退出 Murmur，删除 ~/Documents/Murmur/decrypted/ 整个目录，重新走引导（抓 key 前先在微信里点开聊天列表 + 几个对话 + 朋友圈让 WCDB 派发完整 key）。`);
-        setErrCode(r.code ?? 'STORE_INIT_FAILED');
-        setPhase('error');
-        return;
-      }
-      setPhase('done');
-    } catch (e: any) {
-      setError(e?.message || String(e));
-      setErrCode(errorCode(e));
-      setPhase('error');
+      const d = await getDiagnose();
+      setDiag(d);
+      const r = routeAfterCheck(d);
+      setFdaStillBlocked(r.kind === 'view' && r.view === 'fda');
+      follow(r);
+    } catch (e) {
+      failAt(from, describeError(e));
+    } finally {
+      setChecking(false);
+    }
+  }
+
+  async function runDecrypt(opts: { force?: boolean; text?: string } = {}) {
+    setLastForce(!!opts.force);
+    setProgress(opts.text || '正在解密所有微信数据库…');
+    advance('decrypting');
+    try {
+      const r = await refreshData(opts.force ? { force: true } : {});
+      if (!r.ok) { failAt('decrypt', { code: r.code ?? 'DECRYPT_FAILED', raw: r.details }); return; }
+      // Decrypt succeeded but the backend still can't load the store (e.g.
+      // session.db without SessionTable) — don't pretend success and loop.
+      if (r.init_error) { failAt('decrypt', { code: r.code ?? 'STORE_INIT_FAILED', raw: r.init_error }); return; }
+      advance('done');
+    } catch (e) {
+      failAt('decrypt', describeError(e));
     }
   }
 
   async function submitMacKey(key: string) {
     const cleaned = key.trim().toLowerCase();
-    setErrCode(null);
     if (cleaned.length !== 64 || !/^[0-9a-f]+$/.test(cleaned)) {
-      setError('密钥格式不对：必须是 64 位十六进制字符（0-9a-f）');
-      setErrCode('KEY_FORMAT_INVALID');
-      setPhase('error');
+      failAt('key', { code: 'KEY_FORMAT_INVALID', retryView: 'paste' });
       return;
     }
     try {
       const sr = await saveKey(cleaned);
-      if (!sr.ok) {
-        setError(sr.error || '保存密钥失败');
-        setErrCode(sr.code ?? null);
-        setPhase('error');
-        return;
-      }
+      if (!sr.ok) { failAt('key', { code: sr.code ?? null, raw: sr.error, retryView: 'paste' }); return; }
+      setKeySource('paste');
       await runDecrypt();
-    } catch (e: any) {
-      setError(e?.message || String(e));
-      setErrCode(errorCode(e));
-      setPhase('error');
+    } catch (e) {
+      failAt('key', { ...describeError(e), retryView: 'paste' });
     }
   }
 
   async function startKeyExtract() {
-    setErrCode(null);
+    const win = diagRef.current?.platform === 'windows';
     try {
-      if (diag?.platform === 'windows') {
+      if (win) {
         const latest = await getDiagnose();
         setDiag(latest);
-        if (latest.capabilities.weixin_running === false) {
-          setError('没有检测到正在运行的 Weixin.exe / WeChat.exe。请先打开微信，让它停在登录页但不要关闭程序；然后回到 Murmur 点「再次检测微信」。');
-          setErrCode('WECHAT_NOT_RUNNING');
-          setPhase('error');
-          return;
-        }
+        if (latest.capabilities.weixin_running === false) { failAt('key', { code: 'WECHAT_NOT_RUNNING' }); return; }
       }
-      setPhase('extract-key');
-      setProgress(diag?.platform === 'windows'
+      setProgress(win
         ? 'Hook 正在等待登录事件：请保持微信在登录页，然后去微信点击登录 / 扫码登录…'
-        : '扫描 WeChat 进程内存中…');
-      // autoRestart=false: hook the existing WeChat instead of kill+relaunch.
-      // Kill+relaunch on Win11 + WeChat 4.1.x sometimes makes the new Weixin.exe die
-      // before the hook can attach. The reliable flow is: user logs out first
-      // and leaves WeChat at the login page, then Murmur installs the hook, then
-      // the user logs in so the hook can catch the login event.
+        : '正在扫描微信进程内存…');
+      show('extracting');
+      // autoRestart=false: hook the running WeChat instead of kill+relaunch
+      // (on Win11 + WeChat 4.1.x a relaunched Weixin.exe can die before the
+      // hook attaches). The user logs out first, Murmur installs the hook,
+      // then the login event carries the key.
       const r = await extractKey({ autoRestart: false, timeout: 90 });
-      // On Mac, extract_key_mac.py writes ~/.murmur/decrypted_keys.json directly.
-      // r.ok=true with no r.key means the per-DB JSON was written.
-      // On Win, r.key holds the password we still need to save.
-      if (!r.ok && diag?.platform === 'macos' && r.suggest_live === true) {
-        // WeChat 4.1.9+: the memory scan legitimately finds nothing. Don't
-        // dead-end on an error page — go straight to live capture (Frida).
+      if (!r.ok && !win && r.suggest_live === true) {
+        // WeChat 4.1.9+: the memory scan legitimately finds nothing — go
+        // straight to live capture instead of dead-ending on an error.
         setLiveReason('scan-empty');
-        setPhase('mac-live-capture');
+        show('live');
         return;
       }
       if (!r.ok) {
-        const fallback = diag?.platform === 'windows'
-          ? '没读到密钥 — 请确认微信程序没有关闭：先让微信停在登录页，再点 Murmur 的开始抓密钥，然后在 90 秒内回微信完成登录。'
-          : '没读到密钥 — 请确保已登录微信并点开几个对话';
-        setError(r.log?.split('\n').slice(-12).join('\n') || fallback);
-        setErrCode(r.code ?? 'KEY_NOT_FOUND');
-        setPhase('error');
+        failAt('key', { code: keyExtractFailureCode(r, win), raw: logTail(r.log) });
         return;
       }
-      if (r.key) {
-        // Windows path
-        await saveKey(r.key);
-      }
-      setProgress('密钥已就位，开始解密…');
-      setPhase('win-decrypt');
-      const r2 = await refreshData();
-      if (!r2.ok) {
-        setError(r2.details || '解密失败');
-        setErrCode(r2.code ?? 'DECRYPT_FAILED');
-        setPhase('error');
-        return;
-      }
-      // Same init_error guard as runDecrypt() — refresh subprocess succeeded
-      // but EchoStore re-init still threw (e.g. session.db missing SessionTable).
-      // Without this branch the user sees ✓ 一切就绪 → reload → bootstrap loop.
-      if (r2.init_error) {
-        setError(`解密完成但后端无法加载这份数据：${r2.init_error}\n\n` +
-                 `常见原因：session.db 损坏 / 表名不匹配 / 解密目录里有上次失败的残留文件。\n` +
-                 `建议：完全退出 Murmur，删除 ~/Documents/Murmur/decrypted/ 整个目录，重新走引导。`);
-        setErrCode(r2.code ?? 'STORE_INIT_FAILED');
-        setPhase('error');
-        return;
-      }
-      setPhase('done');
-    } catch (e: any) {
-      setError(e?.message || String(e));
-      setErrCode(errorCode(e));
-      setPhase('error');
+      // Windows returns the master key; Mac writes ~/.murmur/decrypted_keys.json itself.
+      if (r.key) await saveKey(r.key);
+      setKeySource('capture');
+      await runDecrypt({ text: '密钥已就位，开始解密…' });
+    } catch (e) {
+      failAt('key', describeError(e));
     }
-  }
-
-  function openLive(d: Diagnose | null) {
-    setLiveReason(d?.live_key?.recommended ? 'version' : 'manual');
-    setPhase('mac-live-capture');
   }
 
   async function startResign() {
-    setPhase('mac-resigning');
-    setProgress('检查 WeChat 是否已退出，然后重签名…（系统会弹窗要开机密码）');
-    setErrCode(null);
+    setProgress('检查微信是否已退出，然后重签名…（系统会弹窗要开机密码）');
+    show('resigning');
     try {
       const r = await resignWechat({ relaunch: true });
       if (!r.ok) {
-        setError([r.error, r.stderr].filter(Boolean).join('\n') || '重签名失败：请确认系统密码窗口没有被取消。');
-        setErrCode(r.code ?? 'RESIGN_FAILED');
-        setPhase('error');
+        failAt('auth', { code: r.code ?? 'RESIGN_FAILED', raw: [r.error, r.stderr].filter(Boolean).join('\n') });
         return;
       }
-      setPhase('mac-wait-login');
-    } catch (e: any) {
-      setError(e?.message || String(e));
-      setErrCode(errorCode(e));
-      setPhase('error');
+      advance('wait-login');
+      // Refresh the signature row in the background.
+      getDiagnose().then(setDiag).catch(() => { /* keep the old diagnose */ });
+    } catch (e) {
+      failAt('auth', describeError(e));
     }
   }
 
-  async function openFDAAndWait() {
-    try {
-      await openFullDiskAccess();
-    } catch (e: any) {
-      // If endpoint fails (rare), still show the manual instructions
-      console.warn('open-fda failed', e);
-    }
+  function openLive(method: CaptureMethod | null = null) {
+    setLiveReason(liveRecommended(diagRef.current) ? 'version' : 'manual');
+    setLiveMethod(method);
+    advance('live');
+  }
+
+  function openFda() {
+    openFullDiskAccess().catch(e => console.warn('open-fda failed', e));
+  }
+
+  // ———————— render ————————
+
+  const busy = dialogBusy(screen, checking, captureBusy);
+  const current: StepKey | null = screen === 'welcome' ? null : screen === 'error' ? (fail?.step ?? 'check') : VIEW_STEP[screen];
+  const stepNo = current ? steps.indexOf(current) + 1 : 0;
+  const mac = platform === 'macos';
+
+  const notes: Partial<Record<StepKey, string>> = {};
+  if (diag) {
+    const rows = buildChecks(diag);
+    const blocking = blockingCount(rows);
+    const warns = rows.filter(r => r.status === 'warn').length;
+    notes.check = blocking > 0 ? `${blocking} 项需要处理` : warns > 0 ? `${warns} 项留意一下` : '环境没问题';
+    if (diag.profiles.length) notes.data = `找到 ${diag.profiles.length} 个账号`;
+    if (mac && diag.capabilities.wechat_hardened === false) notes.auth = '已重签';
+    else if (mac && diag.capabilities.wechat_hardened) notes.auth = diag.saved_key ? '已有密钥，不用重签' : '需要重签';
+    if (diag.saved_key || keySource) notes.key = '已保存';
+    else if (liveRecommended(diag)) notes.key = '推荐实时抓取';
+  }
+
+  let title: string;
+  let body: ReactNode;
+  switch (screen) {
+    case 'welcome':
+      title = '回顾你的微信故事';
+      body = (
+        <Welcome initError={initError} initCode={initCode} onPickQQ={onPickQQ} mac={guessPlatform() === 'macos'}
+          onStart={act(() => { setDone(new Set()); return runCheck(); })} />
+      );
+      break;
+    case 'check':
+      title = '先检查一下环境';
+      body = (
+        <SelfCheck diag={diag} checking={checking} route={diag ? routeAfterCheck(diag) : null}
+          onContinue={act(() => { if (diag) follow(routeAfterCheck(diag)); })}
+          onRecheck={act(runCheck)}
+          onGotoData={() => advance(diag?.platform === 'macos' && diag.capabilities.tcc_blocked ? 'fda' : 'data')}
+          onGotoAuth={() => advance('auth')} />
+      );
+      break;
+    case 'fda':
+      title = '给 Murmur 完全磁盘访问权限';
+      body = (
+        <>
+          {fdaStillBlocked && <InlineError code="TCC_BLOCKED" className="ui-mb-4" />}
+          <FdaStep onOpenSettings={openFda} onRetry={act(() => recheckAndFollow('data'))} retrying={checking} />
+        </>
+      );
+      break;
+    case 'data':
+      title = diag?.profiles.length ? '找到你的微信数据' : mac ? 'Mac 上还没找到微信数据' : '没找到微信数据目录';
+      body = diag && (
+        <DataStep diag={diag} onSaved={() => recheckAndFollow('data')}
+          onNext={act(() => follow(routeAfterCheck(diag)))}
+          onRecheck={act(() => recheckAndFollow('data'))} onOpenFda={openFda} />
+      );
+      break;
+    case 'auth':
+      title = diag?.capabilities.wechat_hardened === false ? '微信已经重签过了' : '一次性给微信重签名（不用关 SIP）';
+      body = diag && (
+        <AuthStep diag={diag} onResign={act(startResign)} onNext={() => advance('key')}
+          onPaste={() => advance('paste')} onPrivateCopy={() => openLive('private-copy')} onOpenFda={openFda} />
+      );
+      break;
+    case 'resigning':
+      title = '正在重签名…';
+      body = <Working title={progress || '正在重签名…'} sub="系统弹出密码窗口时，输入这台电脑的开机密码。" />;
+      break;
+    case 'wait-login':
+      title = '微信已重启：先登录，再回来抓密钥';
+      body = <MacWaitLogin diag={diag} onScan={act(startKeyExtract)} onLive={() => openLive()} />;
+      break;
+    case 'key':
+      title = mac ? (liveRecommended(diag) ? '取得解密密钥' : '一切就绪 —— 一键抓密钥') : '只需要 30 秒，读取一次密钥';
+      body = diag && (mac ? (
+        <MacKeyStep diag={diag} onScan={act(startKeyExtract)} onLive={() => openLive()}
+          onPaste={() => show('paste')} onResign={() => show('auth')} />
+      ) : (
+        <WinKeyStep diag={diag} onStart={act(startKeyExtract)} rechecking={checking}
+          onRecheck={act(async () => {
+            setChecking(true);
+            try { setDiag(await getDiagnose()); } catch { /* keep the card */ } finally { setChecking(false); }
+          })} />
+      ));
+      break;
+    case 'live':
+      title = '实时抓取密钥（微信 4.1.9+）';
+      body = (
+        <LiveKeyCapture reason={liveReason} wechatVersion={diag?.wechat_version}
+          keycapAvailable={diag?.private_copy?.available}
+          hardened={mac && diag?.capabilities.wechat_hardened === true}
+          initialMethod={liveMethod} onBusyChange={setCaptureBusy}
+          onDecrypt={act(() => { setKeySource('capture'); return runDecrypt(); })} onPaste={() => show('paste')} />
+      );
+      break;
+    case 'paste':
+      title = '手动粘贴密钥';
+      body = diag && <MacPasteKey diag={diag} onSubmit={k => void guard.run(() => submitMacKey(k))} onLive={() => openLive()} />;
+      break;
+    case 'extracting':
+      title = '正在读取密钥…';
+      body = <Working title={progress} sub="过程中如果看到微信弹窗，记得点「登录」。" />;
+      break;
+    case 'decrypt':
+      title = '重新解密';
+      body = <DecryptStep canForce={canForceDecrypt(diag)} onRun={force => void guard.run(() => runDecrypt({ force }))} />;
+      break;
+    case 'decrypting':
+      title = '正在解密最新数据…';
+      body = <Working title={progress || '正在解密所有微信数据库…'} sub="数据多的话要几分钟，请不要关闭 Murmur。" />;
+      break;
+    case 'done':
+      title = '一切就绪';
+      body = <DoneStep keyPath={savedKeyPath(platform, keySource)} onEnter={() => { onClose(); onDone?.(); }} />;
+      break;
+    case 'error':
+    default:
+      title = `卡在「${STEP_LABEL[fail?.step ?? 'check']}」这一步`;
+      body = fail && (
+        <StepError code={fail.code} raw={fail.raw} log={fail.log}
+          onRetry={act(() => retry(fail))}
+          actions={fail.step !== 'check' ? (
+            <Button variant="ghost" onClick={act(runCheck)}>重新检测环境</Button>
+          ) : undefined} />
+      );
+      break;
   }
 
   return (
-    <div style={{
-      position: 'fixed', inset: 0, zIndex: 200,
-      background: 'rgba(20,24,42,0.62)',
-      backdropFilter: 'blur(10px)',
-      display: 'flex', alignItems: 'center', justifyContent: 'center',
-      padding: 24,
-    }}>
-      <div style={{
-        width: 640, maxWidth: '94%',
-        // The Mac key steps (checklists + capability table) can outgrow small
-        // windows; scroll inside the card instead of clipping the header.
-        maxHeight: 'calc(100vh - 48px)', overflowY: 'auto',
-        background: 'var(--et-paper)',
-        borderRadius: 'var(--et-r-lg)',
-        boxShadow: 'var(--et-shadow-3)',
-        border: '0.5px solid var(--et-line-2)',
-        position: 'relative',
-      }}>
-        <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 6, background: 'var(--et-orange)' }} />
-        <button onClick={onClose} title="跳过引导（不推荐）" style={{
-          all: 'unset', position: 'absolute', top: 14, right: 14, cursor: 'pointer',
-          width: 28, height: 28, borderRadius: 8, color: 'var(--et-mute)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-        }}>
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5">
-            <path d="M3 3l8 8M11 3l-8 8" strokeLinecap="round" />
-          </svg>
-        </button>
-        <div style={{ padding: '28px 32px 0' }}>
-          <div className="et-eyebrow" style={{ color: 'var(--et-orange)' }}>欢迎来到 Murmur</div>
-          <div className="et-h1" style={{ color: 'var(--et-ink)', marginTop: 8, fontSize: 32 }}>
-            {phase === 'welcome' && '回顾你的微信故事'}
-            {phase === 'diagnose' && '正在检测你的电脑…'}
-            {phase === 'mac-no-data' && 'Mac 上还没找到微信数据'}
-            {phase === 'mac-auto-extract' && '一切就绪 — 一键抓密钥'}
-            {phase === 'mac-resign-prompt' && '一次性给 WeChat 重签名（不需要关 SIP）'}
-            {phase === 'mac-resigning' && '正在重签名…'}
-            {phase === 'mac-wait-login' && '微信已重启，请登录 → 然后回来抓密钥'}
-            {phase === 'mac-fda-needed' && '第一步：给 Murmur 完全磁盘访问权限'}
-            {phase === 'win-no-data' && '没找到微信数据目录'}
-            {phase === 'win-need-key' && '只需要 30 秒，读取一次密钥'}
-            {phase === 'extract-key' && '正在读取密钥…'}
-            {phase === 'mac-live-capture' && '实时抓取密钥（微信 4.1.9+）'}
-            {phase === 'win-decrypt' && '正在解密最新数据…'}
-            {phase === 'done' && '✓ 一切就绪'}
-            {phase === 'error' && '出了点小问题'}
-          </div>
-        </div>
-        <div style={{ padding: '14px 32px 28px' }}>
-          {phase === 'welcome' && (
-            <>
-              {initError && <BootstrapInitErrorBanner reason={initError} />}
-              <Welcome onNext={startDiagnose} onPickQQ={onPickQQ} />
-            </>
-          )}
-          {phase === 'diagnose' && <Diagnosing />}
-          {phase === 'mac-no-data' && diag && <MacNoData diag={diag} onSaved={startDiagnose} onRetry={startDiagnose} onOpenSettings={openFDAAndWait} />}
-          {phase === 'mac-paste-key' && diag && <MacPasteKey diag={diag} onSubmit={submitMacKey} />}
-          {phase === 'mac-auto-extract' && diag && <MacAutoExtract diag={diag} onStart={startKeyExtract} onLive={() => openLive(diag)} onPaste={() => setPhase('mac-paste-key')} />}
-          {phase === 'mac-resign-prompt' && diag && <MacResignPrompt diag={diag} onConsent={startResign} onPaste={() => setPhase('mac-paste-key')} />}
-          {phase === 'mac-resigning' && <Working text={progress || '正在重签名…'} />}
-          {phase === 'mac-wait-login' && <MacWaitLogin diag={diag} onContinue={startKeyExtract} onLive={() => openLive(diag)} />}
-          {phase === 'mac-live-capture' && (
-            <LiveKeyCapture reason={liveReason} wechatVersion={diag?.wechat_version}
-              onDecrypt={() => void runDecrypt()} onPaste={() => setPhase('mac-paste-key')} />
-          )}
-          {phase === 'mac-fda-needed' && <MacFDANeeded onOpenSettings={openFDAAndWait} onRetry={startDiagnose} />}
-          {phase === 'win-no-data' && diag && <WinNoData diag={diag} onSaved={startDiagnose} />}
-          {phase === 'win-need-key' && diag && <WinNeedKey diag={diag} onStart={startKeyExtract} onRetry={startDiagnose} />}
-          {phase === 'extract-key' && <Working text={progress} />}
-          {phase === 'win-decrypt' && <Working text={progress || "正在解密所有微信数据库…"} />}
-          {phase === 'done' && <Done onDone={() => { onClose(); onDone?.(); }} />}
-          {phase === 'error' && <ErrorView error={error || ''} code={errCode} diag={diag} onRetry={startDiagnose} />}
-        </div>
+    <Dialog
+      open={open}
+      onClose={onClose}
+      size="lg"
+      accent
+      // While something runs, Esc / ✕ would close the onboarding and mark it
+      // as seen with the job still going — keep it open until it settles.
+      dismissible={!busy}
+      closeOnScrim={false}
+      closeLabel="跳过引导（不推荐）"
+      className="ob-dialog"
+      eyebrow={current ? `微信初始化 · 第 ${stepNo} 步，共 ${steps.length} 步` : '欢迎来到 Murmur'}
+      title={title}
+    >
+      <div className="ob-layout" ref={layoutRef}>
+        <StepRail steps={steps} current={current} done={done} error={screen === 'error'}
+          notes={notes} onStepClick={busy ? undefined : k => void guard.run(() => redo(k))} />
+        <div className="ob-main" key={screen}>{body}</div>
       </div>
-    </div>
+    </Dialog>
   );
 }
 
-function BootstrapInitErrorBanner({ reason }: { reason: string }) {
-  return (
-    <div style={{
-      padding: '14px 16px', marginBottom: 16,
-      background: 'rgba(196,90,63,0.10)', border: '0.5px solid rgba(196,90,63,0.45)',
-      borderRadius: 10, lineHeight: 1.6,
-    }}>
-      <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--et-rose)', marginBottom: 6 }}>
-        ⚠ 上次解密的数据无法加载，所以又回到了引导
-      </div>
-      <div style={{ fontSize: 12, color: 'var(--et-ink-soft)', fontFamily: 'var(--et-mono)',
-                     padding: '8px 10px', background: 'var(--et-paper-2)', borderRadius: 6,
-                     marginBottom: 10, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-        {reason}
-      </div>
-      <div style={{ fontSize: 12, color: 'var(--et-ink-soft)', marginBottom: 10 }}>
-        建议：完全退出 Murmur，删除 <code>~/Documents/Murmur/decrypted/</code> 整个目录，
-        然后**先在微信里点开聊天列表 + 几个对话 + 朋友圈**让 WCDB 把所有 DB 的 key 派发进内存，
-        再回 Murmur 重新走下面的引导。
-      </div>
-      <DiagBundleButton size="sm" />
-    </div>
-  );
-}
-
-function Welcome({ onNext, onPickQQ }: { onNext: () => void; onPickQQ?: () => void }) {
-  const isMacClient = typeof navigator !== 'undefined' && /Mac|iPhone|iPad|iPod/i.test(navigator.platform);
+function Welcome({ initError, initCode, mac, onStart, onPickQQ }: {
+  initError?: string | null; initCode: string | null; mac: boolean;
+  onStart: () => void; onPickQQ?: () => void;
+}) {
   return (
     <>
-      <div className="et-serif" style={{ fontSize: 17, lineHeight: 1.7, color: 'var(--et-ink-soft)', marginBottom: 18 }}>
+      {initError && (
+        <div className="ui-mb-4">
+          <StepError code={initCode ?? 'STORE_INIT_FAILED'} raw={initError}
+            title="上次解密的数据没能加载，所以又回到了引导" />
+        </div>
+      )}
+      <Lead>
         Murmur 是一本关于你这些年聊天的<strong>本地</strong>纪念册 ——
         所有数据从微信读出，分析后只在你的电脑上呈现，不会上传到任何地方。
-      </div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 18 }}>
-        {[
-          ['🔒', '完全本地', '从读取密钥到分析，一切在你的电脑上完成。'],
-          ['🤖', '可选 AI 分析', '检测到本机的 Claude Code / Codex / Gemini / Kimi / OpenCode，可以让 AI 直接读你的关系档案。'],
-          ['📓', '杂志风回顾', '不是冰冷的统计，是你和老朋友之间故事的体面整理。'],
-        ].map(([icon, title, body]) => (
-          <div key={title} style={{ display: 'flex', gap: 14, padding: '12px 14px',
-            background: 'var(--et-paper-2)', borderRadius: 12 }}>
-            <div style={{ fontSize: 22 }}>{icon}</div>
-            <div>
-              <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--et-ink)' }}>{title}</div>
-              <div className="et-meta" style={{ fontSize: 12, marginTop: 2 }}>{body}</div>
-            </div>
+      </Lead>
+      <ul className="ob-features">
+        <li className="ob-feature">
+          <span className="ob-feature__icon"><IconLock size={17} /></span>
+          <div>
+            <div className="ob-feature__title">完全本地</div>
+            <div className="ob-feature__body">从读取密钥到分析，一切在你的电脑上完成。</div>
           </div>
-        ))}
-      </div>
-      <div className="ui-stack">
-        <Button variant="primary" size="lg" block onClick={onNext}>开始（微信）</Button>
-        {onPickQQ && !isMacClient && (
-          <Button variant="secondary" size="lg" block onClick={onPickQQ}>🐧 切换到 QQ</Button>
-        )}
-      </div>
-    </>
-  );
-}
-
-function Diagnosing() {
-  return (
-    <div style={{ textAlign: 'center', padding: '40px 0' }}>
-      <div style={{ display: 'inline-block', animation: 'spin 1.4s linear infinite', fontSize: 32 }}>⚙️</div>
-      <div className="et-meta" style={{ marginTop: 16 }}>检测系统、微信安装、已有数据…</div>
-      <style>{`@keyframes spin { from { transform: rotate(0); } to { transform: rotate(360deg); } }`}</style>
-    </div>
-  );
-}
-
-function CapabilityList({ diag }: { diag: Diagnose }) {
-  const rows: Array<[string, string, boolean]> = [
-    ['平台', diag.platform === 'windows' ? 'Windows ✓' : diag.platform === 'macos' ? 'macOS' : diag.platform, true],
-    ['微信安装', diag.capabilities.has_wechat_installed ? '已安装 ✓' : '未找到', diag.capabilities.has_wechat_installed],
-    ['微信数据', diag.capabilities.has_wechat_data ? '已找到 ✓' : '没有 ❌', diag.capabilities.has_wechat_data],
-    ['可解密数据库', diag.capabilities.can_decrypt_db ? '可以 ✓' : '不行 ⚠', diag.capabilities.can_decrypt_db],
-    ['可抓取密钥', diag.capabilities.can_extract_key ? '可以 ✓' : '不行 ⚠', diag.capabilities.can_extract_key],
-  ];
-  if (diag.platform === 'macos') {
-    if (diag.capabilities.wechat_hardened !== null && diag.capabilities.wechat_hardened !== undefined) {
-      rows.push(['WeChat 签名状态', diag.capabilities.wechat_hardened ? 'hardened（默认）' : 'ad-hoc ✓', !diag.capabilities.wechat_hardened]);
-    }
-    if (diag.capabilities.sip_enabled !== null && diag.capabilities.sip_enabled !== undefined) {
-      rows.push(['SIP（系统完整性保护）', diag.capabilities.sip_enabled ? '开启（默认）' : '已关闭', true]);
-    }
-  }
-  if (diag.capabilities.weixin_running !== null && diag.capabilities.weixin_running !== undefined) {
-    rows.push(['微信进程', diag.capabilities.weixin_running ? '运行中 ✓' : '未运行', !!diag.capabilities.weixin_running]);
-  }
-  if (diag.wechat_search_roots?.length) {
-    rows.push(['扫描路径', `${diag.wechat_search_roots.length} 个`, true]);
-  }
-  rows.push(['本机 AI agents', `${diag.agents_found} 个 ✓`, true]);
-  return (
-    <div style={{ background: 'var(--et-paper-2)', padding: '12px 16px', borderRadius: 10, fontSize: 12 }}>
-      {rows.map(([k, v, ok]) => (
-        <div key={k as string} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0' }}>
-          <span style={{ color: 'var(--et-mute)' }}>{k}</span>
-          <span style={{ color: ok ? 'var(--et-ink)' : 'var(--et-rose)', fontWeight: 500 }}>{v}</span>
-        </div>
-      ))}
-      {diag.profiles.length === 0 && diag.wechat_search_roots?.length ? (
-        <details open style={{ marginTop: 8, borderTop: '0.5px solid var(--et-line)', paddingTop: 8 }}>
-          <summary style={{ cursor: 'pointer', color: 'var(--et-mute)', marginBottom: 6 }}>已扫描的微信数据位置</summary>
-          <div style={{ maxHeight: 140, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 4 }}>
-            {diag.wechat_search_roots.slice(0, 30).map((p) => (
-              <code key={p} style={{ fontFamily: 'var(--et-mono)', color: 'var(--et-ink-soft)', wordBreak: 'break-all' }}>{maskText(p)}</code>
-            ))}
+        </li>
+        <li className="ob-feature">
+          <span className="ob-feature__icon"><IconSparkle size={17} /></span>
+          <div>
+            <div className="ob-feature__title">可选 AI 分析</div>
+            <div className="ob-feature__body">检测到本机的 Claude Code / Codex / Gemini / Kimi / OpenCode，可以让 AI 直接读你的关系档案。</div>
           </div>
-        </details>
-      ) : null}
-    </div>
-  );
-}
-
-function MacNoData({ diag, onSaved, onRetry, onOpenSettings }: {
-  diag: Diagnose;
-  onSaved: () => void;
-  onRetry: () => void;
-  onOpenSettings: () => void;
-}) {
-  const [path, setPath] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [msg, setMsg] = useState<string | null>(null);
-
-  async function submit() {
-    const cleaned = path.trim();
-    if (!cleaned) {
-      setMsg('请先粘贴一个路径。');
-      return;
-    }
-    setSaving(true);
-    setMsg(null);
-    try {
-      const r = await saveWeChatRoot(cleaned);
-      if (!r.ok) {
-        setMsg(r.error || '这个路径里没有找到微信数据。');
-        return;
-      }
-      setMsg(`✓ 已找到 ${r.profiles?.length || 1} 个微信账号，正在重新检测…`);
-      window.setTimeout(onSaved, 450);
-    } catch (e: any) {
-      setMsg(e?.message || String(e));
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <>
-      <div className="et-serif" style={{ fontSize: 15, lineHeight: 1.7, color: 'var(--et-ink-soft)', marginBottom: 16 }}>
-        Murmur 没在当前可读取的位置找到微信数据。通常是这几种情况：
-      </div>
-      <ul style={{ paddingLeft: 20, lineHeight: 1.8, fontSize: 13, color: 'var(--et-ink)', marginBottom: 14 }}>
-        <li>这台 Mac 还没登录过微信，或微信还没完成首次同步</li>
-        <li>macOS 权限挡住了微信容器目录，需要给 Murmur 完全磁盘访问</li>
-        <li>微信数据被迁移到了自定义目录，需要手动告诉 Murmur</li>
+        </li>
+        <li className="ob-feature">
+          <span className="ob-feature__icon"><IconReport size={17} /></span>
+          <div>
+            <div className="ob-feature__title">杂志风回顾</div>
+            <div className="ob-feature__body">不是冰冷的统计，是你和老朋友之间故事的体面整理。</div>
+          </div>
+        </li>
       </ul>
-      <CapabilityList diag={diag} />
-      <div style={{
-        padding: '12px 14px', background: 'var(--et-paper-2)',
-        border: '0.5px solid var(--et-line-2)', borderRadius: 8,
-        fontSize: 12.5, color: 'var(--et-ink-soft)', lineHeight: 1.7,
-        marginTop: 14, marginBottom: 12,
-      }}>
-        <div style={{ fontWeight: 600, color: 'var(--et-ink)', marginBottom: 6 }}>手动指定微信数据位置</div>
-        可以粘贴 <code>.../xwechat_files</code>、<code>.../wxid_xxx</code>、<code>.../db_storage</code>，Murmur 会自动向上/向下找正确层级。
-      </div>
-      <input
-        value={path}
-        onChange={(e) => setPath(e.target.value)}
-        placeholder="/Users/你/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files"
-        spellCheck={false}
-        onKeyDown={(e) => { if (e.key === 'Enter' && !saving) submit(); }}
-        style={{
-          all: 'unset', width: '100%', boxSizing: 'border-box',
-          padding: '10px 14px', borderRadius: 8,
-          border: '1px solid var(--et-line-2)', background: 'var(--et-paper-2)',
-          fontFamily: 'var(--et-mono)', fontSize: 12, color: 'var(--et-ink)',
-          marginBottom: 10,
-        }}
-      />
-      {msg && (
-        <div className="et-meta" style={{
-          color: msg.startsWith('✓') ? '#3a7a4f' : 'var(--et-rose)',
-          marginBottom: 12, whiteSpace: 'pre-wrap',
-        }}>{maskText(msg)}</div>
-      )}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 8 }}>
-        <button onClick={onRetry} style={{
-          ...primaryBtn, marginTop: 0, background: 'transparent',
-          color: 'var(--et-ink)', boxShadow: 'none', border: '1px solid var(--et-line-2)',
-        }}>重新检测</button>
-        <button onClick={onOpenSettings} style={{
-          ...primaryBtn, marginTop: 0, background: 'transparent',
-          color: 'var(--et-ink)', boxShadow: 'none', border: '1px solid var(--et-line-2)',
-        }}>打开权限设置</button>
-      </div>
-      <button onClick={submit} disabled={saving} style={{
-        ...primaryBtn,
-        opacity: saving ? 0.65 : 1,
-        cursor: saving ? 'wait' : 'pointer',
-      }}>{saving ? '正在检查…' : '保存路径并重新检测'}</button>
-    </>
-  );
-}
-
-type WinNoDataMode = 'home' | 'scan' | 'manual';
-
-function WinNoData({ diag, onSaved }: { diag: Diagnose; onSaved: () => void }) {
-  const [mode, setMode] = useState<WinNoDataMode>('home');
-
-  if (mode === 'scan') return <WinNoDataScan onSaved={onSaved} onBack={() => setMode('home')} onManual={() => setMode('manual')} />;
-  if (mode === 'manual') return <WinNoDataManual diag={diag} onSaved={onSaved} onBack={() => setMode('home')} />;
-
-  return (
-    <>
-      <div className="et-serif" style={{ fontSize: 15, lineHeight: 1.7, color: 'var(--et-ink-soft)', marginBottom: 14 }}>
-        Murmur 已经扫了常见位置（盘根、Documents、OneDrive、注册表里 WeChat 设的路径），都没找到 <code>xwechat_files</code>。
-        <br/>你大概率是：
-      </div>
-      <ul style={{ paddingLeft: 20, lineHeight: 1.8, fontSize: 13, color: 'var(--et-ink)', marginBottom: 18 }}>
-        <li>把数据放在了非常规盘符 / 自定义文件夹里</li>
-        <li>从来没在这台电脑登录过微信</li>
-        <li>装的是企业微信（暂不支持）</li>
-      </ul>
-      <div style={{
-        display: 'grid', gridTemplateColumns: '1fr', gap: 10, marginBottom: 18,
-      }}>
-        <button onClick={() => setMode('scan')} style={{
-          all: 'unset', cursor: 'pointer', display: 'block', padding: '14px 16px',
-          background: 'var(--et-orange-soft)', border: '1px solid var(--et-orange)',
-          borderRadius: 'var(--et-r)', color: 'var(--et-orange-2)',
-        }}>
-          <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>🔎 全盘扫描微信数据 <span style={{ fontWeight: 500, opacity: 0.75 }}>（推荐 · 通常 30 秒以内）</span></div>
-          <div style={{ fontSize: 12, lineHeight: 1.6 }}>
-            Murmur 用名字匹配的方式扫所有本地盘，跳过 Windows、Program Files、node_modules 等明显无关目录。**不读文件内容**，**不需要管理员权限**。
-          </div>
-        </button>
-        <button onClick={() => setMode('manual')} style={{
-          all: 'unset', cursor: 'pointer', display: 'block', padding: '14px 16px',
-          background: 'var(--et-paper-2)', border: '1px solid var(--et-line-2)',
-          borderRadius: 'var(--et-r)', color: 'var(--et-ink)',
-        }}>
-          <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>✍ 我知道路径，手动输入</div>
-          <div style={{ fontSize: 12, lineHeight: 1.6, color: 'var(--et-ink-soft)' }}>
-            从微信「设置 → 文件管理 → 打开文件夹」复制路径粘过来。
-          </div>
-        </button>
-      </div>
-      <details>
-        <summary style={{ cursor: 'pointer', fontSize: 12, color: 'var(--et-mute)' }}>看 Murmur 已经扫过哪些位置（点开展开）</summary>
-        <CapabilityList diag={diag} />
-      </details>
-    </>
-  );
-}
-
-function WinNoDataScan({ onSaved, onBack, onManual }: { onSaved: () => void; onBack: () => void; onManual: () => void }) {
-  const [state, setState] = useState<ScanState | null>(null);
-  const [stage, setStage] = useState<'starting' | 'scanning' | 'done' | 'error'>('starting');
-  const [savingPath, setSavingPath] = useState<string | null>(null);
-  const [errMsg, setErrMsg] = useState<string | null>(null);
-  // Bumped on user click to trigger a fresh scan via the useEffect below.
-  const [scanEpoch, setScanEpoch] = useState(0);
-
-  // Start a scan whenever scanEpoch changes (initial mount + 「重新扫描」 clicks),
-  // poll until done or unmounted.
-  useEffect(() => {
-    let cancelled = false;
-    let timer: number | null = null;
-    setStage('starting');
-    setState(null);
-    setErrMsg(null);
-
-    const poll = async () => {
-      try {
-        const s = await getDiskScanStatus();
-        if (cancelled) return;
-        setState(s);
-        if (!s.running) {
-          setStage(s.error ? 'error' : 'done');
-          return;
-        }
-        timer = window.setTimeout(poll, 600);
-      } catch (e: any) {
-        if (cancelled) return;
-        setErrMsg(e?.message || String(e));
-        setStage('error');
-      }
-    };
-
-    (async () => {
-      try {
-        const initial = await startDiskScan({});
-        if (cancelled) return;
-        setState(initial);
-        setStage('scanning');
-        timer = window.setTimeout(poll, 600);
-      } catch (e: any) {
-        if (cancelled) return;
-        setErrMsg(e?.message || String(e));
-        setStage('error');
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-      if (timer) window.clearTimeout(timer);
-    };
-  }, [scanEpoch]);
-
-  async function pickFound(found: ScanFound) {
-    setSavingPath(found.path);
-    setErrMsg(null);
-    try {
-      const r = await saveWeChatRoot(found.path);
-      if (!r.ok) {
-        setErrMsg(r.error || '保存失败');
-        setSavingPath(null);
-        return;
-      }
-      window.setTimeout(onSaved, 350);
-    } catch (e: any) {
-      setErrMsg(e?.message || String(e));
-      setSavingPath(null);
-    }
-  }
-
-  async function handleCancel() {
-    try { await cancelDiskScan(); } catch {}
-    onBack();
-  }
-
-  const dirsScanned = state?.dirs_scanned ?? 0;
-  const drivesDone = state?.drives_done ?? 0;
-  const drivesTotal = state?.drives_total ?? 0;
-  const found = state?.found ?? [];
-  const elapsed = state?.started_at ? Math.max(0, ((state.finished_at ?? Math.floor(Date.now() / 1000)) - state.started_at)) : 0;
-
-  return (
-    <>
-      <div style={{
-        padding: '14px 16px', background: 'var(--et-paper-2)',
-        border: '0.5px solid var(--et-line-2)', borderRadius: 8,
-        marginBottom: 14, fontSize: 13, color: 'var(--et-ink)',
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-          <div style={{ fontWeight: 600 }}>
-            {stage === 'starting' && '⏳ 正在启动扫描…'}
-            {stage === 'scanning' && `🔎 扫描中 — ${drivesDone}/${drivesTotal} 个盘完成`}
-            {stage === 'done' && `✓ 扫描完成 · 耗时 ${elapsed}s · 找到 ${found.length} 个候选`}
-            {stage === 'error' && '✗ 扫描失败'}
-          </div>
-          <span className="et-meta" style={{ color: 'var(--et-mute)' }}>
-            已查 {dirsScanned.toLocaleString()} 个目录
-          </span>
-        </div>
-        {stage === 'scanning' && (
-          <>
-            <div className="et-meta" style={{ color: 'var(--et-mute)', fontSize: 11.5, marginBottom: 4 }}>
-              ⏱ 还在扫，请等所有盘都标记完成再下结论 — 找到的候选会陆续出现在下面
-            </div>
-            {state?.current_path && (
-              <div className="et-meta" style={{
-                fontFamily: 'var(--et-mono)', fontSize: 11,
-                color: 'var(--et-mute)',
-                whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-              }}>
-                {state.current_path}
-              </div>
-            )}
-          </>
-        )}
-      </div>
-
-      {stage === 'error' && (
-        <div style={{
-          padding: '10px 14px', background: 'rgba(196,90,63,0.10)',
-          border: '0.5px solid rgba(196,90,63,0.35)', borderRadius: 8,
-          fontSize: 12, color: 'var(--et-rose)', marginBottom: 14, lineHeight: 1.6,
-        }}>
-          {state?.error || errMsg || '未知错误'}
-        </div>
-      )}
-
-      {found.length > 0 && (
-        <>
-          <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--et-ink)', marginBottom: 8 }}>
-            点候选项就用它（找到 {found.length} 个）：
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 14 }}>
-            {found.map((f) => (
-              <button key={f.path} onClick={() => pickFound(f)} disabled={savingPath === f.path} style={{
-                all: 'unset', cursor: savingPath === f.path ? 'wait' : 'pointer',
-                padding: '10px 12px', background: 'var(--et-paper-2)',
-                border: '0.5px solid var(--et-line-2)', borderRadius: 6,
-                fontSize: 11.5, fontFamily: 'var(--et-mono)', color: 'var(--et-ink)',
-                opacity: savingPath && savingPath !== f.path ? 0.5 : 1,
-                wordBreak: 'break-all', lineHeight: 1.5,
-              }}>
-                <span style={{ color: f.kind === 'wxid' ? 'var(--et-orange)' : 'var(--et-ink-soft)', fontWeight: 600, marginRight: 6 }}>
-                  [{f.kind === 'wxid' ? '账号' : '数据根'}]
-                </span>
-                {maskText(f.path)}
-              </button>
-            ))}
-          </div>
-        </>
-      )}
-
-      {stage === 'done' && found.length === 0 && (
-        <div style={{
-          padding: '14px 16px', background: 'rgba(232,181,122,0.18)',
-          border: '0.5px solid rgba(138,90,28,0.3)', borderRadius: 8,
-          fontSize: 13, color: '#8a5a1c', lineHeight: 1.7, marginBottom: 14,
-        }}>
-          <div style={{ fontWeight: 600, marginBottom: 6 }}>扫完了，0 个候选。</div>
-          可能的原因：
-          <ul style={{ margin: '4px 0 8px', paddingLeft: 20 }}>
-            <li>这台电脑从来没登录过微信</li>
-            <li>数据藏在 Murmur 默认跳过的目录里（<code>Windows\</code>、<code>Program Files\</code>、<code>node_modules\</code>、<code>$Recycle.Bin\</code> 等）</li>
-            <li>装的是企业微信（暂不支持）</li>
-          </ul>
-          <strong>「手动输入路径」可以绕过所有跳过规则</strong> — 不管你的数据在哪个角落都能进。
-        </div>
-      )}
-
-      <div style={{ display: 'flex', gap: 8 }}>
-        {stage === 'scanning' && (
-          <button onClick={handleCancel} style={{
-            ...primaryBtn, marginTop: 0, flex: 1, background: 'transparent',
-            color: 'var(--et-ink)', boxShadow: 'none', border: '1px solid var(--et-line-2)',
-          }}>取消</button>
-        )}
-        {(stage === 'done' || stage === 'error') && (
-          <>
-            <button onClick={onBack} style={{
-              ...primaryBtn, marginTop: 0, flex: 1, background: 'transparent',
-              color: 'var(--et-ink)', boxShadow: 'none', border: '1px solid var(--et-line-2)',
-            }}>返回</button>
-            <button onClick={() => setScanEpoch((n) => n + 1)} disabled={savingPath !== null} style={{
-              ...primaryBtn, marginTop: 0, flex: 1, background: 'transparent',
-              color: 'var(--et-ink)', boxShadow: 'none', border: '1px solid var(--et-line-2)',
-              opacity: savingPath !== null ? 0.5 : 1,
-            }}>重新扫描</button>
-            {found.length === 0 && (
-              <button onClick={onManual} style={{
-                ...primaryBtn, marginTop: 0, flex: 2,
-              }}>手动输入路径</button>
-            )}
-          </>
-        )}
+      <div className="ob-actions">
+        <Button variant="primary" size="lg" block onClick={onStart}>开始（微信）</Button>
+        {onPickQQ && !mac && <Button variant="secondary" size="lg" block onClick={onPickQQ}>切换到 QQ</Button>}
       </div>
     </>
   );
 }
 
-function WinNoDataManual({ diag, onSaved, onBack }: { diag: Diagnose; onSaved: () => void; onBack: () => void }) {
-  const [path, setPath] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [msg, setMsg] = useState<string | null>(null);
-  async function submit() {
-    const cleaned = path.trim();
-    if (!cleaned) {
-      setMsg('请先粘贴一个路径。');
-      return;
-    }
-    setSaving(true);
-    setMsg(null);
-    try {
-      const r = await saveWeChatRoot(cleaned);
-      if (!r.ok) {
-        setMsg(r.error || '这个路径里没有找到微信数据。');
-        return;
-      }
-      setMsg(`✓ 已找到 ${r.profiles?.length || 1} 个微信账号，正在重新检测…`);
-      window.setTimeout(onSaved, 450);
-    } catch (e: any) {
-      setMsg(e?.message || String(e));
-    } finally {
-      setSaving(false);
-    }
-  }
+function DecryptStep({ canForce, onRun }: { canForce: boolean; onRun: (force: boolean) => void }) {
+  // 「清空后重新解密」 deletes the decrypted folder first: ask once more.
+  const [confirming, setConfirming] = useState(false);
   return (
     <>
-      <div className="et-serif" style={{ fontSize: 15, lineHeight: 1.7, color: 'var(--et-ink-soft)', marginBottom: 12 }}>
-        三步教你拿到正确路径：
-      </div>
-      <div style={{
-        padding: '12px 14px', background: 'var(--et-paper-2)',
-        border: '0.5px solid var(--et-line-2)', borderRadius: 8,
-        fontSize: 13, lineHeight: 1.85, color: 'var(--et-ink)', marginBottom: 12,
-      }}>
-        <ol style={{ margin: 0, paddingLeft: 20 }}>
-          <li>打开桌面版微信</li>
-          <li>左下角 <strong>三横线菜单 → 设置 → 文件管理</strong></li>
-          <li>点「<strong>打开文件夹</strong>」按钮 — Win 资源管理器会跳出来，地址栏显示的就是路径</li>
-          <li>地址栏里点一下 → <kbd>Ctrl+C</kbd> 复制 → 回这里 <kbd>Ctrl+V</kbd> 粘到下面</li>
-        </ol>
-      </div>
-      <div style={{
-        padding: '10px 14px', background: 'rgba(72,167,107,0.10)',
-        border: '0.5px solid rgba(72,167,107,0.30)', borderRadius: 8,
-        fontSize: 12, color: '#3a7a4f', marginBottom: 12, lineHeight: 1.65,
-      }}>
-        💡 这些粘贴格式 Murmur 都认 — 多复制了或少复制了几层都会自动处理：
-        <ul style={{ margin: '6px 0 0', paddingLeft: 18, fontFamily: 'var(--et-mono)', fontSize: 11 }}>
-          <li>D:\Tencent\Weixin\xwechat_files</li>
-          <li>...\xwechat_files\wxid_xxx</li>
-          <li>...\xwechat_files\wxid_xxx\db_storage  <span style={{ fontFamily: 'var(--et-sans)' }}>← 多了 db_storage 也行</span></li>
-          <li>...\session\session.db  <span style={{ fontFamily: 'var(--et-sans)' }}>← 直接粘文件路径也行，会自动找 wxid_*</span></li>
-        </ul>
-      </div>
-      <input
-        value={path}
-        onChange={(e) => setPath(e.target.value)}
-        placeholder={'粘到这里，不用清理多余的引号 / 反斜杠'}
-        spellCheck={false}
-        autoFocus
-        onKeyDown={(e) => { if (e.key === 'Enter' && !saving) submit(); }}
-        style={{
-          all: 'unset', width: '100%', boxSizing: 'border-box',
-          padding: '10px 14px', borderRadius: 8,
-          border: '1px solid var(--et-line-2)', background: 'var(--et-paper-2)',
-          fontFamily: 'var(--et-mono)', fontSize: 12, color: 'var(--et-ink)',
-          marginBottom: 10,
-        }}
-      />
-      {msg && (
-        <div className="et-meta" style={{
-          color: msg.startsWith('✓') ? '#3a7a4f' : 'var(--et-rose)',
-          marginBottom: 12, whiteSpace: 'pre-wrap',
-        }}>{maskText(msg)}</div>
-      )}
-      <details style={{ marginBottom: 14 }}>
-        <summary style={{ cursor: 'pointer', fontSize: 12, color: 'var(--et-mute)' }}>看 Murmur 之前已经扫过哪些位置</summary>
-        <CapabilityList diag={diag} />
-      </details>
-      <div style={{ display: 'flex', gap: 8 }}>
-        <button onClick={onBack} style={{
-          ...primaryBtn, marginTop: 0, flex: 1, background: 'transparent',
-          color: 'var(--et-ink)', boxShadow: 'none', border: '1px solid var(--et-line-2)',
-        }}>返回</button>
-        <button onClick={submit} disabled={saving} style={{
-          ...primaryBtn, marginTop: 0, flex: 2,
-          opacity: saving ? 0.65 : 1, cursor: saving ? 'wait' : 'pointer',
-        }}>{saving ? '正在检查…' : '保存路径'}</button>
-      </div>
-    </>
-  );
-}
-
-function MacPasteKey({ diag, onSubmit }: { diag: Diagnose; onSubmit: (key: string) => void }) {
-  const [key, setKey] = useState('');
-  const cleaned = key.trim().toLowerCase();
-  const valid = cleaned.length === 64 && /^[0-9a-f]+$/.test(cleaned);
-  const sipOn = diag.capabilities.sip_enabled === true;
-  return (
-    <>
-      <div className="et-serif" style={{ fontSize: 15, lineHeight: 1.7, color: 'var(--et-ink-soft)', marginBottom: 14 }}>
-        {sipOn
-          ? <>Mac 默认开着 <strong>SIP（系统完整性保护）</strong>，导致无法自动从微信进程内存抓密钥。<br/>三种办法可以拿到 64 位 SQLCipher 密钥，任选一个：</>
-          : <>把 64 位 SQLCipher 密钥粘进来，解密在你这台 Mac 上跑。</>}
-      </div>
-      <div style={{
-        padding: '12px 14px', background: 'rgba(255,107,71,0.08)',
-        border: '0.5px solid rgba(224,83,46,0.30)', borderRadius: 8,
-        fontSize: 12.5, color: 'var(--et-ink-soft)', lineHeight: 1.7, marginBottom: 14,
-      }}>
-        <div style={{ marginBottom: 6 }}><strong style={{ color: 'var(--et-orange-2)' }}>① 有 Windows 电脑（最快）</strong></div>
-        <div style={{ paddingLeft: 14, marginBottom: 10 }}>
-          在 Win 上 <code>git clone</code> 这个仓库 → 运行 <code>start-windows.bat</code>。引导跑完后，密钥就在 <code>~/.murmur/config.json</code> 里 <code>decrypt_key</code> 字段，拷过来粘到下面。
-        </div>
-        <div style={{ marginBottom: 6 }}><strong style={{ color: 'var(--et-orange-2)' }}>② 关掉 Mac 的 SIP（一次性）</strong></div>
-        <div style={{ paddingLeft: 14, marginBottom: 10 }}>
-          重启进恢复模式（开机长按电源键）→ 终端运行 <code>csrutil disable</code> → 重启 → 在这个仓库根目录运行：
-          <pre style={{ background: 'var(--et-paper-2)', padding: '6px 10px', borderRadius: 4, marginTop: 4, fontSize: 11, fontFamily: 'var(--et-mono)' }}>sudo python3 cli/extract_key_mac.py</pre>
-          密钥会打印在终端里。<em style={{ color: 'var(--et-mute)' }}>注意：关 SIP 是系统级操作，请权衡。</em>
-        </div>
-        <div style={{ marginBottom: 6 }}><strong style={{ color: 'var(--et-orange-2)' }}>③ 借朋友的 Win 跑一次</strong></div>
-        <div style={{ paddingLeft: 14 }}>
-          在朋友 Win 上短时间登录你的微信 → 跑 <code>cli/extract_key_dll.py</code> → 拷密钥回来。微信账号是同一个，密钥相同。
-        </div>
-      </div>
-      <input
-        value={key}
-        onChange={(e) => setKey(e.target.value)}
-        placeholder="把 64 位 hex 密钥粘到这里"
-        spellCheck={false}
-        autoFocus
-        style={{
-          all: 'unset', width: '100%', boxSizing: 'border-box',
-          padding: '10px 14px', borderRadius: 8,
-          border: `1px solid ${valid ? 'var(--et-orange)' : 'var(--et-line-2)'}`,
-          background: 'var(--et-paper-2)', fontFamily: 'var(--et-mono)',
-          fontSize: 12, color: 'var(--et-ink)', marginBottom: 8,
-        }}
-      />
-      <div style={{ fontSize: 11, color: 'var(--et-mute)', marginBottom: 14 }}>
-        {key && (valid ? '✓ 格式正确（64 位 hex）' : `${cleaned.length}/64 位 hex`)}
-      </div>
-      <CapabilityList diag={diag} />
-      <button onClick={() => onSubmit(key)} disabled={!valid} style={{
-        ...primaryBtn,
-        opacity: valid ? 1 : 0.4,
-        cursor: valid ? 'pointer' : 'not-allowed',
-      }}>解密 + 进入</button>
-    </>
-  );
-}
-
-function MacFDANeeded({ onOpenSettings, onRetry }: { onOpenSettings: () => void; onRetry: () => void }) {
-  const [opened, setOpened] = useState(false);
-  return (
-    <>
-      <div className="et-serif" style={{ fontSize: 15, lineHeight: 1.7, color: 'var(--et-ink-soft)', marginBottom: 14 }}>
-        macOS 出于隐私保护，不让普通 App 直接读 <code>~/Library/Containers/</code> 里其他 App 的数据。
-        <br/>
-        Murmur 需要读你电脑上的微信加密数据库 —— 必须由你手动给一次「<strong>完全磁盘访问</strong>」权限。
-      </div>
-      <div style={{
-        padding: '12px 16px', background: 'var(--et-paper-2)',
-        border: '0.5px solid var(--et-line-2)', borderRadius: 8,
-        fontSize: 13, lineHeight: 1.8, marginBottom: 14, color: 'var(--et-ink)',
-      }}>
-        <div style={{ fontWeight: 600, marginBottom: 6 }}>3 步搞定（约 30 秒）：</div>
-        <ol style={{ margin: 0, paddingLeft: 20 }}>
-          <li>点下面 <strong>「打开系统设置」</strong> → 自动跳到「完全磁盘访问」面板</li>
-          <li>找到 <strong>Murmur</strong>，把右边开关打 <strong>开</strong>（如果没列出来，点 <strong>+</strong> 选 <code>/Applications/Murmur.app</code>）</li>
-          <li>授权完后，<strong>完全退出 Murmur 再重新打开</strong>（macOS 必须重启进程才生效）</li>
-        </ol>
-      </div>
-      <div style={{
-        padding: '10px 14px', background: 'rgba(232,181,122,0.18)',
-        border: '0.5px solid rgba(138,90,28,0.3)', borderRadius: 8,
-        fontSize: 11.5, color: '#8a5a1c', lineHeight: 1.6, marginBottom: 14,
-      }}>
-        💡 这是 macOS 的硬性要求 —— 任何想读微信数据的 Mac 工具都得过这一步。授权后只这一次。
-      </div>
-      <button onClick={() => { setOpened(true); onOpenSettings(); }} style={primaryBtn}>
-        打开系统设置 → 完全磁盘访问
-      </button>
-      <button onClick={onRetry} style={{
-        ...primaryBtn, marginTop: 8, background: 'transparent',
-        color: 'var(--et-ink)', boxShadow: 'none',
-        border: '1px solid var(--et-line-2)',
-        opacity: opened ? 1 : 0.5,
-      }}>
-        我已经授权 + 重启过了 — 重新检测
-      </button>
-    </>
-  );
-}
-
-function MacResignPrompt({ diag, onConsent, onPaste }: { diag: Diagnose; onConsent: () => void; onPaste: () => void }) {
-  return (
-    <>
-      <div className="et-serif" style={{ fontSize: 15, lineHeight: 1.7, color: 'var(--et-ink-soft)', marginBottom: 14 }}>
-        macOS 默认给 WeChat 加了 <strong>hardened runtime</strong> 标记，导致系统拒绝任何调试器附加 ——
-        所以也不能从内存里抓 SQLCipher 密钥。<br/>
-        但有个不需要关 SIP 的做法：<strong>给主程序重新做一次 ad-hoc 签名</strong>。
-      </div>
-      <div style={{
-        padding: '12px 14px', background: 'var(--et-paper-2)',
-        border: '0.5px solid var(--et-line-2)', borderRadius: 8,
-        fontSize: 13, color: 'var(--et-ink)', lineHeight: 1.85, marginBottom: 12,
-      }}>
-        <div style={{ marginBottom: 8, fontWeight: 600 }}>点确认后，我会做这几件事：</div>
-        <ol style={{ margin: 0, paddingLeft: 20 }}>
-          <li style={{ marginBottom: 4 }}>自动退出 WeChat（先发 quit，再 pkill 兜底）</li>
-          <li style={{ marginBottom: 4 }}>弹 macOS 系统认证窗 — <strong>输入开机密码</strong></li>
-          <li style={{ marginBottom: 4 }}>对 WeChat 主可执行文件做 <code>codesign --remove-signature</code> + 重新 ad-hoc 签名</li>
-          <li>重启 WeChat → <strong>停在你这里等你下一步</strong>，不会自动跑抓 key</li>
-        </ol>
-        <Callout tone="success" compact className="ui-mt-2">
-          重签名完成后会重新打开 WeChat，并到下一页「请扫码登录 + 点开几个对话」，<strong>那一步没有时间限制</strong>，
-          慢慢操作 — 你点完按钮我才开始抓密钥。
+      <Lead>用已经保存的密钥，把微信数据库重新解密一遍，覆盖之前的解密结果。</Lead>
+      {canForce && !confirming && (
+        <Callout tone="info" compact>
+          如果之前报过「数据库损坏（malformed）」，用「清空后重新解密」：会先删掉旧的解密目录再解一次。
         </Callout>
-      </div>
-      <Callout tone="warning" compact className="ui-mb-3">
-        重签名属于「修改 App」操作。WeChat 自己升级时会把签名重置回原样，不影响后续使用。
-        如果不想动 WeChat，下面有「手动粘贴密钥」的备选路径。<br/>
-        <strong>风控提示：</strong>重签名、挂钩微信进程这类操作有被腾讯检测到的可能，极端情况下可能触发账号安全提醒或限制。
-        Murmur 只读取你这台电脑上你自己的聊天数据，不上传任何内容；介意的话请不要继续。
-      </Callout>
-      <CapabilityList diag={diag} />
-      <div className="ui-stack ui-mt-4">
-        <Button variant="primary" size="lg" block onClick={onConsent}>开始重签名</Button>
-        <Button variant="secondary" size="lg" block onClick={onPaste}>不用，我手动粘贴密钥</Button>
-      </div>
-    </>
-  );
-}
-
-function MacWaitLogin({ diag, onContinue, onLive }: { diag: Diagnose | null; onContinue: () => void; onLive: () => void }) {
-  const liveFirst = !!diag?.live_key?.recommended;
-  return (
-    <>
-      <div className="et-serif" style={{ fontSize: 15, lineHeight: 1.7, color: 'var(--et-ink-soft)', marginBottom: 14 }}>
-        ✓ 重签名成功 — 微信已经重新启动。
-      </div>
-      <div style={{
-        padding: '12px 14px', background: 'var(--et-paper-2)',
-        border: '0.5px solid var(--et-line-2)', borderRadius: 8,
-        fontSize: 14, lineHeight: 1.85, marginBottom: 12, color: 'var(--et-ink)',
-      }}>
-        <div style={{ fontWeight: 600, marginBottom: 8, fontSize: 14 }}>下一步要做的（不急，慢慢来）：</div>
-        <ol style={{ margin: 0, paddingLeft: 20 }}>
-          <li style={{ marginBottom: 6 }}>到微信窗口，<strong>用手机扫码登录</strong></li>
-          <li style={{ marginBottom: 6 }}>等左边联系人列表加载完，<strong>点开 3-5 个对话</strong>，每个滑两下</li>
-          <li style={{ marginBottom: 6 }}>顺手翻一下朋友圈 / 收藏 / 联系人页</li>
-          <li>都做完了再回来点下面按钮 — <strong>不需要赶时间</strong></li>
-        </ol>
-      </div>
-      <Callout tone="info" compact className="ui-mb-3">
-        为啥要点开对话？WCDB 是「点哪个 DB 才解锁哪个 DB」的，没点开 → 那个 DB 的 key 不在内存里 → 我抓出来会缺几个库。<br/>
-        点完再来按下面按钮，会弹密码窗口（要 root 权限扫内存），输完就开始扫。
-      </Callout>
-      {liveFirst && <LiveRecommendBanner version={diag?.wechat_version} onLive={onLive} />}
-      <div className="ui-stack ui-mt-4">
-        <Button variant={liveFirst ? 'secondary' : 'primary'} size="lg" block onClick={onContinue}>
-          WeChat 都准备好了 → {liveFirst ? '先试试内存扫描（抓不到会自动切到实时抓取）' : '开始抓密钥'}
-        </Button>
-        {!liveFirst && (
-          <Button variant="secondary" size="lg" block onClick={onLive}>微信 4.1.9 及以上？直接用「实时抓取」</Button>
+      )}
+      {confirming && (
+        <Callout tone="warning" title="确定先清空再重新解密？">
+          会先<strong>删掉这个账号已经解密好的数据目录</strong>，再用保存的密钥从微信原始数据重新解一遍；微信本身的聊天记录不受影响。数据多的话要几分钟，期间 Murmur 里看不到数据。
+        </Callout>
+      )}
+      <div className="ob-actions">
+        {confirming ? (
+          <>
+            <Button variant="danger" size="lg" block onClick={() => onRun(true)}>确定清空并重新解密</Button>
+            <Button variant="ghost" block onClick={() => setConfirming(false)}>取消</Button>
+          </>
+        ) : (
+          <>
+            <Button variant="primary" size="lg" block onClick={() => onRun(false)}>重新解密</Button>
+            {canForce && (
+              <Button variant="secondary" size="lg" block onClick={() => setConfirming(true)}>清空后重新解密…</Button>
+            )}
+          </>
         )}
       </div>
     </>
   );
 }
 
-function MacAutoExtract({ diag, onStart, onLive, onPaste }: { diag: Diagnose; onStart: () => void; onLive: () => void; onPaste: () => void }) {
-  const liveFirst = !!diag.live_key?.recommended;
+function DoneStep({ keyPath, onEnter }: { keyPath: string | null; onEnter: () => void }) {
   return (
     <>
-      <div className="et-serif" style={{ fontSize: 15, lineHeight: 1.7, color: 'var(--et-ink-soft)', marginBottom: 12 }}>
-        我会附加到微信进程扫内存抓 SQLCipher 密钥。<br/>
-      </div>
-      {liveFirst && <LiveRecommendBanner version={diag.wechat_version} onLive={onLive} />}
-      <div style={{
-        padding: '12px 14px', background: 'var(--et-paper-2)',
-        border: '0.5px solid var(--et-line-2)', borderRadius: 8,
-        fontSize: 13, lineHeight: 1.8, marginBottom: 12, color: 'var(--et-ink)',
-      }}>
-        <div style={{ fontWeight: 600, marginBottom: 6 }}>点确认前请先做完这几步：</div>
-        <ol style={{ margin: 0, paddingLeft: 20 }}>
-          <li><strong>WeChat 已经登录</strong>（不是登录界面，是已经能看消息列表）</li>
-          <li><strong>点开 3-5 个对话</strong>、翻一下朋友圈 — 让 WCDB 把每个 DB 的 key 派生到内存。不点开 → 抓出来的 key 数会少</li>
-          <li>WeChat 别关掉，继续在跑</li>
-        </ol>
-      </div>
-      <Callout tone="warning" compact className="ui-mb-3">
-        准备好了再点下面 — 一旦点确认，30 秒内会弹一次 macOS 系统密码窗口，输入开机密码后立刻开扫。
+      <Callout tone="success" title="一切就绪 —— 你的关系档案已经就位">
+        {keyPath
+          ? <>密钥保存在 <code>{keyPath}</code>，下次启动直接读取，不用再重新抓。</>
+          : <>密钥已经保存在本机的 <code>~/.murmur/</code> 目录里，下次启动直接读取，不用再重新抓。</>}
+        想换账号或重新抓密钥，点左边对应的步骤即可。
       </Callout>
-      <CapabilityList diag={diag} />
-      <div className="ui-stack ui-mt-4">
-        <Button variant={liveFirst ? 'secondary' : 'primary'} size="lg" block onClick={onStart}>
-          WeChat 已就绪 → {liveFirst ? '先试试内存扫描（抓不到会自动切到实时抓取）' : '开始抓取'}
-        </Button>
-        {!liveFirst && (
-          <Button variant="secondary" size="lg" block onClick={onLive}>微信 4.1.9 及以上？直接用「实时抓取」</Button>
-        )}
-        <Button variant="ghost" block onClick={onPaste}>或者：手动粘贴密钥</Button>
+      <div className="ob-actions">
+        <Button variant="primary" size="lg" block onClick={onEnter}>进入年代记</Button>
       </div>
     </>
   );
 }
-
-function WinNeedKey({ diag, onStart, onRetry }: { diag: Diagnose; onStart: () => void; onRetry: () => void }) {
-  const wechatRunning = diag.capabilities.weixin_running !== false;
-  return (
-    <>
-      <div className="et-serif" style={{ fontSize: 15, lineHeight: 1.7, color: 'var(--et-ink-soft)', marginBottom: 14 }}>
-        Windows 抓密钥要卡准登录那一刻，请按这个顺序做：
-      </div>
-      <ol style={{ paddingLeft: 20, lineHeight: 1.9, fontSize: 13, color: 'var(--et-ink)', marginBottom: 14 }}>
-        <li>先去微信里<strong>退出登录</strong>，让微信停在登录页；<strong>不要关闭微信程序</strong></li>
-        <li>回到 Murmur，点下面的「开始抓密钥」—— 我会把 hook 装到当前微信进程</li>
-        <li>看到「等待登录事件」后，立刻回微信点<strong>登录 / 扫码登录</strong></li>
-        <li>读到密钥后，立即解密所有数据，进入 Murmur 主界面</li>
-      </ol>
-      <div style={{
-        padding: '10px 14px', background: 'rgba(232,181,122,0.18)',
-        border: '0.5px solid rgba(138,90,28,0.3)', borderRadius: 8,
-        fontSize: 12, color: '#8a5a1c', marginBottom: 14,
-      }}>
-        💡 关键点：先停在登录页，再点开始扫描，最后去微信登录。已经登录着不动，hook 抓不到那一瞬间的 key。
-      </div>
-      {!wechatRunning && (
-        <div style={{
-          padding: '10px 14px', background: 'rgba(196,90,63,0.10)',
-          border: '0.5px solid rgba(196,90,63,0.35)', borderRadius: 8,
-          fontSize: 12, color: 'var(--et-rose)', marginBottom: 14, lineHeight: 1.6,
-        }}>
-          现在没有检测到微信进程。请打开微信，让它停在登录页；Murmur 会每 2.5 秒自动重检，也可以点下面的「再次检测微信」立刻重试。
-        </div>
-      )}
-      <CapabilityList diag={diag} />
-      <button onClick={onStart} disabled={!wechatRunning} style={{
-        ...primaryBtn,
-        opacity: wechatRunning ? 1 : 0.45,
-        cursor: wechatRunning ? 'pointer' : 'not-allowed',
-      }}>开始抓密钥</button>
-      {!wechatRunning && (
-        <button onClick={onRetry} style={{
-          ...primaryBtn, marginTop: 8, background: 'transparent',
-          color: 'var(--et-ink)', boxShadow: 'none',
-          border: '1px solid var(--et-line-2)',
-        }}>再次检测微信</button>
-      )}
-    </>
-  );
-}
-
-function LiveRecommendBanner({ version, onLive }: { version?: string | null; onLive: () => void }) {
-  return (
-    <Callout tone="accent" className="ui-mb-3"
-      title={`检测到微信 ${version || '4.1.9+'}：推荐用「实时抓取」`}
-      actions={<Button variant="primary" size="lg" block onClick={onLive}>用实时抓取（推荐）</Button>}>
-      4.1.9 之后密钥不再常驻内存，下面的内存扫描大概率一个都抓不到。实时抓取会在你用微信时把密钥截下来，大约 1–2 分钟。
-    </Callout>
-  );
-}
-
-function Working({ text }: { text: string }) {
-  return (
-    <div style={{ textAlign: 'center', padding: '32px 0' }}>
-      <div style={{ display: 'inline-block', animation: 'spin 1.4s linear infinite', fontSize: 32 }}>⏳</div>
-      <div className="et-h3" style={{ marginTop: 16 }}>{maskText(text)}</div>
-      <div className="et-meta" style={{ marginTop: 8 }}>过程中如果看到微信弹窗，记得点「登录」。</div>
-      <style>{`@keyframes spin { from { transform: rotate(0); } to { transform: rotate(360deg); } }`}</style>
-    </div>
-  );
-}
-
-function Done({ onDone }: { onDone: () => void }) {
-  return (
-    <>
-      <div style={{
-        padding: '16px 18px',
-        background: 'rgba(72,167,107,0.15)',
-        border: '0.5px dashed rgba(72,167,107,0.5)',
-        borderRadius: 10, marginBottom: 16,
-      }}>
-        <div style={{ fontSize: 14, fontWeight: 600, color: '#3a7a4f' }}>
-          一切就绪 — 你的关系档案已经就位
-        </div>
-        <div className="et-meta" style={{ marginTop: 6 }}>
-          密钥保存在 ~/.murmur/config.json，下次启动直接读取，不用再重新抓。
-        </div>
-      </div>
-      <button onClick={onDone} style={primaryBtn}>进入年代记</button>
-    </>
-  );
-}
-
-function ErrorView({ error, code, diag, onRetry }: { error: string; code?: string | null; diag: Diagnose | null; onRetry: () => void }) {
-  const isWinHookInstallFailure = code !== 'WIN_HOOK_FAILED' && diag?.platform === 'windows' &&
-    /hook (setup|install) failed|wx_key\.dll|注入到微信进程/i.test(error);
-  return (
-    <>
-      <ErrorExplain code={code} />
-      <div style={{
-        padding: '12px 14px', background: 'rgba(196,90,63,0.12)',
-        border: '0.5px solid rgba(196,90,63,0.4)',
-        borderRadius: 8, marginBottom: 14,
-      }}>
-        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--et-rose)', marginBottom: 6 }}>{lookupError(code) ? '原始报错' : '失败原因'}</div>
-        <pre className="et-meta" style={{ fontSize: 11, color: 'var(--et-ink-soft)',
-          whiteSpace: 'pre-wrap', margin: 0 }}>{maskText(error)}</pre>
-      </div>
-      {diag && (
-        <details style={{ marginBottom: 14 }}>
-          <summary style={{ cursor: 'pointer', fontSize: 12, color: 'var(--et-mute)' }}>查看诊断信息（请提交 issue 时附上）</summary>
-          <CapabilityList diag={diag} />
-          <div style={{ marginTop: 10 }}>
-            <DiagBundleButton size="sm" />
-          </div>
-        </details>
-      )}
-      {isWinHookInstallFailure && (
-        <div style={{
-          padding: '10px 14px', background: 'rgba(232,181,122,0.18)',
-          border: '0.5px solid rgba(138,90,28,0.3)', borderRadius: 8,
-          fontSize: 12, color: '#8a5a1c', lineHeight: 1.7, marginBottom: 14,
-        }}>
-          这是 Windows hook 安装失败：先把 Murmur 安装目录加入杀毒/Defender 白名单，确认 <code>wx_key.dll</code> 没被隔离；
-          然后重启电脑，微信和 Murmur 都普通打开，不要一个管理员一个普通权限。
-        </div>
-      )}
-      <button onClick={onRetry} style={primaryBtn}>再试一次</button>
-    </>
-  );
-}
-
-const primaryBtn: React.CSSProperties = {
-  all: 'unset', cursor: 'pointer', display: 'block', width: '100%',
-  textAlign: 'center', padding: '14px 0', marginTop: 8,
-  background: 'var(--et-orange)', color: '#fff',
-  borderRadius: 'var(--et-r)', fontSize: 14, fontWeight: 600,
-  boxShadow: '0 6px 16px rgba(255,107,71,0.32)',
-};

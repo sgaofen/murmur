@@ -1,0 +1,310 @@
+/* WeChat onboarding + 「读取密钥」 dialog. Tokens only (see app/src/ui/README.md):
+ * no hex / rgba here — every color comes from the semantic layer so both
+ * themes work. Class prefix: ob-. */
+
+/* ——— dialog frame ——— */
+.ui-dialog.ob-dialog { max-width: 820px; }
+.ui-dialog.ob-dialog--key { max-width: 600px; }
+.ob-dialog .ui-dialog__title { font-size: 26px; }
+
+/* left step rail + content; the rail becomes a horizontal bar on narrow windows */
+.ob-layout {
+  display: grid;
+  grid-template-columns: 172px minmax(0, 1fr);
+  gap: 28px;
+  align-items: start;
+}
+.ob-rail {
+  position: sticky; top: 0;
+  padding: 6px 18px 6px 0;
+  border-right: 0.5px solid var(--border-subtle);
+}
+.ob-rail .ui-stepper--vertical .ui-step { padding-bottom: 16px; }
+.ob-rail .ui-stepper--vertical .ui-step:last-child { padding-bottom: 0; }
+.ob-rail__hint {
+  margin-top: 18px; padding-top: 12px;
+  border-top: 0.5px dashed var(--border-default);
+  font-size: 11.5px; line-height: 1.55; color: var(--text-faint);
+}
+.ob-rail--h { display: none; }
+.ob-main { min-width: 0; }
+
+@media (max-width: 760px) {
+  .ob-layout { grid-template-columns: minmax(0, 1fr); gap: 18px; }
+  .ob-rail--v { display: none; }
+  .ob-rail--h {
+    display: block;
+    position: static;
+    padding: 6px 0 14px;
+    border-right: 0;
+    border-bottom: 0.5px solid var(--border-subtle);
+  }
+  .ob-dialog .ui-dialog__title { font-size: 22px; }
+}
+/* Phone width: six labels don't fit under the markers, so only the current
+ * step keeps its label on screen (the others stay readable to screen readers). */
+@media (max-width: 560px) {
+  .ob-rail--h .ui-step:not(.is-current):not(.is-error) .ui-step__label {
+    position: absolute; width: 1px; height: 1px; overflow: hidden;
+    clip-path: inset(50%); white-space: nowrap;
+  }
+  .ob-rail--h .ui-step__label { white-space: nowrap; }
+  .ob-rail--h .ui-step__hit { padding: 0; }
+}
+
+/* ——— text ——— */
+/* Base margins live in :where() (zero specificity) so the .ui-mt-* / .ui-mb-*
+ * utilities on the same element always win. */
+:where(.ob-lead) { margin: 0 0 16px; }
+:where(.ob-section-title) { margin: 0 0 8px; }
+:where(.ob-label) { margin: 0 0 6px; }
+:where(.ob-list, .ob-checks, .ob-paths) { margin: 0; }
+:where(.ob-well) { margin: 6px 0 0; }
+:where(.ob-features) { margin: 0 0 18px; }
+
+.ob-lead {
+  font-family: var(--font-serif); font-size: 15px; line-height: 1.75;
+  color: var(--text-secondary);
+}
+.ob-lead strong { color: var(--text-primary); font-weight: 600; }
+.ob-prewrap { white-space: pre-wrap; }
+.ob-muted { font-size: 12px; line-height: 1.55; color: var(--text-muted); }
+.ob-section-title {
+  font-size: 13px; font-weight: 600; line-height: 1.4; color: var(--text-primary);
+}
+.ob-label {
+  display: block;
+  font-size: 12.5px; font-weight: 600; color: var(--text-primary);
+}
+.ob-main code, .ob-main kbd {
+  font-family: var(--font-mono); font-size: 0.9em;
+  padding: 1px 5px; border-radius: 4px;
+  background: var(--surface-sunken); color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+.ob-main .ui-callout code, .ob-main .ui-card--sunken code { background: var(--surface-hover); }
+
+/* numbered checklists (things to do in WeChat, what a button will do) */
+.ob-list {
+  padding-left: 20px;
+  font-size: 13px; line-height: 1.8; color: var(--text-primary);
+}
+.ob-list li + li { margin-top: 2px; }
+.ob-list li::marker { color: var(--accent-text); font-family: var(--font-serif); font-weight: 600; }
+.ob-list--plain li::marker { color: var(--text-faint); }
+.ob-list__why { margin-left: 4px; font-size: 11.5px; color: var(--text-muted); }
+
+/* mono well for paths / commands / keys */
+.ob-well {
+  padding: 8px 10px;
+  font-family: var(--font-mono); font-size: 11.5px; line-height: 1.55;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  color: var(--text-secondary);
+  background: var(--surface-sunken);
+  border: 0.5px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+}
+.ui-card--sunken .ob-well { background: var(--surface-card); }
+
+/* ——— actions ——— */
+.ob-actions { margin-top: 18px; display: flex; flex-direction: column; gap: 8px; }
+.ob-actions--row { flex-direction: row; flex-wrap: wrap; }
+.ob-actions--row > .ui-btn { flex: 1 1 160px; }
+
+/* ——— welcome ——— */
+.ob-features { list-style: none; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.ob-feature {
+  display: flex; gap: 14px; align-items: flex-start;
+  padding: 12px 14px;
+  background: var(--surface-sunken);
+  border-radius: var(--radius-md);
+}
+.ob-feature__icon {
+  width: 34px; height: 34px; flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 50%;
+  color: var(--accent);
+  background: var(--surface-card);
+  border: 0.5px solid var(--accent-border);
+}
+.ob-feature__title { font-size: 14px; font-weight: 600; color: var(--text-primary); }
+.ob-feature__body { margin-top: 2px; font-size: 12.5px; line-height: 1.55; color: var(--text-muted); }
+
+/* ——— self-check rows ——— */
+.ob-checks {
+  list-style: none; padding: 0;
+  background: var(--surface-card);
+  border: 0.5px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+.ob-check {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  gap: 4px 12px; align-items: center;
+  padding: 11px 14px;
+}
+.ob-check + .ob-check { border-top: 0.5px solid var(--border-subtle); }
+.ob-check__mark {
+  width: 22px; height: 22px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 50%;
+  font-size: 12px; font-weight: 700; line-height: 1;
+  color: var(--tone-fg); background: var(--tone-bg);
+  border: 1px solid var(--tone-border);
+}
+.ob-check--off .ob-check__mark {
+  color: var(--text-faint); background: transparent;
+  border: 1px dashed var(--border-default);
+}
+.ob-check__main { min-width: 0; }
+.ob-check__top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; }
+.ob-check__label { font-size: 13.5px; font-weight: 600; color: var(--text-primary); }
+.ob-check__value { font-size: 12.5px; color: var(--text-secondary); }
+.ob-check--bad .ob-check__value { color: var(--danger-fg); font-weight: 500; }
+.ob-check--warn .ob-check__value { color: var(--warning-fg); font-weight: 500; }
+.ob-check--off .ob-check__value { color: var(--text-muted); }
+.ob-check__hint { margin-top: 2px; font-size: 11.5px; line-height: 1.5; color: var(--text-muted); }
+.ob-check__action { justify-self: end; }
+@media (max-width: 560px) {
+  .ob-check { grid-template-columns: 22px minmax(0, 1fr); align-items: start; }
+  .ob-check__action { grid-column: 2; justify-self: start; }
+}
+
+.ob-checks-skeleton { display: flex; flex-direction: column; gap: 14px; padding: 16px; }
+.ob-checks-skeleton__row { display: flex; align-items: center; gap: 12px; }
+
+.ob-summary { margin-top: 14px; }
+
+/* ——— option cards (memory scan vs live capture, Frida vs private copy) ——— */
+.ob-options { display: flex; flex-direction: column; gap: 10px; }
+.ob-option { display: flex; gap: 12px; align-items: flex-start; }
+.ob-option__icon {
+  width: 32px; height: 32px; flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 50%;
+  color: var(--accent); background: var(--surface-card);
+  border: 0.5px solid var(--border-default);
+}
+.ob-option__body { min-width: 0; flex: 1; }
+.ob-option__title {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px;
+  font-size: 14px; font-weight: 600; color: var(--text-primary);
+}
+.ob-option__desc { margin-top: 4px; font-size: 12.5px; line-height: 1.6; color: var(--text-muted); }
+.ob-option__chips { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
+
+/* collapsible "other way" section */
+.ob-more { margin-top: 14px; }
+.ob-more > summary {
+  cursor: pointer; width: fit-content;
+  font-size: 12.5px; font-weight: 500; color: var(--text-muted);
+  border-radius: var(--radius-xs);
+}
+.ob-more > summary:hover { color: var(--text-primary); }
+.ob-more > summary:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.ob-more[open] > summary { margin-bottom: 10px; }
+
+/* ——— busy / progress ——— */
+.ob-working { padding: 36px 0 28px; text-align: center; }
+.ob-ring {
+  display: inline-block;
+  width: 40px; height: 40px;
+  border-radius: 50%;
+  border: 3px solid var(--accent-soft);
+  border-top-color: var(--accent);
+  animation: ui-spin 0.9s linear infinite;
+}
+.ob-working__title {
+  margin-top: 16px;
+  font-family: var(--font-serif); font-size: 19px; font-weight: 500; line-height: 1.4;
+  color: var(--text-primary);
+}
+.ob-working__sub { margin-top: 8px; font-size: 12.5px; line-height: 1.6; color: var(--text-muted); }
+
+.ob-progress {
+  height: 6px; overflow: hidden;
+  border-radius: var(--radius-pill);
+  background: var(--surface-sunken);
+}
+.ob-progress__bar {
+  height: 100%;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  transition: width 0.8s var(--ease-out);
+}
+.ob-progress-meta {
+  margin-top: 8px;
+  display: flex; justify-content: space-between; gap: 12px;
+  font-size: 11.5px; color: var(--text-muted);
+}
+
+/* ——— form fields ——— */
+.ob-input {
+  display: block; width: 100%; box-sizing: border-box;
+  margin: 0; padding: 10px 12px;
+  font-family: var(--font-mono); font-size: 12px; line-height: 1.5;
+  color: var(--text-primary);
+  background: var(--surface-card);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  transition: border-color var(--dur-fast) var(--ease-out);
+}
+.ob-input::placeholder { color: var(--text-faint); }
+.ob-input:hover { border-color: var(--border-strong); }
+.ob-input:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.ob-input.is-valid { border-color: var(--success-border); }
+.ob-field-msg { margin-top: 6px; font-size: 12px; line-height: 1.5; color: var(--text-muted); white-space: pre-wrap; }
+.ob-field-msg.is-ok { color: var(--success-fg); }
+
+/* found accounts / scan candidates */
+.ob-paths { list-style: none; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.ob-path {
+  display: flex; gap: 10px; align-items: baseline;
+  padding: 9px 12px;
+  background: var(--surface-sunken);
+  border: 0.5px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  font-size: 12px; line-height: 1.5;
+}
+.ob-path__name { flex: none; font-weight: 600; color: var(--text-primary); }
+.ob-path__value { min-width: 0; font-family: var(--font-mono); font-size: 11.5px; color: var(--text-muted); overflow-wrap: anywhere; }
+button.ob-path {
+  appearance: none; width: 100%; margin: 0; text-align: left; cursor: pointer;
+  font: inherit; color: inherit;
+  transition: border-color var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out);
+}
+button.ob-path:hover:not(:disabled) { border-color: var(--accent-border); background: var(--accent-soft); }
+button.ob-path:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+button.ob-path:disabled { opacity: 0.55; cursor: wait; }
+
+.ob-scan-status {
+  display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px;
+  font-size: 13px; font-weight: 600; color: var(--text-primary);
+}
+.ob-scan-path {
+  margin-top: 6px;
+  font-family: var(--font-mono); font-size: 11px; color: var(--text-muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* ——— errors ——— */
+.ob-error .ui-error-wrap { padding: 4px 0 0; }
+.ob-error .ui-error { max-width: none; box-shadow: none; }
+.ob-error-raw { margin-top: 10px; }
+.ob-error-pre {
+  margin: 8px 0 0; padding: 8px 10px;
+  max-height: 150px; overflow: auto;
+  font-family: var(--font-mono); font-size: 11px; line-height: 1.55;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  color: var(--text-secondary); background: var(--surface-sunken);
+  border: 0.5px solid var(--border-subtle); border-radius: var(--radius-xs);
+}
+
+/* the key dialog's step bar */
+.ob-key-stepper { margin: 2px 0 18px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .ob-ring { animation-duration: 2s; }
+  .ob-progress__bar { transition: none; }
+}

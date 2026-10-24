@@ -246,6 +246,28 @@ def _private_copy_status(with_coverage: bool = False) -> dict:
     return out
 
 
+def _key_capture_running() -> Optional[str]:
+    """Which macOS key-capture round is running right now, if any:
+    "live-key" (Frida) or "private-copy" (Frida-free copy). Re-signing WeChat
+    or a memory scan would kill WeChat under that round (or stack a second
+    admin-password prompt), so those endpoints refuse with KEY_CAPTURE_BUSY.
+    Jobs that were never created can't be running."""
+    if _LIVE_KEY_JOB is not None and _live_key_job().status().get("running"):
+        return "live-key"
+    if _PRIVATE_COPY_JOB is not None and _private_copy_job().status().get("running"):
+        return "private-copy"
+    return None
+
+
+def _key_capture_busy_payload(which: str) -> dict:
+    return {
+        "ok": False,
+        "error": "实时抓取还在进行，先等这一轮结束或提前结束它，再重签名 / 扫内存",
+        "code": _ec.KEY_CAPTURE_BUSY,
+        "busy": which,
+    }
+
+
 def _frida_installer():
     global _FRIDA_INSTALLER
     if _FRIDA_INSTALLER is None:
@@ -6186,6 +6208,9 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             timeout = int(opts.get("timeout", 90))
             t0 = _time.time()
             if _paths.IS_MAC:
+                busy = _key_capture_running()
+                if busy:
+                    return self._send_json(_key_capture_busy_payload(busy), 409)
                 # macOS dance:
                 #   1. The script needs ROOT (for task_for_pid on WeChat).
                 #   2. But ROOT is BLOCKED by TCC from listdir-ing
@@ -6387,6 +6412,9 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             body = self.rfile.read(length) if length else b"{}"
             opts = json.loads(body.decode("utf-8") or "{}")
             relaunch = bool(opts.get("relaunch", True))
+            busy = _key_capture_running()
+            if busy:
+                return self._send_json(_key_capture_busy_payload(busy), 409)
 
             steps_log = []
             try:
