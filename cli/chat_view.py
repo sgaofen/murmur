@@ -113,6 +113,18 @@ def format_cursor(key: tuple) -> str:
     return f"{int(ts)}:{int(local_id)}:{db}"
 
 
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def _iso(ts: int) -> str:
+    """ISO time in CST. Not datetime.fromtimestamp: on Windows that raises
+    OSError for times before 1970, which a message's create_time can be."""
+    try:
+        return (_EPOCH + timedelta(seconds=int(ts))).astimezone(CST).isoformat()
+    except (OverflowError, ValueError):
+        return ""
+
+
 def _key_at(ts: int) -> tuple:
     """A key that sorts before every real message at `ts` (db "" < any name)."""
     return (int(ts), "", -1)
@@ -494,7 +506,7 @@ def _echo_items(store, chat: str, rows: list, media_index: dict) -> list:
         out.append({
             "id": format_cursor((ts, fname, local_id)),
             "ts": ts,
-            "time": datetime.fromtimestamp(ts, CST).isoformat(),
+            "time": _iso(ts),
             "from": name_of(sender),
             "from_id": sender,
             "type": _label_for(store, mtype),
@@ -563,7 +575,7 @@ class _ListSource:
             out.append({
                 "id": format_cursor(self.keys[i]),
                 "ts": int(m.create_time),
-                "time": datetime.fromtimestamp(int(m.create_time), CST).isoformat(),
+                "time": _iso(int(m.create_time)),
                 "from": m.sender_name,
                 "from_id": m.sender_wxid,
                 "type": m.raw_type_label,

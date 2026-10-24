@@ -310,6 +310,13 @@ class BoundsTest(ChatViewBase):
         self.assertEqual(cv.parse_cursor("-1:1:message_0.db"), (-1, "message_0.db", 1))
         self.assertEqual(cv.parse_cursor(f"{-top}:1:message_0.db"), (-top, "message_0.db", 1))
 
+    def test_iso_time_matches_fromtimestamp_and_handles_pre_1970(self) -> None:
+        for t in (0, 1, ts("2024-01-05", 9), 1 << 31, 4102444800):
+            self.assertEqual(cv._iso(t), datetime.fromtimestamp(t, CST).isoformat())
+        # datetime.fromtimestamp(-86400) raises OSError on Windows; _iso doesn't.
+        self.assertEqual(cv._iso(-86400), "1969-12-31T08:00:00+08:00")
+        self.assertEqual(cv._iso(1 << 53), "")
+
     def test_negative_create_time_cursor_round_trips(self) -> None:
         """A message with create_time < 0 gets a cursor this module must accept
         back (before / after / around), on both the key-index and SQL paths."""
