@@ -29,7 +29,11 @@
 
 `extract_key_mac.py` 靠扫描 WeChat 进程内存找 WCDB 缓存的密钥。这个方法在 WeChat 4.1.9 以下工作正常，但 **4.1.9 之后的版本，内存扫描（无论是找 ASCII 文本格式，还是直接找已知 salt 原始字节）经常直接 0 命中** —— 密钥材料不再稳定驻留内存，扫不到不代表哪里配置错了。
 
-遇到这种情况，改用 `cli/hook_cc_key_frida.py`（Frida 实时 hook，跟 WCDB 调用 CommonCrypto 加密函数的那一刻直接截获 key，不用等它"留"在内存里）：
+遇到这种情况，改用 `cli/hook_cc_key_frida.py`（Frida 实时 hook，跟 WCDB 调用 CommonCrypto 加密函数的那一刻直接截获 key，不用等它"留"在内存里）。
+
+**App 里已经集成了**：引导检测到 WeChat 4.1.9+ 会直接推荐「实时抓取」；内存扫描 0 命中也会自动切过去。界面会显示倒计时和已匹配的数据库数，一轮不够可以「再抓一轮」，抓完接着解密。源码运行时没装 frida 可以在界面里一键安装（`pip install --user`）；打包版 App 自带 frida。挂钩需要管理员权限时会弹 macOS 密码窗口。
+
+想在终端里手动跑也可以：
 
 ```bash
 python3.12 -m pip install -r requirements-mac-keyextract.txt   # 装 frida，一次性
