@@ -1,0 +1,111 @@
+{
+  "_comment": "Shared cases for cli/diag_redact.py and app/src/utils/diagRedact.ts. Each case: input, optional names, strings that must disappear (absent) and strings that must survive (present). py=false marks rules only the front-end port has.",
+  "cases": [
+    {
+      "id": "mac_home",
+      "input": "open /Users/alice/Library/Containers/com.tencent.xinWeChat failed",
+      "absent": ["alice"],
+      "present": ["/Library/Containers/com.tencent.xinWeChat"]
+    },
+    {
+      "id": "other_user_paths",
+      "input": "root wrote /Users/bob/.murmur/keys and /home/carol/x and D:\\Users\\dave\\y",
+      "absent": ["bob", "carol", "dave"],
+      "present": ["/Users/<user>/.murmur/keys"]
+    },
+    {
+      "id": "shared_user_kept",
+      "input": "/Users/Shared/x",
+      "absent": [],
+      "present": ["/Users/Shared/x"]
+    },
+    {
+      "id": "windows_user_with_space",
+      "input": "C:\\Users\\Alice Zhang\\Documents\\xwechat_files and C:/Users/Alice Zhang/AppData",
+      "py": false,
+      "absent": ["Alice", "Zhang"],
+      "present": ["\\Documents\\xwechat_files", "/AppData"]
+    },
+    {
+      "id": "wxid",
+      "input": "profile wxid_q1w2e3r4t5y6u7_8f3c active",
+      "absent": ["q1w2e3r4t5y6u7", "8f3c"],
+      "present": ["wxid_<"]
+    },
+    {
+      "id": "account_folder",
+      "input": "/Users/alice/Documents/xwechat_files/alice_wx_1a2b/db_storage/session/session.db",
+      "absent": ["alice"],
+      "present": ["xwechat_files/<acct#", "/db_storage/session/session.db"]
+    },
+    {
+      "id": "wechat_files_folder",
+      "input": "D:\\WeChat Files\\bobby123\\FileStorage",
+      "absent": ["bobby123"],
+      "present": ["FileStorage"]
+    },
+    {
+      "id": "chatroom",
+      "input": "session 12345678901@chatroom opened",
+      "absent": ["12345678901"],
+      "present": ["@chatroom"]
+    },
+    {
+      "id": "qq_numbers",
+      "input": "D:\\Tencent Files\\246813579\\nt_qq active qq:246813579 and QQ 246813579",
+      "absent": ["246813579"],
+      "present": ["nt_qq"]
+    },
+    {
+      "id": "phones",
+      "input": "call 13800138000 now, tel +86 138-0013-8000",
+      "absent": ["13800138000", "138-0013-8000"],
+      "present": ["<phone>"]
+    },
+    {
+      "id": "timestamps_untouched",
+      "input": "ts=1729661234567 ms=12345 size=1048576 commit 31646a0",
+      "absent": [],
+      "present": ["ts=1729661234567 ms=12345 size=1048576 commit 31646a0"]
+    },
+    {
+      "id": "long_hex",
+      "input": "[KEY] message_0.db: aaaaaaaaaaaaaaaa0123456789abcdef0123456789abcdef0123456789abcdef salt 0xffffffffffffffffffffffffffffffff",
+      "absent": ["0123456789abcdef", "ffffffffffffffffffffffffffffffff"],
+      "present": ["<hex64>", "<hex32>"]
+    },
+    {
+      "id": "nickname_fields",
+      "input": "nick_name=张三 remark: \"老王\" {\"nickname\": \"Alice W\"} 昵称：小李 备注: -",
+      "absent": ["张三", "老王", "Alice W", "小李"],
+      "present": ["\"nickname\": \"<name#", "备注: -"]
+    },
+    {
+      "id": "explicit_names",
+      "input": "loaded account 小明同学 (小明同学's data)",
+      "names": ["小明同学", "", "x"],
+      "absent": ["小明同学"],
+      "present": ["<name#"]
+    },
+    {
+      "id": "email",
+      "input": "signed in as alice.zhang+wx@example.com.cn ok",
+      "py": false,
+      "absent": ["alice.zhang", "example.com"],
+      "present": ["<email>", "ok"]
+    },
+    {
+      "id": "secret_fields",
+      "input": "passphrase=hunter2pass {\"db_key\": \"Ab3$xY9!qW2#zR7k\"} token: s3cr3tT0k3n",
+      "py": false,
+      "absent": ["hunter2pass", "Ab3$xY9!qW2#zR7k", "s3cr3tT0k3n"],
+      "present": ["<secret>"]
+    },
+    {
+      "id": "boot_error_realistic",
+      "input": "### Murmur 启动诊断\n- 报错：API /api/home-summary: 500 {\"error\": \"FileNotFoundError: /Users/zoe/Documents/xwechat_files/wxid_abc123def_9f3e/db_storage/contact/contact.db\"}\n- 日志目录：/Users/zoe/Documents/Murmur/logs\n[serve] active=wxid_abc123def_9f3e nick_name=小明",
+      "absent": ["zoe", "abc123def", "9f3e", "小明"],
+      "present": ["### Murmur 启动诊断", "API /api/home-summary: 500", "/Documents/Murmur/logs", "contact.db"]
+    }
+  ]
+}

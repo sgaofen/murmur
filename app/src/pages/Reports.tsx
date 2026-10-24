@@ -1,41 +1,61 @@
 import { useEffect, useMemo, useState } from 'react';
-import { getReport, listReports, getAgents } from '../data/api';
+import { errorCode, getReport, listReports, getAgents } from '../data/api';
+import { AGENT_CLI_LIST } from '../utils/agents';
 import type { ReportEntry, ReportsList, LocalAgent } from '../data/api';
+import { lookupError } from '../data/errorCatalog';
 import { mdToHtml, MURMUR_MD_CSS } from '../utils/markdown';
 import { useBatchTracker } from '../components/extras/BatchTracker';
 import { maskText } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
-import { ProfileSwitcher } from '../components/ProfileSwitcher';
+import { PageHeader } from '../shell/PageHeader';
+import { Button, Callout, EmptyState, ErrorState, Skeleton, SkeletonText, cx } from '../ui';
+import { IconChevronLeft, IconReport, IconSearch, IconSparkle } from '../ui/icons';
+import type { Tone } from '../ui';
+import './Reports.css';
 
 interface Props {
   onBack: () => void;
 }
 
-export function ReportsPage({ onBack }: Props) {
+export function ReportsPage(props: Props) {
+  // onBack is unused since the app shell's nav replaced the page's own ← 返回.
+  void props;
   void usePrivacy();
   const [list, setList] = useState<ReportsList | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<unknown>(null);
+  const [loadNonce, setLoadNonce] = useState(0);
   const [filter, setFilter] = useState('');
   const [active, setActive] = useState<{ path: string; content: string } | null>(null);
   const [activeLoading, setActiveLoading] = useState(false);
+  // Narrow windows show either the list or the reader; true once the user
+  // opens a report (the auto-picked first one doesn't count).
+  const [reading, setReading] = useState(false);
   const [agents, setAgents] = useState<LocalAgent[]>([]);
-  const [selectedCli, setSelectedCli] = useState<'claude' | 'codex' | 'both' | ''>('');
+  const [selectedCli, setSelectedCli] = useState<string>('');
   const [parallel, setParallel] = useState(2);
   const [batchOpen, setBatchOpen] = useState(false);
+  // Shown inside the batch panel instead of window.alert().
+  const [batchNotice, setBatchNotice] = useState<{ tone: Tone; text: string } | null>(null);
   const [refreshedBatchPid, setRefreshedBatchPid] = useState<number | null>(null);
   const { batch, status: batchStatus, startBatchJob } = useBatchTracker();
 
   useEffect(() => {
-    listReports().then(setList).catch(e => setError(e?.message || String(e)));
+    let cancelled = false;
+    setError(null);
+    listReports()
+      .then(r => { if (!cancelled) setList(r); })
+      .catch(e => { if (!cancelled) setError(e); });
+    return () => { cancelled = true; };
+  }, [loadNonce]);
+
+  useEffect(() => {
     getAgents().then(setAgents).catch(() => { /* no local agents available */ });
   }, []);
 
   useEffect(() => {
     if (selectedCli || agents.length === 0) return;
     const preferred = agents.find(a => a.cli === 'claude') || agents.find(a => a.cli === 'codex') || agents[0];
-    if (preferred?.cli === 'claude' || preferred?.cli === 'codex') {
-      setSelectedCli(preferred.cli);
-    }
+    if (preferred) setSelectedCli(preferred.cli);
   }, [agents, selectedCli]);
 
   // Refresh the list when a background batch finishes, even if it was started
@@ -54,12 +74,13 @@ export function ReportsPage({ onBack }: Props) {
     parallel = 2,
     force = false,
   ) {
+    setBatchNotice(null);
     if (agents.length === 0) {
-      alert('没检测到 claude / codex CLI，请先安装 (npm install -g @anthropic-ai/claude-code)');
+      setBatchNotice({ tone: 'warning', text: `没检测到本机 AI CLI（${AGENT_CLI_LIST}），请先安装其一，例如 npm install -g @anthropic-ai/claude-code` });
       return;
     }
-    if (selectedCli !== 'claude' && selectedCli !== 'codex' && selectedCli !== 'both') {
-      alert('请选择 Claude、Codex 或双引擎');
+    if (selectedCli !== 'both' && !agents.some(a => a.cli === selectedCli)) {
+      setBatchNotice({ tone: 'warning', text: '请先在上面选一个本机 AI，或双引擎。' });
       return;
     }
     const cli = selectedCli;
@@ -68,19 +89,11 @@ export function ReportsPage({ onBack }: Props) {
         { cli, mode, top, top_pairs, sample, parallel, force },
         { label: mode === 'pairs-graph' ? `朋友间 Top ${top_pairs} 对` : 'AI 关系档案批量分析' },
       );
-      if (!r.ok) alert('启动失败：' + maskText(r.error || ''));
+      if (!r.ok) setBatchNotice({ tone: 'danger', text: '启动失败：' + maskText(r.error || '') });
     } catch (e: any) {
-      alert('错误：' + maskText(e?.message || String(e)));
+      setBatchNotice({ tone: 'danger', text: '启动失败：' + maskText(e?.message || String(e)) });
     }
   }
-
-  // Auto-pick the first friend report on first load
-  useEffect(() => {
-    if (list && !active && list.friends.length > 0) {
-      const first = list.friends[0];
-      pickReport(first);
-    }
-  }, [list, active]);
 
   async function pickReport(entry: ReportEntry) {
     setActiveLoading(true);
@@ -92,6 +105,19 @@ export function ReportsPage({ onBack }: Props) {
     } finally {
       setActiveLoading(false);
     }
+  }
+
+  // Auto-pick the first friend report on first load
+  useEffect(() => {
+    if (list && !active && list.friends.length > 0) {
+      const first = list.friends[0];
+      pickReport(first);
+    }
+  }, [list, active]);
+
+  function openReport(entry: ReportEntry) {
+    setReading(true);
+    void pickReport(entry);
   }
 
   async function exportAllHtml() {
@@ -147,6 +173,8 @@ export function ReportsPage({ onBack }: Props) {
       `<article class="murmur-md">${mdToHtml(maskText(r.content))}</article></section>`
     ).join('\n<hr/>\n');
 
+    // The exported file is a standalone document opened outside the app, so
+    // it carries its own fixed (light) palette instead of the app's tokens.
     const html = `<!doctype html>
 <html lang="zh"><head><meta charset="utf-8"><title>Murmur 关系档案合集</title>
 <style>
@@ -193,16 +221,29 @@ ${sections}
   );
 
   if (error) {
+    const code = errorCode(error);
+    const entry = lookupError(code);
+    const raw = error instanceof Error ? error.message : String(error);
     return (
-      <div style={{ padding: 40 }}>
-        <button onClick={onBack} style={{ all: 'unset', cursor: 'pointer', color: 'var(--et-mute)' }}>← 返回</button>
-        <div style={{ marginTop: 20, color: 'var(--et-rose)' }}>加载失败：{maskText(error)}</div>
-      </div>
+      <>
+        <PageHeader title="AI 关系档案" />
+        <ErrorState
+          layout="page"
+          code={code ?? undefined}
+          title={entry?.title ?? '报告列表没能加载'}
+          reason={entry?.reason ?? '读取 AI 关系档案目录时本地服务返回了错误。'}
+          fixes={entry ? [entry.fix] : ['点「重试」再读一次', '还不行就到「设置」里复制诊断信息反馈给我们']}
+          onRetry={() => setLoadNonce(n => n + 1)}
+          details={raw ? <pre>{maskText(raw)}</pre> : undefined}
+        />
+      </>
     );
   }
   if (!list) {
-    return <div style={{ padding: 40 }}>加载报告列表…</div>;
+    return <ReportsSkeleton />;
   }
+  const noReports = list.friends.length === 0 && list.pairs.length === 0;
+  const noMatch = !noReports && filteredFriends.length === 0 && filteredPairs.length === 0;
   const batchRunning = !!batch?.pid && !!batchStatus?.running;
   const friendDone = batchStatus?.friends_done ?? batchStatus?.n_friends ?? 0;
   const friendTotal = batchStatus?.friends_total ?? 0;
@@ -216,67 +257,59 @@ ${sections}
   const hasClaude = agents.some(a => a.cli === 'claude');
   const hasCodex = agents.some(a => a.cli === 'codex');
   const hasBoth = hasClaude && hasCodex;
+  const extraAgents = agents.filter(a => a.cli !== 'claude' && a.cli !== 'codex');
 
   return (
-    <div style={{ position: 'fixed', inset: 0, display: 'flex',
-      background: 'var(--et-bg)', overflow: 'hidden' }}>
-      {/* Sidebar */}
-      <div style={{ width: 320, borderRight: '0.5px solid var(--et-line-2)',
-        display: 'flex', flexDirection: 'column', background: 'var(--et-paper)' }}>
-        <div style={{ padding: '14px 18px', borderBottom: '0.5px solid var(--et-line)',
-          display: 'flex', alignItems: 'center', gap: 10 }}>
-          <button onClick={onBack} style={{ all: 'unset', cursor: 'pointer',
-            fontSize: 13, color: 'var(--et-mute)' }}>← 返回</button>
-          <ProfileSwitcher />
-          <span style={{ fontFamily: 'var(--et-serif)', fontSize: 16, fontWeight: 600, color: 'var(--et-ink)' }}>
-            AI 关系档案
-          </span>
-        </div>
-        <div style={{ padding: '8px 14px', display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <input
-            placeholder="筛选..."
-            value={filter}
-            onChange={e => setFilter(e.target.value)}
-            style={{
-              all: 'unset', width: '100%', padding: '7px 12px', borderRadius: 8,
-              border: '0.5px solid var(--et-line-2)',
-              background: 'var(--et-paper-2)', fontSize: 12,
-              boxSizing: 'border-box',
-            }}
-          />
-          <button onClick={exportAllHtml} style={{
-            all: 'unset', cursor: 'pointer', padding: '7px 12px', borderRadius: 8,
-            background: 'var(--et-orange)', color: '#fff', fontSize: 12, fontWeight: 600,
-            textAlign: 'center',
-          }}>📦 导出全套 HTML</button>
-          <button onClick={() => setBatchOpen(o => !o)} style={{
-            all: 'unset', cursor: 'pointer', padding: '7px 12px', borderRadius: 8,
-            background: batchRunning ? 'var(--et-orange-2)' : 'var(--et-ink)',
-            color: '#fff', fontSize: 12, fontWeight: 600, textAlign: 'center',
-          }}>🤖 批量分析{batchRunning ? ' (跑着)' : ''}</button>
+    <div className={cx('app-fill reports-page', reading && 'is-reading', noReports && 'is-empty')}>
+      <PageHeader title="AI 关系档案"
+        subtitle={`朋友档案 ${list.friends.length} 份 · 关系档案 ${list.pairs.length} 份`} />
+      {/* List pane */}
+      <div className="reports-side">
+        <div className="reports-tools">
+          {!noReports && (
+            <label className="reports-filter">
+              <IconSearch size={13} />
+              <input
+                type="search"
+                placeholder="筛选..."
+                aria-label="按名字筛选报告"
+                value={filter}
+                onChange={e => setFilter(e.target.value)}
+              />
+            </label>
+          )}
+          {!noReports && (
+            <Button variant="primary" size="sm" block onClick={exportAllHtml}>📦 导出全套 HTML</Button>
+          )}
+          <Button size="sm" block aria-expanded={batchOpen}
+            className={cx('reports-batch-toggle', batchRunning && 'is-running')}
+            icon={batchRunning ? <span className="ui-spinner" aria-hidden="true" /> : undefined}
+            onClick={() => setBatchOpen(o => !o)}>
+            🤖 批量分析{batchRunning ? '（跑着）' : ''}
+          </Button>
           {batchOpen && (
-            <div style={{
-              padding: '10px 12px', background: 'var(--et-paper-2)',
-              border: '0.5px solid var(--et-line-2)', borderRadius: 8,
-              fontSize: 11, color: 'var(--et-ink-soft)', lineHeight: 1.6,
-            }}>
-              <div style={{ fontWeight: 600, marginBottom: 6 }}>模型：</div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6, marginBottom: 10 }}>
+            <div className="reports-batch">
+              <div className="reports-batch__label">模型：</div>
+              <div className="reports-batch__choices">
                 <ChoiceBtn label="Claude" active={selectedCli === 'claude'} disabled={!hasClaude || batchRunning}
                   sub={hasClaude ? '已检测' : '未安装'} onClick={() => setSelectedCli('claude')} />
                 <ChoiceBtn label="Codex" active={selectedCli === 'codex'} disabled={!hasCodex || batchRunning}
                   sub={hasCodex ? '已检测' : '未安装'} onClick={() => setSelectedCli('codex')} />
                 <ChoiceBtn label="双引擎" active={selectedCli === 'both'} disabled={!hasBoth || batchRunning}
                   sub={hasBoth ? '对照跑' : '需两者'} onClick={() => setSelectedCli('both')} />
+                {extraAgents.map(a => (
+                  <ChoiceBtn key={a.cli} label={a.name} active={selectedCli === a.cli} disabled={batchRunning}
+                    sub="已检测" onClick={() => setSelectedCli(a.cli)} />
+                ))}
               </div>
-              <div style={{ fontWeight: 600, marginBottom: 6 }}>速度：</div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6, marginBottom: 10 }}>
+              <div className="reports-batch__label">速度：</div>
+              <div className="reports-batch__choices">
                 <ChoiceBtn label="稳妥" active={parallel === 1} disabled={batchRunning} sub="1 路" onClick={() => setParallel(1)} />
                 <ChoiceBtn label="标准" active={parallel === 2} disabled={batchRunning} sub="2 路" onClick={() => setParallel(2)} />
                 <ChoiceBtn label="快跑" active={parallel === 4} disabled={batchRunning} sub="4 路" onClick={() => setParallel(4)} />
               </div>
-              <div style={{ fontWeight: 600, marginBottom: 8 }}>选个量级：</div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div className="reports-batch__label">选个量级：</div>
+              <div className="reports-batch__sizes">
                 <BatchBtn label="小样本自检" sub="2 朋友 + 2 对 · sample 12" onClick={() => launchBatch('top', 2, 2, 12, 1, true)} disabled={batchRunning} />
                 <BatchBtn label="Top 10 朋友 + 10 对" sub="稳妥跑一轮" onClick={() => launchBatch('top', 10, 10, 80, parallel)} disabled={batchRunning} />
                 <BatchBtn label="Top 30 朋友 + 30 对" sub="更完整" onClick={() => launchBatch('top', 30, 30, 80, parallel)} disabled={batchRunning} />
@@ -284,73 +317,85 @@ ${sections}
                 <BatchBtn label="全部朋友 + 全部朋友间" sub="最完整" onClick={() => launchBatch('all', 0, 0, 80, parallel)} disabled={batchRunning} />
                 <BatchBtn label="只朋友间 (按图权重)" sub="补 pair 报告" onClick={() => launchBatch('pairs-graph', 0, 40, 80, parallel)} disabled={batchRunning} />
               </div>
+              {batchNotice && (
+                <Callout compact tone={batchNotice.tone} className="reports-batch__notice">{batchNotice.text}</Callout>
+              )}
               {batch?.pid && batchStatus && (
-                <div style={{ marginTop: 10, padding: '8px 10px', background: 'var(--et-paper)',
-                  borderRadius: 6, border: '0.5px solid var(--et-line-2)' }}>
-                  <div style={{ fontSize: 11, color: 'var(--et-mute)' }}>
+                <div className="reports-run" role="status">
+                  <div className="reports-run__state">
                     {batchStatus.running ? `⏳ PID ${batch.pid} 跑着` : '✅ 完成'}
                   </div>
-                  <div className="et-num" style={{ fontSize: 13, marginTop: 4 }}>
+                  <div className="et-num reports-run__progress">
                     朋友 {friendProgress} · 朋友间 {pairProgress}
                   </div>
-                  {issueText && <div style={{ marginTop: 4, color: 'var(--et-rose)', fontSize: 10 }}>{issueText}</div>}
+                  {issueText && <div className="reports-run__issue">{issueText}</div>}
                   {batchStatus.last_stage && (
-                    <div style={{ marginTop: 4, color: 'var(--et-mute)', fontSize: 10 }}>{maskText(batchStatus.last_stage)}</div>
+                    <div className="reports-run__stage">{maskText(batchStatus.last_stage)}</div>
                   )}
-                  <pre style={{
-                    margin: '8px 0 0', padding: 8, maxHeight: 120, overflowY: 'auto',
-                    background: 'var(--et-paper-2)', borderRadius: 6,
-                    fontSize: 10, lineHeight: 1.45, whiteSpace: 'pre-wrap',
-                  }}>{maskText(batchStatus.log_tail || '(等输出...)')}</pre>
+                  <pre className="reports-run__log">{maskText(batchStatus.log_tail || '(等输出...)')}</pre>
                 </div>
               )}
             </div>
           )}
         </div>
-        <div style={{ flex: 1, overflowY: 'auto', padding: '6px 8px 16px' }}>
+        <nav className="reports-list" aria-label="报告列表">
+          {noMatch && (
+            <div className="reports-list__empty">没有名字包含「{maskText(filter)}」的报告</div>
+          )}
           {filteredFriends.length > 0 && (
             <>
-              <div className="et-eyebrow" style={{ padding: '8px 10px', fontSize: 10 }}>
+              <div className="et-eyebrow reports-list__group">
                 个人档案 · {filteredFriends.length}
               </div>
               {filteredFriends.map(r => (
-                <ReportItem key={r.path} entry={r} active={active?.path === r.path} onClick={() => pickReport(r)} />
+                <ReportItem key={r.path} entry={r} active={active?.path === r.path} onClick={() => openReport(r)} />
               ))}
             </>
           )}
           {filteredPairs.length > 0 && (
             <>
-              <div className="et-eyebrow" style={{ padding: '14px 10px 8px', fontSize: 10 }}>
+              <div className="et-eyebrow reports-list__group reports-list__group--later">
                 朋友间 · {filteredPairs.length}
               </div>
               {filteredPairs.map(r => (
-                <ReportItem key={r.path} entry={r} active={active?.path === r.path} onClick={() => pickReport(r)} />
+                <ReportItem key={r.path} entry={r} active={active?.path === r.path} onClick={() => openReport(r)} />
               ))}
             </>
           )}
-        </div>
+        </nav>
       </div>
 
-      {/* Main viewer */}
-      <div style={{ flex: 1, overflowY: 'auto', padding: '40px 56px',
-        background: 'var(--et-bg)' }}>
-        {!active && (
-          <div className="et-meta" style={{ textAlign: 'center', marginTop: 80 }}>
-            {list.friends.length === 0 && list.pairs.length === 0
-              ? '还没有报告，点左侧“批量分析”开始。'
-              : '选一份报告开始阅读'}
+      {/* Reader pane */}
+      <div className="reports-main">
+        {!noReports && (
+          <Button variant="ghost" size="sm" className="reports-back" icon={<IconChevronLeft size={15} />}
+            onClick={() => setReading(false)}>报告列表</Button>
+        )}
+        {noReports && (
+          <EmptyState
+            icon={<IconReport size={26} />}
+            title="还没有 AI 关系档案"
+            description="让本机的 AI（Claude、Codex 等）读一读你和朋友们的聊天，写成一份份关系档案。数据只在这台电脑上处理。"
+            actions={!batchOpen && (
+              <Button variant="primary" icon={<IconSparkle size={15} />} onClick={() => setBatchOpen(true)}>
+                打开批量分析
+              </Button>
+            )}
+          />
+        )}
+        {!noReports && !active && !activeLoading && (
+          <div className="et-meta reports-pick">选一份报告开始阅读</div>
+        )}
+        {activeLoading && (
+          <div className="reports-reader-skel" aria-busy="true" aria-label="正在打开报告">
+            <Skeleton width="46%" height={30} />
+            <SkeletonText lines={5} lastLineWidth="70%" />
+            <SkeletonText lines={4} lastLineWidth="40%" />
           </div>
         )}
-        {active && activeLoading && <div className="et-meta">加载中…</div>}
         {active && !activeLoading && (
           <article
-            className="murmur-md"
-            style={{
-              maxWidth: 880, margin: '0 auto',
-              fontFamily: 'var(--et-sans)',
-              fontSize: 15, lineHeight: 1.75,
-              color: 'var(--et-ink)',
-            }}
+            className="murmur-md reports-article"
             dangerouslySetInnerHTML={{ __html: mdToHtml(maskText(active.content)) }}
           />
         )}
@@ -361,22 +406,44 @@ ${sections}
   );
 }
 
+function ReportsSkeleton() {
+  return (
+    <div className="app-fill reports-page" aria-busy="true">
+      <PageHeader title="AI 关系档案" />
+      <div className="reports-side" aria-hidden="true">
+        <div className="reports-tools">
+          <Skeleton height={32} radius={8} />
+          <Skeleton height={30} radius={8} />
+          <Skeleton height={30} radius={8} />
+        </div>
+        <div className="reports-list__skel">
+          <Skeleton width={90} height={10} />
+          {Array.from({ length: 6 }, (_, i) => (
+            <div key={i} className="reports-list__skel-item">
+              <Skeleton width={`${70 - (i % 3) * 12}%`} height={13} />
+              <Skeleton width={44} height={9} />
+            </div>
+          ))}
+        </div>
+      </div>
+      <div className="reports-main" aria-label="正在加载报告列表">
+        <div className="reports-reader-skel">
+          <Skeleton width="46%" height={30} />
+          <SkeletonText lines={5} lastLineWidth="70%" />
+          <SkeletonText lines={4} lastLineWidth="40%" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ChoiceBtn({ label, sub, active, disabled, onClick }: {
   label: string; sub: string; active: boolean; disabled?: boolean; onClick: () => void;
 }) {
   return (
-    <button onClick={onClick} disabled={disabled} style={{
-      all: 'unset', cursor: disabled ? 'not-allowed' : 'pointer',
-      padding: '7px 8px', borderRadius: 6,
-      background: active ? 'var(--et-ink)' : 'var(--et-paper)',
-      color: active ? '#fff' : 'var(--et-ink)',
-      border: active ? 'none' : '0.5px solid var(--et-line-2)',
-      opacity: disabled ? 0.4 : 1,
-      boxSizing: 'border-box',
-      minHeight: 44,
-    }}>
-      <div style={{ fontSize: 12, fontWeight: 700, lineHeight: 1.2 }}>{label}</div>
-      <div style={{ fontSize: 10, opacity: 0.72, marginTop: 3 }}>{sub}</div>
+    <button type="button" className="reports-choice" aria-pressed={active} onClick={onClick} disabled={disabled}>
+      <span className="reports-choice__label">{label}</span>
+      <span className="reports-choice__sub">{sub}</span>
     </button>
   );
 }
@@ -385,40 +452,20 @@ function BatchBtn({ label, sub, onClick, disabled, primary }: {
   label: string; sub: string; onClick: () => void; disabled?: boolean; primary?: boolean;
 }) {
   return (
-    <button onClick={onClick} disabled={disabled} style={{
-      all: 'unset', cursor: disabled ? 'not-allowed' : 'pointer',
-      padding: '7px 10px', borderRadius: 6,
-      background: primary ? 'var(--et-orange)' : 'var(--et-paper)',
-      color: primary ? '#fff' : 'var(--et-ink)',
-      border: primary ? 'none' : '0.5px solid var(--et-line-2)',
-      opacity: disabled ? 0.4 : 1,
-      display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-    }}>
-      <span style={{ fontSize: 12, fontWeight: 600 }}>{label}</span>
-      <span style={{ fontSize: 10, opacity: 0.7 }}>{sub}</span>
+    <button type="button" className={cx('reports-size', primary && 'is-primary')} onClick={onClick} disabled={disabled}>
+      <span className="reports-size__label">{label}</span>
+      <span className="reports-size__sub">{sub}</span>
     </button>
   );
 }
 
 function ReportItem({ entry, active, onClick }: { entry: ReportEntry; active: boolean; onClick: () => void }) {
-  // Extract a clean display name: "01_kevin" → "kevin", "02_高进__joyyy" → "高进 ↔ joyyy"
+  // Extract a clean display name: "01_friend_a" → "朋友A", "02_朋友B__friend_c" → "朋友B ↔ friend_c"
   const cleaned = maskText(entry.name.replace(/^\d+_/, '').replace(/_/g, ' ').replace(/^(.*?)__(.*)$/, '$1 ↔ $2'));
   return (
-    <button
-      onClick={onClick}
-      style={{
-        all: 'unset', cursor: 'pointer',
-        display: 'block', width: '100%',
-        padding: '8px 12px', marginBottom: 2, borderRadius: 6,
-        background: active ? 'var(--et-orange-soft)' : 'transparent',
-        color: active ? 'var(--et-ink)' : 'var(--et-ink-soft)',
-        boxSizing: 'border-box',
-      }}
-      onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = 'var(--et-paper-2)'; }}
-      onMouseLeave={(e) => { if (!active) e.currentTarget.style.background = 'transparent'; }}
-    >
-      <div style={{ fontSize: 13, fontWeight: active ? 600 : 500 }}>{cleaned}</div>
-      <div style={{ fontSize: 10, color: 'var(--et-mute)', marginTop: 2 }}>{(entry.size / 1024).toFixed(1)} KB</div>
+    <button type="button" className="reports-item" aria-current={active || undefined} onClick={onClick}>
+      <span className="reports-item__name">{cleaned}</span>
+      <span className="reports-item__size">{(entry.size / 1024).toFixed(1)} KB</span>
     </button>
   );
 }

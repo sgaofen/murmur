@@ -42,10 +42,10 @@ class RedactTest(unittest.TestCase):
         self.assertIn("/Users/Shared", self.r("/Users/Shared/x"))
 
     def test_wxid_is_hashed_stably(self) -> None:
-        raw = "profile wxid_n0cir36u32si12_97a5 then again wxid_n0cir36u32si12_97a5"
+        raw = "profile wxid_q1w2e3r4t5y6u7_8f3c then again wxid_q1w2e3r4t5y6u7_8f3c"
         out = self.r(raw)
-        self.assertNotIn("n0cir36u32si12", out)
-        self.assertNotIn("97a5", out)
+        self.assertNotIn("q1w2e3r4t5y6u7", out)
+        self.assertNotIn("8f3c", out)
         tokens = [t for t in out.split() if t.startswith("wxid_")]
         self.assertEqual(len(tokens), 2)
         self.assertEqual(tokens[0], tokens[1])
@@ -64,10 +64,10 @@ class RedactTest(unittest.TestCase):
         self.assertIn("@chatroom", out)
 
     def test_qq_numbers(self) -> None:
-        out = redact("C:\\Users\\Alice Zhang\\Documents\\Tencent Files\\939919010\\nt_qq", home=WIN_HOME)
-        self.assertNotIn("939919010", out)
-        self.assertNotIn("939919010", self.r("active qq:939919010"))
-        self.assertNotIn("939919010", self.r("QQ 939919010 decrypted"))
+        out = redact("C:\\Users\\Alice Zhang\\Documents\\Tencent Files\\246813579\\nt_qq", home=WIN_HOME)
+        self.assertNotIn("246813579", out)
+        self.assertNotIn("246813579", self.r("active qq:246813579"))
+        self.assertNotIn("246813579", self.r("QQ 246813579 decrypted"))
 
     def test_phone_numbers(self) -> None:
         for raw in ("call 13800138000 now", "tel +86 138-0013-8000", "86 13912345678"):
@@ -114,6 +114,83 @@ class RedactTest(unittest.TestCase):
         self.assertTrue(out.startswith("~"))
         self.assertIn("<phone>", out)
         self.assertNotIn("abcdef123", out)
+
+
+class RedactFollowupTest(unittest.TestCase):
+    """Review follow-up for #38: e-mail, bare QQ numbers, 16-char keys, and
+    names/secrets reaching the serve.log / tauri-shell.log sections."""
+
+    def r(self, text, **kw):
+        kw.setdefault("home", MAC_HOME)
+        return redact(text, **kw)
+
+    def test_email(self) -> None:
+        out = self.r("contact alice.w+x@example.co.uk or BOB@qq.com today")
+        self.assertNotIn("alice.w", out)
+        self.assertNotIn("BOB", out)
+        self.assertEqual(out.count("<email#"), 2)
+        # chatroom ids are not e-mails and keep their own token
+        self.assertIn("@chatroom", self.r("12345678@chatroom"))
+
+    def test_bare_qq_numbers_from_names_on_digit_boundaries(self) -> None:
+        out = self.r("decrypt 246813579 ok; ts=1246813579123", names=["246813579"])
+        self.assertIn("decrypt <qq#", out)
+        self.assertIn("ts=1246813579123", out)  # not part of a longer number
+        # same token as the qq: prefix rule
+        self.assertEqual(self.r("qq:246813579").split(":", 1)[1], out.split()[1].rstrip(";"))
+
+    def test_qq_number_fields_and_nt_qq_dirs(self) -> None:
+        raw = 'uin=246813579 "qq_number": "12345678" QQ号：87654321 D:\\data\\55667788\\nt_qq\\nt_db'
+        out = self.r(raw)
+        for n in ("246813579", "12345678", "87654321", "55667788"):
+            self.assertNotIn(n, out)
+        self.assertIn("nt_qq", out)
+
+    def test_secret_fields(self) -> None:
+        out = self.r('key=s3cr3tValue! passphrase: "hunter2hunter2" 密钥: Zx9vQ2mL7pR4tK8w key=None')
+        for leaked in ("s3cr3tValue", "hunter2hunter2", "Zx9vQ2mL7pR4tK8w"):
+            self.assertNotIn(leaked, out)
+        self.assertIn("key=None", out)  # short values are not secrets
+
+    def test_free_standing_16_char_key(self) -> None:
+        for key in ("aB3$xY9!kL0@mN2#", "3s!x)e&q1v:{u4pt", "abcd1234EFGH5678"):
+            with self.subTest(key=key):
+                out = self.r(f"got {key} from R8")
+                self.assertNotIn(key, out)
+                self.assertIn("<secret16>", out)
+
+    def test_16_char_non_secrets_kept(self) -> None:
+        raw = "2026-10-23T22:54 LiveKeyJob.start TimeoutSeconds=1 message_10.db-wal"
+        self.assertEqual(self.r(raw), raw)
+
+    def test_caller_secrets(self) -> None:
+        out = self.r("using qwertyuiop123456 now", secrets=["qwertyuiop123456"])
+        self.assertNotIn("qwertyuiop123456", out)
+
+    def test_followups_idempotent(self) -> None:
+        raw = "a@b.com uin=123456789 aB3$xY9!kL0@mN2# key=s3cr3tValue!"
+        once = self.r(raw)
+        self.assertEqual(self.r(once), once)
+
+    def test_diag_bundle_logs_get_names_and_secrets(self) -> None:
+        from unittest import mock
+        import etcli
+        import paths
+        import qq_paths
+        key = "qwertyuiop123456"  # not random-looking: only the literal rule catches it
+        logs = {"serve": f"loaded 小明同学 qq 246813579 decrypt 246813579 with {key}",
+                "tauri_shell": "user 小明同学 mail a@b.com"}
+        H = etcli._MurmurAPIHandler
+        with mock.patch.object(etcli, "read_diagnostic_logs", return_value=logs), \
+                mock.patch.object(H, "_build_profiles_payload",
+                                  return_value={"profiles": [{"nick_name": "小明同学"}]}), \
+                mock.patch.object(H, "_qq_load_keys_config", return_value={"246813579": key}), \
+                mock.patch.object(paths, "discover_wechat_profiles", return_value=[]), \
+                mock.patch.object(qq_paths, "discover_qq_profiles", return_value=[]):
+            md = etcli._build_diag_bundle()
+        for leaked in ("小明同学", "246813579", key, "a@b.com"):
+            self.assertNotIn(leaked, md)
+        self.assertIn("### serve.log", md)
 
 
 if __name__ == "__main__":

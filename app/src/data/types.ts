@@ -2,7 +2,7 @@ export type TagKind = 'orange' | 'amber' | 'sage' | 'ink' | 'faint';
 
 export interface AIReportRef {
   available: boolean;
-  path: string;     // e.g. "friends/01_kevin.md"
+  path: string;     // e.g. "friends/01_friend_a.md"
   size: number;
   mtime: number;
   short: string;    // first ~600 chars of body for preview

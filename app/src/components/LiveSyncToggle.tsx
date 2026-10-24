@@ -116,25 +116,27 @@ export function LiveSyncToggle({ onSynced, disabled }: { onSynced?: () => void; 
       title={title}
       style={{
         all: 'unset', cursor: off ? (busy ? 'wait' : 'not-allowed') : 'pointer',
-        display: 'flex', alignItems: 'center', gap: 6,
+        // `all: unset` also resets flex-shrink, so in a crowded top bar the
+        // label would wrap one character per line; keep it on one line.
+        display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0, whiteSpace: 'nowrap',
         opacity: qqActive || disabled ? 0.5 : 1,
-        color: on ? 'var(--et-ink-soft)' : 'var(--et-mute)', fontSize: 12, fontWeight: 500,
+        color: on ? 'var(--text-secondary)' : 'var(--text-muted)', fontSize: 12, fontWeight: 500,
       }}>
       <span aria-hidden style={{
         position: 'relative', width: 24, height: 14, borderRadius: 999, flexShrink: 0,
-        background: on ? 'var(--et-orange)' : 'var(--et-line-2)',
+        background: on ? 'var(--accent)' : 'var(--border-default)',
         transition: 'background .15s ease',
       }}>
         <span style={{
           position: 'absolute', top: 2, left: on ? 12 : 2, width: 10, height: 10,
-          borderRadius: 999, background: 'var(--et-paper)', boxShadow: 'var(--et-shadow-1)',
+          borderRadius: 999, background: 'var(--surface-card)', boxShadow: 'var(--shadow-sm)',
           transition: 'left .15s ease',
         }} />
       </span>
       <span>实时同步</span>
       {detail && (
         <span className="et-meta" style={{
-          fontSize: 11, color: st.last_error && !st.syncing ? 'var(--et-orange)' : 'var(--et-faint)',
+          fontSize: 11, color: st.last_error && !st.syncing ? 'var(--warning-fg)' : 'var(--text-faint)',
         }}>· {detail}</span>
       )}
     </button>

@@ -349,6 +349,18 @@ def filter_key_candidates(cands: list[dict]) -> tuple[list[dict], list[dict]]:
     return to_try, skipped
 
 
+_LOG_CAND_HEX_RE = re.compile(r"(MURMUR_KEY_CANDIDATE\b[^\r\n]*?\bhex=)([0-9A-Fa-f]+)")
+_LOG_LEGACY_KEY_RE = re.compile(r"^([ \t]*(?:找到密钥:|Key found:)[ \t]*)(\S[^\r\n]*)$", re.M)
+
+
+def redact_log(log: str) -> str:
+    """Strip candidate values from the script log before it leaves the
+    backend. Any candidate may be the real passphrase, and the UI shows this
+    log (and users paste it into GitHub issues). Only the length is kept."""
+    log = _LOG_CAND_HEX_RE.sub(lambda m: f"{m.group(1)}<redacted:{len(m.group(2)) // 2}B>", log or "")
+    return _LOG_LEGACY_KEY_RE.sub(lambda m: f"{m.group(1)}<redacted:{len(m.group(2))}B>", log)
+
+
 def _mask(value: str) -> str:
     return (value[:3] + "…") if len(value) > 3 else "…"
 
@@ -398,7 +410,7 @@ def _no_match_error(n_raw: int, to_try: list[dict], skipped: list[dict], n_dbs: 
         "下一步：① 重新点「抓 key」，在弹出的 QQ 窗口里登录你要导入的那个 QQ 号，"
         "等聊天列表完全加载出来后再等 20 秒左右，脚本会自动结束；"
         "② 如果还是失败，请到 https://github.com/sgaofen/murmur/issues/5 反馈 QQ 版本号和日志"
-        "（日志里的候选值可能就是密钥，贴之前请打码）。"
+        "（返回的日志已隐去候选值，可以直接贴）。"
     )
     if n_dbs == 0:
         return ("没有找到可读的 nt_msg.db，无法验证抓到的 key。"
@@ -478,10 +490,15 @@ def extract_key_via_powershell(timeout: int = 240, verify_dbs: list | None = Non
     """
     def _fail(error: str, log: str = "", candidates=None) -> dict:
         return {"ok": False, "key": None, "qq": None, "variant": None,
-                "candidates": candidates or [], "log": log[-3000:], "error": error}
+                "candidates": candidates or [], "log": redact_log(log)[-3000:], "error": error}
 
     if sys.platform != "win32":
         return _fail("Windows-only")
+
+    # Without an nt_msg.db no candidate can ever be verified, so don't launch
+    # QQ under a debugger for minutes only to fail at the end.
+    if not verify_dbs:
+        return _fail(_no_match_error(0, [], [], 0))
 
     import subprocess as _sp
 
@@ -537,12 +554,12 @@ def finish_extraction(log: str, verify_dbs: list, *, timed_out: bool = False,
     res = select_verified_key(cands, verify_dbs)
     if res["ok"]:
         return {"ok": True, "key": res["key"], "qq": res["tag"], "variant": res["variant"],
-                "candidates": res["candidates"], "log": log[-3000:], "error": None}
+                "candidates": res["candidates"], "log": redact_log(log)[-3000:], "error": None}
     error = res["error"]
     if timed_out:
         error = f"抓 key 超时（{timeout} 秒）。" + error
     return {"ok": False, "key": None, "qq": None, "variant": None,
-            "candidates": res["candidates"], "log": log[-3000:], "error": error}
+            "candidates": res["candidates"], "log": redact_log(log)[-3000:], "error": error}
 
 
 if __name__ == "__main__":

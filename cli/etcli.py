@@ -152,9 +152,12 @@ def _render_appmsg(xml_text: str) -> str:
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import paths as _paths  # noqa: E402  (cross-platform discovery helper)
+import local_agents as _local_agents  # noqa: E402  (AI CLI registry)
 import error_codes as _ec  # noqa: E402  (stable API error codes)
 import diag_redact as _redact  # noqa: E402  (diag bundle scrubbing)
+import app_lock as _app_lock  # noqa: E402  (password gate for the local API)
 import live_key as _live_key  # noqa: E402  (macOS live key capture via Frida)
+import mac_private_copy as _private_copy  # noqa: E402  (Frida-free/root-free capture)
 
 
 def _flutter_prefs_path() -> Path:
@@ -213,6 +216,7 @@ def _spawn_mac_extract_key_args(tmp_dir: Path, *args: str) -> list[str]:
 
 _LIVE_KEY_JOB = None
 _FRIDA_INSTALLER = None
+_PRIVATE_COPY_JOB = None
 
 
 def _live_key_job():
@@ -220,6 +224,48 @@ def _live_key_job():
     if _LIVE_KEY_JOB is None:
         _LIVE_KEY_JOB = _live_key.LiveKeyJob()
     return _LIVE_KEY_JOB
+
+
+def _private_copy_job():
+    global _PRIVATE_COPY_JOB
+    if _PRIVATE_COPY_JOB is None:
+        _PRIVATE_COPY_JOB = _private_copy.PrivateCopyJob()
+    return _PRIVATE_COPY_JOB
+
+
+def _private_copy_status(with_coverage: bool = False) -> dict:
+    out = {
+        "platform_ok": _paths.IS_MAC,
+        "job": _private_copy_job().status(),
+    }
+    if with_coverage and _paths.IS_MAC:
+        try:
+            out["coverage"] = _private_copy_job().coverage()
+        except Exception as e:
+            out["coverage"] = {"total": 0, "known": 0, "error": str(e)}
+    return out
+
+
+def _key_capture_running() -> Optional[str]:
+    """Which macOS key-capture round is running right now, if any:
+    "live-key" (Frida) or "private-copy" (Frida-free copy). Re-signing WeChat
+    or a memory scan would kill WeChat under that round (or stack a second
+    admin-password prompt), so those endpoints refuse with KEY_CAPTURE_BUSY.
+    Jobs that were never created can't be running."""
+    if _LIVE_KEY_JOB is not None and _live_key_job().status().get("running"):
+        return "live-key"
+    if _PRIVATE_COPY_JOB is not None and _private_copy_job().status().get("running"):
+        return "private-copy"
+    return None
+
+
+def _key_capture_busy_payload(which: str) -> dict:
+    return {
+        "ok": False,
+        "error": "实时抓取还在进行，先等这一轮结束或提前结束它，再重签名 / 扫内存",
+        "code": _ec.KEY_CAPTURE_BUSY,
+        "busy": which,
+    }
 
 
 def _frida_installer():
@@ -317,13 +363,22 @@ def read_diagnostic_logs(max_lines: int = 80) -> dict:
     }
 
 
-def _mask_user_paths(s: str, names=()) -> str:
+def _mask_user_paths(s: str, names=(), secrets=()) -> str:
     """Scrub the diag bundle so it can be pasted into a public issue: home dir
-    / OS user name, wxid & account folders, QQ numbers, phone numbers, long
-    hex (keys/salts), nicknames. See cli/diag_redact.py."""
+    / OS user name, wxid & account folders, QQ numbers, e-mail, phone numbers,
+    long hex (keys/salts), 16-char keys, nicknames. See cli/diag_redact.py."""
     if not s:
         return s
-    return _redact.redact(s, names=names)
+    return _redact.redact(s, names=names, secrets=secrets)
+
+
+def _diag_known_secrets() -> list:
+    """Saved QQ keys (16 printable chars, not hex) — blanked literally."""
+    try:
+        return [v for v in _MurmurAPIHandler._qq_load_keys_config().values()
+                if isinstance(v, str) and v]
+    except Exception:
+        return []
 
 
 def _diag_known_names() -> list:
@@ -343,6 +398,17 @@ def _diag_known_names() -> list:
             names += [x for x in (c.nick_name, c.remark, c.alias) if x]
     except Exception:
         pass
+    # QQ numbers: logs mention them bare (no qq: prefix), e.g. in decrypt output.
+    try:
+        names += [str(q) for q in _MurmurAPIHandler._qq_load_keys_config().keys()]
+    except Exception:
+        pass
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import qq_paths as _qpaths
+        names += [q.qq_number for q in _qpaths.discover_qq_profiles() if q.qq_number]
+    except Exception:
+        pass
     return names
 
 
@@ -350,6 +416,7 @@ def _build_diag_bundle() -> str:
     """Compose the markdown blob users paste into a GitHub issue."""
     import platform as _plat
     names = _diag_known_names()
+    secrets = _diag_known_secrets()
     lines: list[str] = []
     lines.append("## Murmur diag bundle")
     lines.append("")
@@ -360,7 +427,7 @@ def _build_diag_bundle() -> str:
                  f"{_mask_user_paths(_MurmurAPIHandler._active_id or '(none)', names)}")
     lines.append(f"- **store loaded**: {_MurmurAPIHandler.store is not None}")
     if _MurmurAPIHandler._init_error:
-        lines.append(f"- **init_error**: `{_mask_user_paths(_MurmurAPIHandler._init_error, names)}`")
+        lines.append(f"- **init_error**: `{_mask_user_paths(_MurmurAPIHandler._init_error, names, secrets)}`")
     # Discovered profiles
     try:
         wprofs = _paths.discover_wechat_profiles()
@@ -392,12 +459,12 @@ def _build_diag_bundle() -> str:
     lines.append("")
     lines.append("### serve.log (last 40)")
     lines.append("```")
-    lines.append(_mask_user_paths(logs.get("serve", "(empty)")))
+    lines.append(_mask_user_paths(logs.get("serve", "(empty)"), names, secrets))
     lines.append("```")
     lines.append("")
     lines.append("### tauri-shell.log (last 40)")
     lines.append("```")
-    lines.append(_mask_user_paths(logs.get("tauri_shell", "(empty)")))
+    lines.append(_mask_user_paths(logs.get("tauri_shell", "(empty)"), names, secrets))
     lines.append("```")
     return "\n".join(lines)
 
@@ -966,7 +1033,7 @@ STOPWORDS.update("这个 那个 一下 还是 就是 没有 什么 怎么 为啥
 STOP_CHARS = set("的了是我你他她也都在就不和与这那一个有没啊吧呀嗯哦嘛呢吗哈呜哇噢哎唉哟唔嗷嘿哼啦喔把被让给从向对跟比又再才还但而或因所以之上下里外中后前时日年月来去到过")
 NON_TEXT = re.compile(r"\[[^\]]+\]")
 URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
-APP_VERSION = "0.4.4"
+APP_VERSION = "0.5.0"
 YEARBOOK_CACHE_VERSION = 6
 
 
@@ -1166,9 +1233,6 @@ def _agent_reports_root() -> Path:
         return Path(override).expanduser()
     return _agent_workspace_root() / "agent_reports" / _account_slug()
 
-def _codex_model_args() -> list[str]:
-    model = os.environ.get("MURMUR_CODEX_MODEL", "gpt-5.2").strip()
-    return ["-m", model] if model else []
 
 def _safe_filename(s: str) -> str:
     return re.sub(r'[<>:"/\\|?*]', "_", s)[:80]
@@ -2039,7 +2103,7 @@ def find_friend_in_groups(store: EchoStore, friend_wxid: str,
     you need to see WHO ELSE is in the group and WHO they're talking to. Group nicknames
     are unreliable (people rename freely), so we resolve every speaker by their stable
     wxid → contact.display() (your own contact-book remark/nickname). That way "凯" in the
-    group is rendered as "kevin" if that's how you saved him.
+    group is rendered as "朋友A" if that's how you saved him.
 
     Returns list of {
         group_name, group_id, total_msgs_in_group,
@@ -3858,7 +3922,7 @@ def find_ai_report_for(wxid: str) -> dict | None:
         short = body[:600]
         return {
             "available": True,
-            "path": str(p.relative_to(reports_root.parent)).replace("\\", "/"),  # "friends/01_kevin.md"
+            "path": str(p.relative_to(reports_root.parent)).replace("\\", "/"),  # "friends/01_friend_a.md"
             "size": p.stat().st_size,
             "mtime": int(p.stat().st_mtime),
             "short": short,
@@ -4298,6 +4362,46 @@ def _kick_search_index(store) -> None:
         sys.stderr.write(f"[search-index] kick failed: {type(e).__name__}: {e}\n")
 
 
+def _semantic_index_for(store):
+    """SemanticIndex layered on the store's keyword index (cli/semantic_index.py)."""
+    import semantic_index as _sem
+    return _sem.get_semantic_index(_search_index_for(store))
+
+
+def _kick_semantic_index(store) -> None:
+    """Incremental semantic pass after fresh data — only when the user turned
+    semantic search on, deps are installed and the model is present."""
+    if store is None:
+        return
+    try:
+        import semantic_index as _sem
+        if _sem.ensure_usable() is None:
+            _semantic_index_for(store).start_update(full=False)
+    except Exception as e:
+        sys.stderr.write(f"[semantic] kick failed: {type(e).__name__}: {e}\n")
+
+
+def _is_json_request(handler) -> bool:
+    """True when the POST declares a JSON body.
+
+    Browsers can send text/plain / form posts cross-site without a CORS
+    preflight; insisting on application/json makes every state-changing
+    semantic endpoint preflighted, so the origin allow-list applies.
+    """
+    ctype = (handler.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+    return ctype == "application/json"
+
+
+def _read_json_body(handler) -> dict:
+    length = int(handler.headers.get("Content-Length") or 0)
+    body = handler.rfile.read(length) if length else b"{}"
+    try:
+        data = json.loads(body.decode("utf-8") or "{}")
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 # ---------- HTTP handler ----------
 
 class _MurmurAPIHandler(BaseHTTPRequestHandler):
@@ -4333,6 +4437,65 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         if (parsed.scheme, parsed.hostname, parsed.port) in self._ALLOWED_DEV_ORIGINS:
             return origin
         return None
+
+    # DNS-rebinding guard. A web page can point its own name (evil.com) at
+    # 127.0.0.1 and then make same-origin requests here, sidestepping CORS —
+    # but the browser still sends `Host: evil.com[:port]`. So every request
+    # must name a loopback host plus the port this server listens on. The
+    # Tauri shell and the dev frontend both fetch http://127.0.0.1:<port>
+    # (app/src/data/api.ts); their *Origin* (tauri://localhost,
+    # http://tauri.localhost, :5173) is checked by CORS above, not here.
+    _ALLOWED_HOST_NAMES = {"127.0.0.1", "localhost", "::1"}
+    _WILDCARD_BIND = {"", "0.0.0.0", "::"}
+
+    @staticmethod
+    def _split_host_header(raw: str):
+        """'name[:port]' / '[v6][:port]' → (name, port or None); None if malformed."""
+        raw = raw.strip().lower()
+        if not raw:
+            return None
+        if raw.startswith("["):
+            end = raw.find("]")
+            if end < 0:
+                return None
+            name, rest = raw[1:end], raw[end + 1:]
+            if rest and not rest.startswith(":"):
+                return None
+            port_s = rest[1:] if rest else None
+        elif raw.count(":") > 1:
+            return None  # bare IPv6 without brackets isn't a valid Host
+        else:
+            name, sep, port_s = raw.partition(":")
+            if not sep:
+                port_s = None
+        if port_s is None:
+            return name, None
+        if not port_s.isdigit() or len(port_s) > 5:
+            return None
+        return name, int(port_s)
+
+    def _host_allowed(self) -> bool:
+        raw = self.headers.get("Host")
+        if not raw:
+            return False
+        parsed = self._split_host_header(raw)
+        if parsed is None:
+            return False
+        name, port = parsed
+        bound_host, bound_port = (getattr(self.server, "server_address", None) or ("127.0.0.1", 0))[:2]
+        if port is None:
+            port = 80  # a browser omits the port only when it is the default
+        if port != int(bound_port):
+            return False
+        if name in self._ALLOWED_HOST_NAMES:
+            return True
+        # `serve --host <ip>` on purpose (e.g. a LAN address): that exact name too.
+        bound = str(bound_host).lower()
+        return bound not in self._WILDCARD_BIND and name == bound
+
+    def _reject_host(self):
+        self.close_connection = True
+        return self._send_json({"error": "host_not_allowed", "code": _ec.HOST_NOT_ALLOWED}, 403)
 
     def _origin_allowed(self) -> bool:
         origin = self.headers.get("Origin")
@@ -4373,6 +4536,8 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 pass
 
     def do_OPTIONS(self):  # noqa: N802
+        if not self._host_allowed():
+            return self._reject_host()
         if not self._origin_allowed():
             return self._send_json({"error": "origin_not_allowed"}, 403)
         self.send_response(204)
@@ -4405,19 +4570,123 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):  # noqa: N802
         try:
+            if not self._host_allowed():
+                return self._reject_host()
             if not self._origin_allowed():
                 return self._send_json({"error": "origin_not_allowed"}, 403)
+            if self._handle_app_lock("GET"):
+                return
             self._dispatch_get()
         except Exception as e:
             self._send_exception_response(e)
 
     def do_POST(self):  # noqa: N802
         try:
+            if not self._host_allowed():
+                return self._reject_host()
             if not self._origin_allowed():
                 return self._send_json({"error": "origin_not_allowed"}, 403)
+            if self._handle_app_lock("POST"):
+                return
             self._dispatch_post()
         except Exception as e:
             self._send_exception_response(e)
+
+    # ---- app lock (cli/app_lock.py) ----
+    # Set by _run_server. None means "no lock object yet": the gate stays open
+    # and the /api/app-lock/* endpoints create one on first use.
+    app_lock: "Optional[_app_lock.AppLock]" = None
+    # Reachable while locked: nothing here returns chat data.
+    _APP_LOCK_OPEN = {"/api/app-lock/status", "/api/app-lock/unlock", "/api/app-lock/lock"}
+
+    @classmethod
+    def _get_app_lock(cls) -> "_app_lock.AppLock":
+        if cls.app_lock is None:
+            cls.app_lock = _app_lock.AppLock()
+        return cls.app_lock
+
+    def _read_json_opts(self, limit: Optional[int] = None) -> dict:
+        """Parse a small JSON object body. With ``limit``, an oversized or
+        malformed Content-Length raises ``_app_lock.AppLockError`` (413/400)
+        before anything is read."""
+        raw_len = self.headers.get("Content-Length") or "0"
+        try:
+            length = int(raw_len)
+        except ValueError:
+            length = -1
+        if limit is not None and length < 0:
+            self.close_connection = True
+            raise _app_lock.AppLockError(_ec.APP_LOCK_INVALID, "请求格式不对", 400)
+        if limit is not None and length > limit:
+            self.close_connection = True
+            # Drain a moderately sized body so closing the socket doesn't
+            # reset the connection before the client reads the 413; anything
+            # bigger is left unread.
+            if length <= 64 * 1024:
+                self.rfile.read(length)
+            raise _app_lock.AppLockError(_ec.APP_LOCK_INVALID, "请求太大", 413)
+        body = self.rfile.read(length) if length > 0 else b"{}"
+        try:
+            opts = json.loads(body.decode("utf-8") or "{}")
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            opts = {}
+        return opts if isinstance(opts, dict) else {}
+
+    def _handle_app_lock(self, method: str) -> bool:
+        """Serve /api/app-lock/* and refuse everything else while locked.
+
+        Returns True when the request has been answered here.
+        """
+        path = urllib.parse.urlparse(self.path).path
+        if path.startswith("/api/app-lock/"):
+            self._serve_app_lock(method, path)
+            return True
+        lock = self.__class__.app_lock
+        if lock is not None and lock.is_locked():
+            self._send_json({
+                "error": "app_locked",
+                "code": _ec.APP_LOCKED,
+                "message": "Murmur 已锁定，请先输入应用锁密码。",
+            }, status=423)
+            return True
+        return False
+
+    def _serve_app_lock(self, method: str, path: str) -> None:
+        lock = self._get_app_lock()
+        if path not in self._APP_LOCK_OPEN and lock.is_locked():
+            return self._send_json({"error": "app_locked", "code": _ec.APP_LOCKED}, status=423)
+        try:
+            if method == "GET" and path == "/api/app-lock/status":
+                return self._send_json(lock.status())
+            if method != "POST":
+                return self._send_json({"error": "method not allowed"}, 405)
+            opts = self._read_json_opts(limit=_app_lock.MAX_BODY_BYTES)
+            idle = opts.get("idle_minutes")
+            if isinstance(idle, bool) or not isinstance(idle, int):
+                idle = None
+            if path == "/api/app-lock/unlock":
+                lock.unlock(opts.get("password"))
+            elif path == "/api/app-lock/lock":
+                lock.lock()
+            elif path == "/api/app-lock/activity":
+                # User input reported by the frontend (throttled). This, not
+                # ordinary data requests, keeps the idle timer from firing:
+                # pages poll job status in the background, which must not
+                # count as someone sitting at the keyboard.
+                lock.touch()
+            elif path == "/api/app-lock/set":
+                lock.set_password(opts.get("password"), opts.get("current_password"), idle)
+            elif path == "/api/app-lock/disable":
+                lock.disable(opts.get("current_password"))
+            elif path == "/api/app-lock/idle":
+                lock.set_idle_minutes(idle if idle is not None else -1)
+            else:
+                return self._send_json({"error": "not found"}, 404)
+        except _app_lock.AppLockError as e:
+            return self._send_json(e.payload(), status=e.status)
+        out = lock.status()
+        out["ok"] = True
+        return self._send_json(out)
 
     def _dispatch_get(self):
         url = urllib.parse.urlparse(self.path)
@@ -4444,7 +4713,8 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         # Bootstrap mode: only a small allowlist works without decrypted data.
         _NO_STORE_GET = {"/api/info", "/api/agents", "/api/diagnose", "/api/reports", "/api/log-tail",
                           "/api/scan-disks/status", "/api/profiles", "/api/diag-bundle",
-                          "/api/live-key/status", "/api/live-sync/status"}
+                          "/api/search/semantic/status", "/api/live-key/status", "/api/private-copy/status",
+                          "/api/live-sync/status"}
         # QQ endpoints have their own data lifecycle (separate stores keyed by
         # qq number) so they bypass the WeChat-store bootstrap gate entirely.
         if path.startswith("/api/qq/"):
@@ -4508,6 +4778,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     "data_dir": None,
                     "self_wxid": None,
                     "version": APP_VERSION,
+                    "export_dir": str(self.export_dir),
                     "bootstrap": True,
                     "needs_onboarding": True,
                     "reason": diagnose_hint,
@@ -4527,6 +4798,8 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 "platform": self.__class__._active_platform,
                 "active_id": self.__class__._active_id,
                 "version": APP_VERSION,
+                # Where AI packs / chat exports land (设置 → 数据与目录 shows it).
+                "export_dir": str(self.export_dir),
             })
 
         if path == "/api/profiles":
@@ -4594,7 +4867,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             if self.store is None:
                 return self._send_json({"error": "no_decrypted_data"}, status=503)
             try:
-                from exporters import http_export_meta, write_export, export_to_dir
+                from exporters import http_export_meta, write_export
                 from export_media import POLICIES as _MEDIA_POLICIES
                 content_type, ext = http_export_meta(fmt)
             except (ImportError, ValueError) as e:
@@ -4602,15 +4875,9 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             if media_policy not in _MEDIA_POLICIES:
                 return self._send_json({"error": f"unknown media policy: {media_policy}"}, status=400)
             if media_policy != "none":
-                # Attachments can't ride along a single download, so write a
-                # folder (chat file + media/ + 导出报告.md) under the export dir
-                # and hand back the report; the UI offers "打开文件夹".
-                try:
-                    report = export_to_dir(self.store, wxid, fmt, media_policy,
-                                           self.export_dir / "聊天导出")
-                except Exception as e:
-                    return self._send_json({"error": f"{type(e).__name__}: {e}"}, status=500)
-                return self._send_json(report)
+                # Exporting with attachments writes a folder to disk, so it is
+                # POST-only: a GET can be fired cross-site by any <img> tag.
+                return self._send_json({"error": "带附件导出请用 POST /api/export"}, status=405)
             import io as _io
             buf = _io.StringIO()
             try:
@@ -4641,6 +4908,10 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             # macOS live key capture (Frida) — polled by the onboarding UI.
             return self._send_json(_live_key_status(with_coverage=qs.get("coverage", ["0"])[0] == "1"))
 
+        if path == "/api/private-copy/status":
+            # macOS Frida-free/root-free capture (private WeChat copy).
+            return self._send_json(_private_copy_status(with_coverage=qs.get("coverage", ["0"])[0] == "1"))
+
         # Onboarding gate: data-needing endpoints return 503 until store is ready.
         # Endpoints that work without a store stay above this gate.
         # NOTE: keep this allowlist in sync with `_NO_STORE_GET` above. They
@@ -4650,7 +4921,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         # opened the Reports page on a fresh install.
         _gate_pass = (path in {"/api/diagnose", "/api/agents", "/api/reports", "/api/log-tail",
                                 "/api/scan-disks/status", "/api/profiles", "/api/diag-bundle",
-                                "/api/live-key/status"}
+                                "/api/search/semantic/status", "/api/live-key/status", "/api/private-copy/status"}
                       or path.startswith("/api/report/"))
         if _gate_pass:
             pass  # these don't need store, fall through to their handlers
@@ -4668,18 +4939,44 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             payload = idx.status()
             payload["auto_started"] = auto
             return self._send_json(payload)
-        if path == "/api/search":
+        if path == "/api/search/semantic/status":
+            import semantic_index as _sem
+            # Works before decrypted data exists (install / model state only).
+            return self._send_json(_sem.full_status(
+                _search_index_for(self.store) if self.store is not None else None))
+        if path in ("/api/search", "/api/search/semantic"):
             import search_index as _si
             q = (qs.get("q", [""])[0] or "").strip()
             if not q:
                 return self._send_json({"error": "q required"}, 400)
+            semantic = (path == "/api/search/semantic"
+                        or (qs.get("mode", ["keyword"])[0] or "keyword") == "semantic")
             try:
                 ts_from = _si.parse_time_param(qs.get("from", [None])[0])
                 ts_to = _si.parse_time_param(qs.get("to", [None])[0], end=True)
-                limit = int(qs.get("limit", [50])[0])
+                limit = int(qs.get("limit", [20 if semantic else 50])[0])
                 offset = int(qs.get("offset", [0])[0])
+                ms = qs.get("min_score", [None])[0]
+                min_score = float(ms) if ms not in (None, "") else None
             except ValueError as e:
                 return self._send_json({"error": "bad_param", "message": str(e)}, 400)
+            if semantic:
+                import semantic_index as _sem
+                blocked = _sem.ensure_usable()
+                if blocked is not None:
+                    return self._send_json({"error": "semantic_unavailable",
+                                            "message": blocked["message"], "status": blocked}, 409)
+                sidx = _semantic_index_for(self.store)
+                try:
+                    payload = sidx.search(q, chat=qs.get("chat"), sender=qs.get("sender"),
+                                          ts_from=ts_from, ts_to=ts_to, limit=limit,
+                                          offset=offset, min_score=min_score)
+                except _sem.ModelIntegrityError as e:
+                    st = _sem.availability()
+                    return self._send_json({"error": "semantic_unavailable", "message": str(e),
+                                            "status": st}, 409)
+                payload["index"] = sidx.status()
+                return self._send_json(payload)
             idx = _search_index_for(self.store)
             idx.ensure_fresh()
             payload = idx.search(
@@ -4688,6 +4985,27 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 limit=limit, offset=offset,
             )
             payload["index"] = idx.status()
+            return self._send_json(payload)
+        if path == "/api/chat/messages":
+            # Paged history for the chat page (cli/chat_view.py).
+            import chat_view as _cv
+            import search_index as _si
+            chat = (qs.get("chat", [""])[0] or "").strip()
+            if not chat:
+                return self._send_json({"error": "chat required"}, 400)
+            try:
+                at = _si.parse_time_param(qs.get("at", [None])[0])
+                payload = _cv.chat_page(
+                    self.store, chat,
+                    before=qs.get("before", [None])[0], after=qs.get("after", [None])[0],
+                    around=qs.get("around", [None])[0], at=at,
+                    limit=int(qs.get("limit", [_cv.DEFAULT_LIMIT])[0]),
+                    media_index_path=_paths.media_index_path(),
+                )
+            except (ValueError, OverflowError) as e:
+                # chat_view bounds every number it binds; OverflowError is a
+                # backstop so an oversized value can never surface as a 500.
+                return self._send_json({"error": "bad_param", "message": str(e)[:200]}, 400)
             return self._send_json(payload)
         if path == "/api/graph":
             scope = qs.get("scope", ["private"])[0]
@@ -4893,6 +5211,12 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 "live_key": ({
                     "recommended": _live_key.version_needs_live_capture(_paths.wechat_app_version()),
                     "frida": _live_key.frida_status(),
+                } if _paths.IS_MAC else None),
+                "private_copy": ({
+                    # Frida-free/root-free alternative; available once the
+                    # capture dylib has been built/bundled.
+                    "available": _private_copy.keycap_dylib_path() is not None,
+                    "copy_exists": _private_copy.copy_app_path().exists(),
                 } if _paths.IS_MAC else None),
             })
         if path == "/api/annual-report":
@@ -5102,6 +5426,40 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 return self._send_json(payload)
         return self._send_json({"error": "Not found", "path": path}, status=404)
 
+    def _post_export_to_dir(self):
+        """POST /api/export {wxid, format, media}: export with attachments.
+        Attachments can't ride along a single download, so write a folder
+        (chat file + media/ + 导出报告.md) under the export dir and hand back
+        the report; the UI offers "打开文件夹". Plain downloads (media=none)
+        stay on GET /api/export."""
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length else b"{}"
+        try:
+            opts = json.loads(body.decode("utf-8") or "{}")
+        except (ValueError, UnicodeDecodeError):
+            return self._send_json({"error": "invalid JSON body"}, status=400)
+        if not isinstance(opts, dict):
+            return self._send_json({"error": "invalid JSON body"}, status=400)
+        wxid = str(opts.get("wxid") or "")
+        fmt = str(opts.get("format") or "json").lower()
+        media_policy = str(opts.get("media") or "none").lower()
+        if not wxid:
+            return self._send_json({"error": "missing wxid"}, status=400)
+        try:
+            from exporters import http_export_meta, export_to_dir
+            from export_media import POLICIES as _MEDIA_POLICIES
+            http_export_meta(fmt)
+        except (ImportError, ValueError) as e:
+            return self._send_json({"error": str(e)}, status=400)
+        if media_policy not in _MEDIA_POLICIES or media_policy == "none":
+            return self._send_json({"error": f"unknown media policy: {media_policy}"}, status=400)
+        try:
+            report = export_to_dir(self.store, wxid, fmt, media_policy,
+                                   self.export_dir / "聊天导出")
+        except Exception as e:
+            return self._send_json({"error": f"{type(e).__name__}: {e}"}, status=500)
+        return self._send_json(report)
+
     def _dispatch_post(self):
         url = urllib.parse.urlparse(self.path)
         path = url.path
@@ -5117,6 +5475,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                            "/api/open-folder", "/api/resign-wechat", "/api/open-fda",
                            "/api/scan-disks", "/api/scan-disks/cancel", "/api/active-profile",
                            "/api/live-key/start", "/api/live-key/cancel", "/api/live-key/install-frida",
+                           "/api/private-copy/start", "/api/private-copy/cancel", "/api/private-copy/delete",
                            "/api/live-sync"}
         if path == "/api/active-profile":
             length = int(self.headers.get("Content-Length") or 0)
@@ -5126,12 +5485,61 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             except json.JSONDecodeError:
                 opts = {}
             return self._set_active_profile(opts)
+        if path in ("/api/search/semantic/settings", "/api/search/semantic/download"):
+            # Account-independent: work before decrypted data exists too.
+            import semantic_index as _sem
+            if not _is_json_request(self):
+                return self._send_json({"error": "unsupported_media_type",
+                                        "message": "需要 Content-Type: application/json"}, 415)
+            opts = _read_json_body(self)
+            try:
+                if path == "/api/search/semantic/settings":
+                    en = opts.get("enabled")
+                    _sem.save_settings(enabled=None if en is None else bool(en),
+                                       mirror=opts.get("mirror"))
+                    if en is False:
+                        for sidx in list(_sem._REGISTRY.values()):
+                            sidx.cancel()
+                    kicked = {}
+                else:
+                    mirror = opts.get("mirror") or _sem.load_settings()["mirror"]
+                    if _sem.missing_deps():
+                        st = _sem.availability()
+                        return self._send_json({"error": "semantic_unavailable",
+                                                "message": st["message"], "status": st}, 409)
+                    if opts.get("mirror"):
+                        _sem.save_settings(mirror=mirror)
+                    kicked = _sem.downloader().start(mirror)
+            except ValueError as e:
+                return self._send_json({"error": "bad_param", "message": str(e)}, 400)
+            payload = _sem.full_status(_search_index_for(self.store) if self.store is not None else None)
+            payload.update({"ok": True, **kicked})
+            return self._send_json(payload)
         if self.store is None and path not in BOOTSTRAP_POSTS:
             return self._send_json({
                 "error": "no_decrypted_data",
                 "message": "解密数据未准备好。请先抓 key 再解密。",
                 "needs_onboarding": True,
             }, status=503)
+
+        if path == "/api/export":
+            return self._post_export_to_dir()
+
+        if path == "/api/search/semantic/build":
+            import semantic_index as _sem
+            if not _is_json_request(self):
+                return self._send_json({"error": "unsupported_media_type",
+                                        "message": "需要 Content-Type: application/json"}, 415)
+            blocked = _sem.ensure_usable()
+            if blocked is not None:
+                return self._send_json({"error": "semantic_unavailable",
+                                        "message": blocked["message"], "status": blocked}, 409)
+            opts = _read_json_body(self)
+            sidx = _semantic_index_for(self.store)
+            kicked = sidx.start_update(full=bool(opts.get("full")))
+            payload = _sem.full_status(_search_index_for(self.store))
+            payload.update({"ok": True, **kicked})
+            return self._send_json(payload)
 
         if path == "/api/search/rebuild":
             idx = _search_index_for(self.store)
@@ -5328,6 +5736,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 # Fresh decrypted data → incremental search-index pass in the
                 # background (first run builds the whole index).
                 _kick_search_index(_MurmurAPIHandler._wechat_store)
+                _kick_semantic_index(_MurmurAPIHandler._wechat_store)
             return self._send_json({
                 "ok": ok,
                 "ms": dt,
@@ -5455,10 +5864,11 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 cli_names = [c for c in ("claude", "codex") if c in installed]
                 if len(cli_names) < 2:
                     return self._send_json({"ok": False, "error": "需要同时安装 Claude 和 Codex 才能跑双引擎"}, 400)
-            elif cli_name in ("claude", "codex"):
+            elif cli_name in _local_agents.agent_clis():
                 cli_names = [cli_name]
             else:
-                return self._send_json({"ok": False, "error": "cli must be claude, codex, or both"}, 400)
+                return self._send_json({"ok": False, "error": "cli must be one of "
+                                        + ", ".join(_local_agents.agent_clis()) + ", or both"}, 400)
             extra: list = ["--parallel", str(parallel), "--sample", str(sample)]
             if mode == "all":
                 pair_arg = top_pairs if top_pairs >= 0 else 0
@@ -5662,50 +6072,14 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     with _STORE_READ_LOCK:
                         pack = build_pair_inference_pack(store_ref, a, b)
                     state["stage"] = f"running {cli_name}"
-                    use_shell = sys.platform.startswith("win") and agent_path.lower().endswith((".cmd", ".bat", ".ps1"))
-                    cmd_args = ([agent_path, "--print"] if cli_name == "claude" else
-                                 [agent_path, "exec", "--skip-git-repo-check", "--ephemeral", *_codex_model_args(), "-"] if cli_name == "codex" else
-                                 [agent_path])
                     t_start = _time.time()
-
-                    # Popen + stream stdout line by line so frontend can show live output
-                    if use_shell:
-                        cmd = " ".join(f'"{x}"' if " " in x or x.startswith("-") is False else x for x in cmd_args)
-                    else:
-                        cmd = cmd_args
-
-                    # Run agent from a writable user dir, NOT the bundled .app's
-                    # read-only Resources dir (where etcli's own cwd may live).
-                    # codex creates session dirs in cwd → fails if cwd isn't writable.
-                    _agent_cwd = _agent_workspace_root()
-                    try: _agent_cwd.mkdir(parents=True, exist_ok=True)
-                    except OSError: _agent_cwd = Path.home()
-                    proc = subprocess.Popen(
-                        cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                        bufsize=1, text=True, encoding="utf-8", errors="replace",
-                        shell=use_shell, cwd=str(_agent_cwd),
-                    )
-                    if proc.stdin:
-                        proc.stdin.write(pack)
-                        proc.stdin.close()
-                    if proc.stdout:
-                        for line in proc.stdout:
-                            state["output"] += line
-                    rc = proc.wait(timeout=900)
+                    rc, agent_err = _run_local_agent_streaming(cli_name, agent_path, pack, state)
                     elapsed = int(_time.time() - t_start)
                     output = state["output"]
                     sys.stderr.write(f"[invoke-pair] {name_a}↔{name_b} done rc={rc} chars={len(output)} {elapsed}s\n")
 
                     if rc == 0 and len(output) > 100:
-                        clean_output = output
-                        if cli_name == "codex":
-                            cidx = output.rfind("\ncodex\n")
-                            if cidx > 0:
-                                clean_output = output[cidx + len("\ncodex\n"):]
-                                tidx = clean_output.find("\ntokens used\n")
-                                if tidx > 0:
-                                    clean_output = clean_output[:tidx]
-                        clean_output = clean_output.strip()
+                        clean_output = _local_agents.clean_output(cli_name, output, server=True)
                         pairs_root = _agent_reports_root() / "pairs"
                         pairs_root.mkdir(parents=True, exist_ok=True)
                         safe_a = re.sub(r'[<>:"/\\|?*]', "_", name_a) or a
@@ -5724,7 +6098,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                         sys.stderr.write(f"[invoke-pair] saved → {fname}\n")
                         state["stage"] = "saved"
                     else:
-                        state["error"] = f"agent rc={rc}, output {len(output)} chars (need ≥100)"
+                        state["error"] = f"agent rc={rc}, output {len(output)} chars (need ≥100)" + agent_err
                         state["stage"] = "failed"
                     pck = "pairreport_" + "__".join(sorted([a, b]))
                     _PAIR_REPORT_CACHE.pop(pck, None)
@@ -5826,53 +6200,15 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     pack_path.write_text(pack, encoding="utf-8")
                     state["stage"] = f"running {cli_name}"
 
-                    use_shell = sys.platform.startswith("win") and agent_path.lower().endswith((".cmd", ".bat", ".ps1"))
-                    if cli_name == "claude":
-                        cmd_args = [agent_path, "--print"]
-                    elif cli_name == "codex":
-                        cmd_args = [agent_path, "exec", "--skip-git-repo-check", "--ephemeral", *_codex_model_args(), "-"]
-                    else:
-                        cmd_args = [agent_path]
-
-                    if use_shell:
-                        cmd = " ".join(f'"{x}"' if " " in x or x.startswith("-") is False else x for x in cmd_args)
-                    else:
-                        cmd = cmd_args
-
                     t_start = _time.time()
-                    # Run agent from a writable user dir, NOT the bundled .app's
-                    # read-only Resources dir (where etcli's own cwd may live).
-                    # codex creates session dirs in cwd → fails if cwd isn't writable.
-                    _agent_cwd = _agent_workspace_root()
-                    try: _agent_cwd.mkdir(parents=True, exist_ok=True)
-                    except OSError: _agent_cwd = Path.home()
-                    proc = subprocess.Popen(
-                        cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                        bufsize=1, text=True, encoding="utf-8", errors="replace",
-                        shell=use_shell, cwd=str(_agent_cwd),
-                    )
-                    if proc.stdin:
-                        proc.stdin.write(pack)
-                        proc.stdin.close()
-                    if proc.stdout:
-                        for line in proc.stdout:
-                            state["output"] += line
-                    rc = proc.wait(timeout=900)
+                    rc, agent_err = _run_local_agent_streaming(cli_name, agent_path, pack, state)
                     elapsed = int(_time.time() - t_start)
                     output = state["output"]
                     sys.stderr.write(f"[invoke] {name} rc={rc} chars={len(output)} {elapsed}s\n")
 
                     if rc == 0 and len(output) > 100:
-                        # Strip codex banner: keep only between "\ncodex\n" and "\ntokens used\n"
-                        clean_output = output
-                        if cli_name == "codex":
-                            cidx = output.rfind("\ncodex\n")
-                            if cidx > 0:
-                                clean_output = output[cidx + len("\ncodex\n"):]
-                                tidx = clean_output.find("\ntokens used\n")
-                                if tidx > 0:
-                                    clean_output = clean_output[:tidx]
-                        clean_output = clean_output.strip()
+                        # e.g. strip the codex banner: keep only between "\ncodex\n" and "\ntokens used\n"
+                        clean_output = _local_agents.clean_output(cli_name, output, server=True)
                         reports_root = _agent_reports_root() / "friends"
                         reports_root.mkdir(parents=True, exist_ok=True)
                         safe_full = re.sub(r'[<>:"/\\|?*]', "_", name) or wxid
@@ -5893,7 +6229,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                         except Exception:
                             pass
                     else:
-                        state["error"] = f"agent rc={rc}, output {len(output)} chars"
+                        state["error"] = f"agent rc={rc}, output {len(output)} chars" + agent_err
                         state["stage"] = "failed"
                 except Exception as e:
                     state["error"] = f"{type(e).__name__}: {e}"
@@ -5939,6 +6275,9 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             timeout = int(opts.get("timeout", 90))
             t0 = _time.time()
             if _paths.IS_MAC:
+                busy = _key_capture_running()
+                if busy:
+                    return self._send_json(_key_capture_busy_payload(busy), 409)
                 # macOS dance:
                 #   1. The script needs ROOT (for task_for_pid on WeChat).
                 #   2. But ROOT is BLOCKED by TCC from listdir-ing
@@ -6092,6 +6431,22 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._send_json({"ok": False, "error": f"{type(e).__name__}: {e}"})
 
+        if path in ("/api/private-copy/start", "/api/private-copy/cancel", "/api/private-copy/delete"):
+            if not _paths.IS_MAC:
+                return self._send_json({"ok": False, "error": "macOS only"}, 400)
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length) if length else b"{}"
+            opts = json.loads(body.decode("utf-8") or "{}")
+            if path == "/api/private-copy/cancel":
+                return self._send_json(_private_copy_job().cancel())
+            if path == "/api/private-copy/delete":
+                return self._send_json(_private_copy_job().delete_copy())
+            try:
+                return self._send_json(_private_copy_job().start(
+                    int(opts.get("seconds") or _private_copy.DEFAULT_SECONDS)))
+            except Exception as e:
+                return self._send_json({"ok": False, "error": f"{type(e).__name__}: {e}"})
+
         if path == "/api/save-key":
             # Persist a key for future use (so user doesn't need to re-extract)
             length = int(self.headers.get("Content-Length") or 0)
@@ -6124,6 +6479,9 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             body = self.rfile.read(length) if length else b"{}"
             opts = json.loads(body.decode("utf-8") or "{}")
             relaunch = bool(opts.get("relaunch", True))
+            busy = _key_capture_running()
+            if busy:
+                return self._send_json(_key_capture_busy_payload(busy), 409)
 
             steps_log = []
             try:
@@ -6881,6 +7239,89 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         self._send_cors_headers()
         self.end_headers()
         self.wfile.write(data)
+
+
+def _run_local_agent_streaming(cli_name: str, agent_path: str, prompt: str, state: dict) -> tuple[int, str]:
+    """Run one local agent on `prompt`, appending its stdout to state["output"]
+    line by line so the frontend can poll live progress.
+
+    Returns (returncode, error_suffix). error_suffix is "" or a short
+    "\n[stderr] ..." tail, only for agents whose stderr is kept apart from
+    stdout (claude/codex keep the legacy merged stream).
+    """
+    # Run agent from a writable user dir, NOT the bundled .app's
+    # read-only Resources dir (where etcli's own cwd may live).
+    # codex creates session dirs in cwd → fails if cwd isn't writable.
+    _agent_cwd = _agent_workspace_root()
+    try: _agent_cwd.mkdir(parents=True, exist_ok=True)
+    except OSError: _agent_cwd = Path.home()
+    inv = _local_agents.build_invocation(cli_name, agent_path, prompt, _agent_cwd)
+    cmd_args = inv.argv
+    use_shell = _local_agents.needs_shell(agent_path)
+    # Popen + stream stdout line by line so frontend can show live output
+    if use_shell:
+        cmd = " ".join(f'"{x}"' if " " in x or x.startswith("-") is False else x for x in cmd_args)
+    else:
+        cmd = cmd_args
+    env = None
+    if inv.env:
+        env = os.environ.copy()
+        env.update(inv.env)
+    err_chunks: list[str] = []
+    err_thread = None
+    proc = None
+    watchdog = None
+    try:
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT if inv.merge_stderr else subprocess.PIPE,
+            bufsize=1, text=True, encoding="utf-8", errors="replace",
+            shell=use_shell, cwd=str(_agent_cwd), env=env,
+            **_local_agents.popen_group_kwargs(),
+        )
+        # The read loop below blocks until the agent closes stdout, so the
+        # timeout has to come from a watchdog that kills the process tree.
+        watchdog = _local_agents.Watchdog(proc, inv.timeout)
+        with watchdog:
+            if not inv.merge_stderr and proc.stderr:
+                def _drain(stream=proc.stderr):
+                    for line in stream:
+                        err_chunks.append(line)
+                err_thread = threading.Thread(target=_drain, daemon=True)
+                err_thread.start()
+            if proc.stdin:
+                try:
+                    if inv.stdin_text is not None:
+                        proc.stdin.write(inv.stdin_text)
+                    proc.stdin.close()
+                except OSError:
+                    pass  # agent exited / was killed before reading all input
+            if proc.stdout:
+                for line in proc.stdout:
+                    state["output"] += line
+            try:
+                rc = proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                # stdout closed but the process lingers (detached child etc.)
+                _local_agents.kill_process_tree(proc)
+                rc = proc.wait()
+        if err_thread is not None:
+            err_thread.join(timeout=5)
+    finally:
+        inv.cleanup()
+        if proc is not None:
+            # Never leave the agent running: timeout, a stuck child keeping
+            # the pipe open, or an exception in this thread all end up here.
+            _local_agents.kill_process_tree(proc)
+            for stream in (proc.stdout, proc.stderr):
+                if stream:
+                    try: stream.close()
+                    except OSError: pass
+    err_tail = "".join(err_chunks).strip()
+    suffix = f"\n[stderr] {err_tail[-600:]}" if err_tail else ""
+    if watchdog is not None and watchdog.fired:
+        suffix = f"\nagent 超时（{inv.timeout}s 无结果），已结束进程" + suffix
+    return rc, suffix
 
 
 # ---------- live sync (实时同步, WeChat only) ----------
@@ -8037,29 +8478,12 @@ def _compute_friend_topology(
 
 
 def _detect_local_agents() -> list[dict]:
-    """Detect installed AI CLIs that Murmur can actually invoke safely."""
-    candidates = [
-        ("claude", "Claude Code", "anthropic"),
-        ("codex", "Codex CLI", "openai"),
-    ]
-    found = []
-    for cli, name, vendor in candidates:
-        path = _which(cli)
-        if not path:
-            continue
-        try:
-            # On Windows .cmd needs shell=True; on POSIX direct invocation works
-            use_shell = sys.platform.startswith("win") and path.lower().endswith((".cmd", ".bat", ".ps1"))
-            cmd = f'"{path}" --version' if use_shell else [path, "--version"]
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=5,
-                               encoding="utf-8", errors="replace", shell=use_shell)
-            version = (r.stdout or r.stderr or "").strip().split("\n")[0][:80]
-            if r.returncode == 0 or version:
-                found.append({"cli": cli, "name": name, "vendor": vendor,
-                              "version": version, "path": path})
-        except (subprocess.TimeoutExpired, OSError):
-            pass
-    return found
+    """Detect installed AI CLIs that Murmur can actually invoke safely.
+
+    The candidate list (claude, codex, gemini, kimi, opencode) and how each is
+    probed live in local_agents.AGENTS.
+    """
+    return _local_agents.detect_local_agents(_which)
 
 
 def _run_server(args) -> int:
@@ -8085,6 +8509,10 @@ def _run_server(args) -> int:
         _MurmurAPIHandler.store = None
     if args.export_dir:
         _MurmurAPIHandler.export_dir = Path(args.export_dir)
+    # App lock: starts locked whenever a password is configured.
+    _MurmurAPIHandler.app_lock = _app_lock.AppLock()
+    if _MurmurAPIHandler.app_lock.enabled:
+        sys.stderr.write("[etcli serve] app lock on — data endpoints return 423 until unlocked\n")
 
     addr = (args.host, args.port)
     # ThreadingHTTPServer: each request in its own thread → batch_analyze.py and the

@@ -335,6 +335,111 @@ class MediaTests(Base):
         self.assertIsNone(plain[3].raw)
 
 
+class FollowupTests(unittest.TestCase):
+    """Review follow-up for #36: no remote-image tracking in Markdown exports,
+    and exports with attachments (disk side effect) are POST-only."""
+
+    META = exporters.ChatMeta(chat_id="wxid_x", name="![n](https://t.example/name.png)",
+                              is_group=False, platform="wechat", self_id="self", self_name="我")
+
+    def _rec(self, text, sender="老王"):
+        return {"ts": T0, "time": "2023-11-15 06:13:20", "from_id": "wxid_x", "from": sender,
+                "type": "text", "type_id": 1, "text": text, "media": None, "chatlab_type": 0}
+
+    def test_markdown_neutralizes_remote_images(self):
+        recs = [self._rec("看 ![x](https://t.example/p.png) 和 ![a][r]\n[r]: https://t.example/q.png"),
+                self._rec("hi", sender="![s](https://t.example/s.png)"),
+                self._rec("真的!太好了 [链接](https://example.com)")]
+        buf = io.StringIO()
+        exporters.write_md(self.META, recs, buf)
+        out = buf.getvalue()
+        # every "![" that survives is backslash-escaped
+        self.assertIsNone(re.search(r"!\[", out.replace("!\\[", "")))
+        self.assertIn("!\\[x](https://t.example/p.png)", out)
+        self.assertIn("!\\[a][r]", out)
+        self.assertIn("# 与 !\\[n]", out)
+        self.assertIn("**!\\[s]", out)
+        self.assertIn("真的!太好了", out)  # plain "!" untouched
+
+    def test_attachment_links_stay_images(self):
+        # Our own attachment links are written after escaping, so they still embed.
+        rec = dict(self._rec("[图片]"), type_id=3, media="media/a.jpg")
+        buf = io.StringIO()
+        exporters.write_md(self.META, [rec], buf)
+        self.assertIn("![图片](<media/a.jpg>)", buf.getvalue())
+
+    def test_pair_markdown_neutralizes_images(self):
+        from unittest import mock
+        with mock.patch.object(exporters, "_pair_meta",
+                               return_value={"pack_md": "# A x B\n> ![p](https://t.example/x.png)\n"}):
+            buf = io.StringIO()
+            exporters.export_pair_txt("a", "b", buf)
+        self.assertIn("!\\[p]", buf.getvalue())
+
+
+class ExportEndpointTests(unittest.TestCase):
+    def setUp(self):
+        import etcli
+        self.etcli = etcli
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _call(self, method, path, body=None):
+        from unittest import mock
+        cls = self.etcli._MurmurAPIHandler
+        h = cls.__new__(cls)
+        raw = json.dumps(body).encode("utf-8") if body is not None else b""
+        h.headers = {"Content-Length": str(len(raw))}
+        h.rfile = io.BytesIO(raw)
+        h.path = path
+        sent = {}
+
+        def fake_send(payload, status=200):
+            sent["payload"], sent["status"] = payload, status
+        h._send_json = fake_send
+        with mock.patch.object(cls, "store", object()), \
+                mock.patch.object(cls, "export_dir", self.tmp), \
+                mock.patch.object(exporters, "export_to_dir",
+                                  return_value={"ok": True, "dir": "d"}) as etd:
+            (h._dispatch_get if method == "GET" else h._dispatch_post)()
+        return sent, etd
+
+    def test_get_with_media_is_refused(self):
+        sent, etd = self._call("GET", "/api/export?wxid=wxid_x&format=md&media=best")
+        etd.assert_not_called()
+        self.assertEqual(sent["status"], 405)
+        self.assertIn("POST", sent["payload"]["error"])
+
+    def test_post_exports_with_media(self):
+        sent, etd = self._call("POST", "/api/export", {"wxid": "wxid_x", "format": "md", "media": "best"})
+        self.assertEqual(sent["status"], 200)
+        self.assertEqual(sent["payload"], {"ok": True, "dir": "d"})
+        args = etd.call_args[0]
+        self.assertEqual(args[1:4], ("wxid_x", "md", "best"))
+        self.assertEqual(args[4], self.tmp / "聊天导出")
+
+    def test_post_validates_input(self):
+        for body in ({"format": "md", "media": "best"},
+                     {"wxid": "wxid_x", "format": "xlsx", "media": "best"},
+                     {"wxid": "wxid_x", "format": "md", "media": "none"},
+                     {"wxid": "wxid_x", "format": "md", "media": "all"},
+                     ["not", "a", "dict"]):
+            with self.subTest(body=body):
+                sent, etd = self._call("POST", "/api/export", body)
+                etd.assert_not_called()
+                self.assertEqual(sent["status"], 400)
+
+    def test_frontend_uses_post_for_media_exports(self):
+        api = (ROOT / "app" / "src" / "data" / "api.ts").read_text(encoding="utf-8")
+        fn = api[api.index("export async function exportFriendChat"):]
+        fn = fn[:fn.index("\n}\n")]
+        self.assertIn("method: 'POST'", fn)
+        self.assertNotIn("&media=", fn)
+
+
 def build_media_layout_again(tmp: Path):
     # Layout already exists from the first export in the same test.
     return export_media.MediaResolver(tmp / ME, tmp / "media" / ME, tmp / "xwechat_files" / ME)

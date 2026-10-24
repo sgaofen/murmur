@@ -56,13 +56,13 @@
 - **共群边**（淡墨蓝）— 你的两个朋友共同在某群；粗细 = 共同群数 + 共群里互相 @ 次数
 
 边的细节：
-- 鼠标悬停在边上 → 弹小气泡说明（"你和 kevin：3088 条私聊 + 共在 2 个群"）
+- 鼠标悬停在边上 → 弹小气泡说明（"你和 朋友A：3088 条私聊 + 共在 2 个群"）
 - 透明度 = 关系强度（弱关系几乎透明）
 
 ### 簇 (Clusters)
 
 自动识别社交圈，用半透明的"光晕"包围：
-- 每个簇有标签（自动从群名 / 共同朋友推断："大学室友"、"前同事"、"米哈游游戏群"…）
+- 每个簇有标签（自动从群名 / 共同朋友推断："大学室友"、"前同事"、"游戏群"…）
 - 用户可重命名簇
 - 簇支持折叠（点一下变成单个聚合节点）
 
@@ -85,7 +85,7 @@
 ┌─────────────────────────────────────┐
 │ ← 收起                                │
 │                                       │
-│   [大头像]  kevin                     │
+│   [大头像]  朋友A                     │
 │   关系层级: B 级 · 常聊朋友           │
 │   ──────────────                      │
 │                                       │
@@ -98,11 +98,11 @@
 │     和你私聊里更松弛幽默。            │
 │                                       │
 │   🌐 共同社交圈 (2)                    │
-│   ▢ 米哈游游戏群（你俩+5 人）         │
+│   ▢ 游戏群（你俩+5 人）         │
 │   ▢ 旧同学群（你俩+12 人）           │
 │                                       │
 │   👥 共同朋友 (4)                      │
-│   • Ashleyyy   • whoO.O   • +double  │
+│   • 朋友C   • 朋友E   • 朋友B  │
 │                                       │
 │   🎯 关键信号                          │
 │   - 持续 1 年                         │
@@ -143,17 +143,17 @@ GET /api/graph
 {
   "nodes": [
     { "id": "self", "name": "你", "is_self": true, "size": 100 },
-    { "id": "wxid_kev", "name": "kevin", "tier": "B", "size": 78,
+    { "id": "wxid_aaa", "name": "朋友A", "tier": "B", "size": 78,
       "private_msgs": 3088, "group_msgs": 847, "longevity_years": 1 }
   ],
   "edges": [
-    { "source": "self", "target": "wxid_kev", "type": "private",
+    { "source": "self", "target": "wxid_aaa", "type": "private",
       "weight": 3088, "offline_evidence": 97 },
-    { "source": "wxid_kev", "target": "wxid_ash", "type": "co_group",
-      "shared_groups": ["米哈游游戏群"], "weight": 0.4 }
+    { "source": "wxid_aaa", "target": "wxid_ccc", "type": "co_group",
+      "shared_groups": ["游戏群"], "weight": 0.4 }
   ],
   "clusters": [
-    { "id": "g1", "label": "米哈游游戏群", "members": ["self", "wxid_kev", ...] }
+    { "id": "g1", "label": "游戏群", "members": ["self", "wxid_aaa", ...] }
   ],
   "stats": { "total_people": 261, "total_edges": 1047, "bridges": 2, "isolates": 23 }
 }

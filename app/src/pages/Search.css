@@ -1,0 +1,147 @@
+/* 搜索 page (#/search) — tokens only (see app/src/ui/README.md).
+ * Shares .chat-mark / .chat-jump__input / .chat-tone-* with ./Chat.css. */
+
+.search {
+  max-width: 840px;
+  margin: 0 auto;
+  padding: 28px 28px 56px;
+  display: flex; flex-direction: column; gap: 14px;
+  font-family: var(--font-sans);
+  color: var(--text-secondary);
+}
+
+/* ——— query box ——— */
+.search-bar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 6px 6px 16px;
+  background: var(--surface-card);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  transition: border-color var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out);
+}
+.search-bar:focus-within { border-color: var(--accent-border); box-shadow: 0 0 0 3px var(--accent-soft), var(--shadow-sm); }
+.search-bar__icon { color: var(--text-muted); }
+.search-bar__input {
+  flex: 1 1 auto; min-width: 0;
+  height: 40px; padding: 0;
+  appearance: none; border: 0; outline: none; background: transparent;
+  font-family: var(--font-sans); font-size: 15px;
+  color: var(--text-primary);
+}
+.search-bar__input::placeholder { color: var(--text-faint); }
+.search-bar__input::-webkit-search-cancel-button { cursor: pointer; }
+
+.search-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; }
+.search-range { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.search-range__label { font-size: 12px; color: var(--text-muted); margin-right: 2px; }
+.search-range__dash { color: var(--text-faint); }
+
+.search-hint {
+  margin: -4px 0 0;
+  display: flex; align-items: flex-start; gap: 6px;
+  font-size: 12px; line-height: 1.5; color: var(--text-muted);
+}
+.search-hint > svg { margin-top: 1px; color: var(--text-faint); }
+
+.search-banner .ui-callout__body { display: flex; flex-direction: column; gap: 6px; }
+.search-progress {
+  height: 4px; border-radius: var(--radius-pill);
+  background: var(--surface-pressed); overflow: hidden;
+}
+.search-progress > span {
+  display: block; height: 100%;
+  background: var(--info-solid); border-radius: inherit;
+  transition: width var(--dur-base) var(--ease-out);
+}
+.search-progress__text { font-size: 11.5px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+
+.search-body { min-height: 260px; }
+
+/* ——— results ——— */
+.search-results { display: flex; flex-direction: column; gap: 14px; transition: opacity var(--dur-base) var(--ease-out); }
+.search-results.is-stale { opacity: 0.55; }
+.search-summary {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px;
+  font-size: 12.5px; color: var(--text-muted);
+}
+.search-summary b { color: var(--text-primary); font-weight: 600; }
+.search-summary__note { font-size: 11.5px; color: var(--text-faint); }
+
+.search-group { overflow: hidden; }
+.search-group__head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 0.5px solid var(--border-subtle);
+  background: var(--surface-card);
+}
+.search-group__badge {
+  width: 28px; height: 28px; flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 50%;
+  font-family: var(--font-serif); font-size: 13px; font-weight: 600;
+  color: var(--sender-fg); background: var(--sender-bg);
+  border: 0.5px solid var(--sender-border);
+}
+.search-group__name {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--font-serif); font-size: 15px; font-weight: 600; color: var(--text-primary);
+}
+.search-group__count { margin-left: auto; flex: none; font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+
+.search-hits { list-style: none; margin: 0; padding: 4px 0; }
+.search-hits li + li { border-top: 0.5px solid var(--border-subtle); }
+.search-hit {
+  appearance: none; margin: 0; border: 0;
+  width: 100%;
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 10px 16px;
+  background: transparent;
+  font: inherit; text-align: left; color: inherit;
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-out);
+}
+.search-hit:hover { background: var(--surface-hover); }
+.search-hit:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; border-radius: var(--radius-sm); }
+.search-hit__meta {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px;
+  font-size: 11.5px; color: var(--text-faint); font-variant-numeric: tabular-nums;
+}
+.search-hit__who { font-weight: 600; color: var(--text-muted); }
+.search-hit__type { display: inline-flex; align-items: center; gap: 4px; align-self: center; color: var(--text-muted); }
+.search-hit__text {
+  font-size: 14px; line-height: 1.6; color: var(--text-primary);
+  overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+.search-hit__context { display: flex; flex-direction: column; gap: 3px; }
+.search-hit__ctx {
+  font-size: 12px; line-height: 1.5; color: var(--text-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.search-more { display: flex; justify-content: center; padding-top: 4px; }
+.search-skeleton { display: flex; flex-direction: column; }
+
+.search-footer {
+  margin-top: 8px; padding-top: 12px;
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px;
+  border-top: 0.5px solid var(--border-subtle);
+  font-size: 12px; color: var(--text-faint);
+}
+
+@media (max-width: 640px) {
+  .search { padding: 18px 16px 40px; gap: 12px; }
+  .search-bar { padding-left: 12px; }
+  .search-bar__input { font-size: 14px; }
+  .search-hit { padding: 10px 14px; }
+  .search-group__head { padding: 10px 14px; }
+  /* the two dates share one full-width row */
+  .search-range { flex: 1 1 100%; }
+  .search-range__label { display: none; }
+  .search-range .chat-jump__input { flex: 1 1 112px; min-width: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .search-bar, .search-results, .search-progress > span, .search-hit { transition: none; }
+}

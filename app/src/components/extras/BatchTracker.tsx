@@ -173,7 +173,8 @@ export function BatchStatusPill({ onOpenReports }: { onOpenReports: () => void }
 
   return (
     <div style={{
-      position: 'fixed', left: 18, bottom: 18, zIndex: 9998,
+      // Bottom-left of the content area, clear of the app shell's nav.
+      position: 'fixed', left: 'calc(var(--shell-left, 0px) + 18px)', bottom: 18, zIndex: 9998,
       width: 300, padding: '11px 12px',
       background: 'var(--et-paper)',
       border: '0.5px solid var(--et-line-2)',
@@ -191,10 +192,10 @@ export function BatchStatusPill({ onOpenReports }: { onOpenReports: () => void }
             </span>
             <span className="et-num" style={{ fontSize: 11, color: 'var(--et-mute)' }}>{pct}%</span>
           </div>
-          <div style={{ height: 4, marginTop: 6, background: 'rgba(26,43,74,0.08)', borderRadius: 999, overflow: 'hidden' }}>
+          <div style={{ height: 4, marginTop: 6, background: 'var(--surface-pressed)', borderRadius: 999, overflow: 'hidden' }}>
             <div style={{
               width: `${pct}%`, height: '100%', borderRadius: 999,
-              background: status.running ? 'var(--et-orange)' : '#4EB06D',
+              background: status.running ? 'var(--accent)' : 'var(--success-solid)',
               transition: 'width .25s ease',
             }} />
           </div>

@@ -540,34 +540,34 @@ class PrivacyLeakTest(_Base):
         self.call_ok(s, "list_contacts", {})
 
         def boom(_a):
-            raise RuntimeError("cannot open /Users/stephenyu/Documents/xwechat_files/wxid_alice001_7f3a/db_storage "
-                               "(owner wxid_alice001_7f3a, 爱丽丝, C:\\Users\\stephen\\AppData) home=/Users/stephenyu")
+            raise RuntimeError("cannot open /Users/zoe/Documents/xwechat_files/wxid_alice001_7f3a/db_storage "
+                               "(owner wxid_alice001_7f3a, 爱丽丝, C:\\Users\\zoe\\AppData) home=/Users/zoe")
         s._handlers["list_chats"] = boom
         res = self.call(s, "list_chats", {})
         self.assertTrue(res["isError"])
         text = res["content"][0]["text"]
-        for secret in ("stephenyu", "stephen", "alice001", "7f3a", "爱丽丝"):
+        for secret in ("zoe", "alice001", "7f3a", "爱丽丝"):
             self.assertNotIn(secret, text)
 
         def bail(_a):
-            raise SystemExit("找不到联系人: wxid_bob002 / 老王头 in /home/stephenyu/murmur")
+            raise SystemExit("找不到联系人: wxid_bob002 / 老王头 in /home/zoe/murmur")
         s._handlers["list_chats"] = bail
         text = self.call(s, "list_chats", {})["content"][0]["text"]
-        for secret in ("wxid_bob002", "bob002", "老王头", "stephenyu"):
+        for secret in ("wxid_bob002", "bob002", "老王头", "zoe"):
             self.assertNotIn(secret, text)
 
         def tool_err(_a):
-            raise mcp_server.ToolError("数据目录不可用：[Errno 2] No such file: '/Users/stephenyu'")
+            raise mcp_server.ToolError("数据目录不可用：[Errno 2] No such file: '/Users/zoe'")
         s._handlers["list_chats"] = tool_err
         text = self.call(s, "list_chats", {})["content"][0]["text"]
-        self.assertNotIn("stephenyu", text)
+        self.assertNotIn("zoe", text)
         self.assertIn("数据目录不可用", text)
 
     def test_error_paths_masked_even_without_privacy(self):
         s = self.make_server(privacy=False)
-        s._handlers["list_chats"] = lambda _a: (_ for _ in ()).throw(OSError("bad /Users/stephenyu/x.db"))
+        s._handlers["list_chats"] = lambda _a: (_ for _ in ()).throw(OSError("bad /Users/zoe/x.db"))
         text = self.call(s, "list_chats", {})["content"][0]["text"]
-        self.assertNotIn("stephenyu", text)
+        self.assertNotIn("zoe", text)
 
     def test_date_prefixed_strings_are_masked(self):
         s = self.make_server(privacy=True)

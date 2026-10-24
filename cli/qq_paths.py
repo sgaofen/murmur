@@ -42,7 +42,7 @@ MAC_QQ_BUNDLE_ID = "com.tencent.qq"
 @dataclass
 class QQProfile:
     """One QQ account on this machine."""
-    qq_number: str                  # "939919010" (Windows) / nt_qq_<hash> suffix (macOS)
+    qq_number: str                  # "246813579" (Windows) / nt_qq_<hash> suffix (macOS)
     nt_db_dir: Path                 # …/<qq>/nt_qq/nt_db  or  …/nt_qq_<hash>/nt_db
     tencent_files_root: Path        # parent "Tencent Files" dir / macOS QQ base dir
 

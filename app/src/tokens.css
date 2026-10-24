@@ -1,45 +1,249 @@
-/* EchoTrace 2.0 — Design Tokens
- * Warm cream + ink blue + warm orange. Serif headlines, sans body.
- * Inspired by: Spotify Wrapped, Apple Memories, Day One journal.
+/* Murmur — Design Tokens
+ * Warm cream paper + ink blue + coral. Serif headlines, sans body.
+ *
+ * Three layers:
+ *   1. Semantic tokens (--surface-*, --text-*, --border-*, --accent-*,
+ *      --success/warning/danger/info-*). Raw values live here, once per theme.
+ *      New code should only use these (see app/src/ui/README.md).
+ *   2. Decorative palette (--et-amber / rose / sage / sky / postmark / faint)
+ *      for illustrations and tags that have no semantic meaning.
+ *   3. Legacy --et-* aliases kept so the existing inline styles keep working;
+ *      they point at layer 1, so they are correct in both themes.
+ *
+ * Theme scopes: `:root` / `.et-light` = light, `.et-dark` = dark. The
+ * ThemeProvider (app/src/ui/theme.tsx) toggles `.et-dark` on <html>; a nested
+ * `.et-light` / `.et-dark` element re-themes its subtree.
+ *
+ * Fonts are bundled locally (no network): the serif is the
+ * @fontsource-variable/noto-serif-sc package imported in main.tsx; the sans
+ * body uses the OS CJK UI font (PingFang SC / Microsoft YaHei / Noto Sans CJK).
  */
 
-@import url('https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;500;600;700;900&family=Source+Han+Serif&family=Noto+Sans+SC:wght@300;400;500;600;700&display=swap');
+/* ———————————————————————— Light (cream paper) ———————————————————————— */
+:root,
+.et-light {
+  color-scheme: light;
 
+  /* surfaces */
+  --surface-page:    #F7F1E6;   /* app background, warm cream */
+  --surface-card:    #FBF6EE;   /* cards, lighter paper */
+  --surface-sunken:  #F1E8D7;   /* inset / tinted blocks, code, wells */
+  --surface-raised:  #FDFAF4;   /* dialogs, popovers */
+  --surface-inverse: #1A2B4A;   /* ink pills, selected tabs */
+  --surface-hover:   rgba(26, 43, 74, 0.05);
+  --surface-pressed: rgba(26, 43, 74, 0.09);
+  --surface-overlay: rgba(20, 24, 42, 0.46);   /* modal scrim */
+
+  /* text */
+  --text-primary:   #1A2B4A;
+  --text-secondary: #3A4862;
+  --text-muted:     #6F6A5C;
+  --text-faint:     #A29885;   /* placeholders, disabled, captions */
+  --text-inverse:   #FBF6EE;   /* on --surface-inverse */
+  --text-on-accent: #FFFFFF;   /* on --accent-solid / --danger-solid */
+
+  /* borders */
+  --border-subtle:  rgba(26, 43, 74, 0.10);
+  --border-default: rgba(26, 43, 74, 0.18);
+  --border-strong:  rgba(26, 43, 74, 0.30);
+  --focus-ring:     #FF6B47;
+
+  /* accent (brand coral) */
+  --accent:              #FF6B47;   /* icons, highlights, big numbers */
+  --accent-strong:       #E0532E;   /* hover / pressed, accent text on --accent-soft */
+  --accent-text:         #C2461F;   /* accent-colored body text (AA on paper) */
+  --accent-solid:        #EE5F3A;   /* filled controls carrying white text */
+  --accent-solid-hover:  #DB4E2A;
+  --accent-soft:         #FFE2D6;   /* tinted backgrounds */
+  --accent-border:       rgba(224, 83, 46, 0.28);
+
+  /* status */
+  --success-bg:     #E7F0E3;
+  --success-fg:     #2F6A44;
+  --success-border: #B9D2BC;
+  --success-solid:  #3E8358;
+
+  --warning-bg:     #FBEBD2;
+  --warning-fg:     #85561A;
+  --warning-border: #E9C995;
+  --warning-solid:  #C98A2E;
+
+  --danger-bg:          #F9E3DC;
+  --danger-fg:          #A33A22;
+  --danger-border:      #E9B6A6;
+  --danger-solid:       #C4462B;
+  --danger-solid-hover: #A93A22;
+
+  --info-bg:     #E4EBF2;
+  --info-fg:     #2D4E72;
+  --info-border: #BACADC;
+  --info-solid:  #4A6C91;
+
+  /* skeleton shimmer */
+  --skeleton-base:  #EEE5D3;
+  --skeleton-shine: #F8F2E7;
+
+  /* elevation */
+  --shadow-sm: 0 1px 0 rgba(26,43,74,0.04), 0 1px 2px rgba(26,43,74,0.05);
+  --shadow-md: 0 1px 0 rgba(26,43,74,0.04), 0 8px 24px rgba(26,43,74,0.08);
+  --shadow-lg: 0 1px 0 rgba(26,43,74,0.04), 0 18px 48px rgba(26,43,74,0.12);
+  --shadow-accent: 0 6px 16px rgba(238, 95, 58, 0.28);
+
+  /* decorative palette (no semantic meaning — illustrations, tags) */
+  --et-faint:    #B6AC97;   /* hairlines, ornaments */
+  --et-amber:    #E8B57A;
+  --et-rose:     #C45A3F;
+  --et-sage:     #8AA48F;
+  --et-sky:      #5A7A99;
+  --et-postmark: #C45A3F;
+
+  /* relationship graph canvas (components/extras/GraphView.tsx) */
+  --graph-backdrop:  linear-gradient(180deg, #F7F1E6 0%, #EFE5D2 100%);
+  --graph-node-rim:  rgba(255, 255, 255, 0.70);
+  --graph-specular:  rgba(255, 255, 255, 0.45);
+  --graph-star:      transparent;   /* stars are drawn only on the night canvas */
+}
+
+/* ———————————————————————— Dark (deep ink, late night) ———————————————————————— */
+.et-dark {
+  color-scheme: dark;
+
+  --surface-page:    #14182A;
+  --surface-card:    #1B2138;
+  --surface-sunken:  #232944;
+  --surface-raised:  #20263F;
+  --surface-inverse: #F4ECDA;
+  --surface-hover:   rgba(244, 236, 218, 0.06);
+  --surface-pressed: rgba(244, 236, 218, 0.10);
+  --surface-overlay: rgba(6, 8, 18, 0.62);
+
+  --text-primary:   #F4ECDA;
+  --text-secondary: #DCD3BE;
+  --text-muted:     #A39B86;
+  --text-faint:     #7A735F;
+  --text-inverse:   #1B2138;
+  --text-on-accent: #FFFFFF;
+
+  --border-subtle:  rgba(244, 236, 218, 0.10);
+  --border-default: rgba(244, 236, 218, 0.18);
+  --border-strong:  rgba(244, 236, 218, 0.30);
+  --focus-ring:     #FF8867;
+
+  --accent:              #FF8867;
+  --accent-strong:       #FF6B47;
+  --accent-text:         #FF9E80;
+  --accent-solid:        #E8603C;
+  --accent-solid-hover:  #F2714E;
+  --accent-soft:         #3A2519;
+  --accent-border:       rgba(255, 136, 103, 0.34);
+
+  --success-bg:     #1C2E28;
+  --success-fg:     #9DD3AE;
+  --success-border: #2F5244;
+  --success-solid:  #4C9468;
+
+  --warning-bg:     #322919;
+  --warning-fg:     #EEC788;
+  --warning-border: #5B4727;
+  --warning-solid:  #C9913A;
+
+  --danger-bg:          #3A201D;
+  --danger-fg:          #F4A48E;
+  --danger-border:      #693430;
+  --danger-solid:       #D2553A;
+  --danger-solid-hover: #DE684D;
+
+  --info-bg:     #1B2843;
+  --info-fg:     #A9C4E4;
+  --info-border: #33486C;
+  --info-solid:  #5E80A8;
+
+  --skeleton-base:  #232944;
+  --skeleton-shine: #2D3456;
+
+  --shadow-sm: 0 1px 0 rgba(0,0,0,0.20), 0 1px 2px rgba(0,0,0,0.24);
+  --shadow-md: 0 1px 0 rgba(0,0,0,0.20), 0 8px 24px rgba(0,0,0,0.32);
+  --shadow-lg: 0 1px 0 rgba(0,0,0,0.24), 0 18px 48px rgba(0,0,0,0.45);
+  --shadow-accent: 0 6px 18px rgba(0, 0, 0, 0.35);
+
+  --et-faint:    #6E6852;
+  --et-amber:    #E8B57A;
+  --et-rose:     #E07659;
+  --et-sage:     #9DBBA1;
+  --et-sky:      #8FA8C4;
+  --et-postmark: #E07659;
+
+  --graph-backdrop:  radial-gradient(ellipse at 50% 40%, #1B2548 0%, #0B0F22 70%, #050714 100%);
+  --graph-node-rim:  rgba(20, 24, 42, 0.60);
+  --graph-specular:  rgba(255, 255, 255, 0.25);
+  --graph-star:      #FFFFFF;
+}
+
+/* ———————————————————————— Theme-independent scales ———————————————————————— */
 :root {
-  /* —— Color: light (cream) —— */
-  --et-bg:        #F7F1E6;   /* page bg, warm cream */
-  --et-paper:     #FBF6EE;   /* cards, lighter paper */
-  --et-paper-2:   #F1E8D7;   /* sunken / tinted card */
-  --et-ink:       #1A2B4A;   /* primary text + secondary brand */
-  --et-ink-soft:  #3A4862;
-  --et-mute:      #6F6A5C;   /* secondary text */
-  --et-faint:     #B6AC97;   /* hairlines, captions */
-  --et-line:      rgba(26, 43, 74, 0.10);  /* dividers */
-  --et-line-2:    rgba(26, 43, 74, 0.18);
-  --et-orange:    #FF6B47;   /* primary brand — warm coral */
-  --et-orange-2:  #E0532E;   /* hover/pressed */
-  --et-orange-soft: #FFE2D6; /* tinted backgrounds */
-  --et-amber:     #E8B57A;   /* tertiary accent */
-  --et-rose:      #C45A3F;
-  --et-sage:      #8AA48F;   /* "secret" tag */
-  --et-sky:       #5A7A99;
-  --et-postmark:  #C45A3F;
+  /* type */
+  --font-serif: 'Noto Serif SC Variable', 'Noto Serif SC', 'Source Han Serif SC', 'Songti SC', 'STSong', 'SimSun', serif;
+  --font-sans:  'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei UI', 'Microsoft YaHei', 'Noto Sans CJK SC', 'Noto Sans SC', 'Source Han Sans SC', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', sans-serif;
+  --font-mono:  'SF Mono', ui-monospace, 'JetBrains Mono', Menlo, Consolas, monospace;
 
-  /* —— Type —— */
-  --et-serif: 'Noto Serif SC', 'Source Han Serif SC', 'Songti SC', 'STSong', serif;
-  --et-sans:  'Noto Sans SC', 'PingFang SC', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
-  --et-mono:  'SF Mono', ui-monospace, 'JetBrains Mono', monospace;
+  /* radius */
+  --radius-xs:   6px;
+  --radius-sm:   8px;
+  --radius-md:   10px;
+  --radius-lg:   14px;
+  --radius-xl:   22px;
+  --radius-pill: 999px;
 
-  /* —— Radius / shadow —— */
+  /* spacing (4px grid) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --space-8: 64px;
+  --space-9: 96px;
+
+  /* motion */
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --dur-fast: 120ms;
+  --dur-base: 200ms;
+
+  /* layers */
+  --z-dialog: 1200;
+
+  /* media overlays — drawn on top of photos / video, so the same in both
+     themes (a dark scrim with white text reads on any picture) */
+  --media-scrim:        rgba(20, 24, 42, 0.72);
+  --media-scrim-strong: rgba(8, 10, 18, 0.88);
+  --media-on-scrim:     #FFFFFF;
+  --media-control:      rgba(255, 255, 255, 0.92);
+  --media-control-ink:  #1A2B4A;
+
+  /* relationship graph: the "you" glow, the hover / selection ring and the
+     core-circle palette (categorical data colors, mid-tones that read on
+     both the cream and the night-sky canvas) */
+  --graph-self:      #FFE6CF;
+  --graph-highlight: #FFC857;
+  --graph-circle-1:  #FF6B47;
+  --graph-circle-2:  #E8B57A;
+  --graph-circle-3:  #5A7A99;
+  --graph-circle-4:  #9E9583;
+  --graph-circle-5:  #7C9885;
+  --graph-circle-6:  #C9A66B;
+  --graph-circle-7:  #A87BA1;
+  --graph-circle-8:  #6B8FA8;
+  --graph-circle-9:  #D17545;
+
+    /* —— legacy (--et-*) —— */
+  --et-serif: var(--font-serif);
+  --et-sans:  var(--font-sans);
+  --et-mono:  var(--font-mono);
   --et-r-sm: 8px;
   --et-r:    14px;
   --et-r-lg: 22px;
   --et-r-xl: 32px;
-  --et-shadow-1: 0 1px 0 rgba(26,43,74,0.04), 0 1px 2px rgba(26,43,74,0.05);
-  --et-shadow-2: 0 1px 0 rgba(26,43,74,0.04), 0 8px 24px rgba(26,43,74,0.08);
-  --et-shadow-3: 0 1px 0 rgba(26,43,74,0.04), 0 18px 48px rgba(26,43,74,0.12);
-
-  /* —— Spacing scale —— */
   --et-1: 4px;
   --et-2: 8px;
   --et-3: 12px;
@@ -51,47 +255,48 @@
   --et-9: 96px;
 }
 
-/* —— Dark theme (deep ink, late-night) —— */
+/* Legacy color aliases. Declared on every theme scope so a nested
+ * `.et-dark` / `.et-light` recomputes them from that scope's semantic values. */
+:root,
+.et-light,
 .et-dark {
-  --et-bg:        #14182A;
-  --et-paper:     #1B2138;
-  --et-paper-2:   #232944;
-  --et-ink:       #F4ECDA;
-  --et-ink-soft:  #DCD3BE;
-  --et-mute:      #A39B86;
-  --et-faint:     #6E6852;
-  --et-line:      rgba(244, 236, 218, 0.10);
-  --et-line-2:    rgba(244, 236, 218, 0.18);
-  --et-orange:    #FF8867;
-  --et-orange-2:  #FF6B47;
-  --et-orange-soft: #3A2519;
-  --et-amber:     #E8B57A;
-  --et-rose:      #E07659;
-  --et-sage:      #9DBBA1;
-  --et-sky:       #8FA8C4;
+  --et-bg:          var(--surface-page);
+  --et-paper:       var(--surface-card);
+  --et-paper-2:     var(--surface-sunken);
+  --et-ink:         var(--text-primary);
+  --et-ink-soft:    var(--text-secondary);
+  --et-mute:        var(--text-muted);
+  --et-line:        var(--border-subtle);
+  --et-line-2:      var(--border-default);
+  --et-orange:      var(--accent);
+  --et-orange-2:    var(--accent-strong);
+  --et-orange-soft: var(--accent-soft);
+  --et-shadow-1:    var(--shadow-sm);
+  --et-shadow-2:    var(--shadow-md);
+  --et-shadow-3:    var(--shadow-lg);
 }
 
 /* base */
 .et-root {
-  font-family: var(--et-sans);
-  color: var(--et-ink);
-  background: var(--et-bg);
+  font-family: var(--font-sans);
+  color: var(--text-primary);
+  background: var(--surface-page);
   -webkit-font-smoothing: antialiased;
   font-feature-settings: 'palt' 1;
   letter-spacing: 0.005em;
 }
-.et-serif { font-family: var(--et-serif); letter-spacing: 0.01em; }
-.et-mono  { font-family: var(--et-mono); }
+.et-serif { font-family: var(--font-serif); letter-spacing: 0.01em; }
+.et-mono  { font-family: var(--font-mono); }
 
 /* type scale */
-.et-display { font-family: var(--et-serif); font-weight: 600; font-size: 56px; line-height: 1.15; letter-spacing: -0.005em; }
-.et-h1      { font-family: var(--et-serif); font-weight: 600; font-size: 38px; line-height: 1.2; }
-.et-h2      { font-family: var(--et-serif); font-weight: 500; font-size: 26px; line-height: 1.25; }
-.et-h3      { font-family: var(--et-serif); font-weight: 500; font-size: 20px; line-height: 1.3; }
-.et-eyebrow { font-family: var(--et-sans);  font-weight: 600; font-size: 11px; line-height: 1; letter-spacing: 0.18em; text-transform: uppercase; color: var(--et-mute); }
-.et-body    { font-family: var(--et-sans);  font-weight: 400; font-size: 14px; line-height: 1.55; }
-.et-meta    { font-family: var(--et-sans);  font-weight: 500; font-size: 12px; line-height: 1.4; color: var(--et-mute); }
-.et-num     { font-family: var(--et-serif); font-feature-settings: 'tnum' 1; font-variant-numeric: tabular-nums; }
+.et-display { font-family: var(--font-serif); font-weight: 600; font-size: 56px; line-height: 1.15; letter-spacing: -0.005em; }
+.et-h1      { font-family: var(--font-serif); font-weight: 600; font-size: 38px; line-height: 1.2; }
+.et-h2      { font-family: var(--font-serif); font-weight: 500; font-size: 26px; line-height: 1.25; }
+.et-h3      { font-family: var(--font-serif); font-weight: 500; font-size: 20px; line-height: 1.3; }
+.et-eyebrow { font-family: var(--font-sans);  font-weight: 600; font-size: 11px; line-height: 1; letter-spacing: 0.18em; text-transform: uppercase; color: var(--text-muted); }
+.et-body    { font-family: var(--font-sans);  font-weight: 400; font-size: 14px; line-height: 1.55; }
+.et-meta    { font-family: var(--font-sans);  font-weight: 500; font-size: 12px; line-height: 1.4; color: var(--text-muted); }
+.et-num     { font-family: var(--font-serif); font-feature-settings: 'tnum' 1; font-variant-numeric: tabular-nums; }
 
 /* paper texture (subtle) */
 .et-paper-grain {
@@ -101,24 +306,31 @@
   background-size: 3px 3px, 7px 7px;
   background-position: 0 0, 1px 2px;
 }
+.et-dark .et-paper-grain,
+.et-dark.et-paper-grain {
+  background-image:
+    radial-gradient(rgba(244,236,218,0.022) 1px, transparent 1px),
+    radial-gradient(rgba(244,236,218,0.014) 1px, transparent 1px);
+}
 
 /* a hairline rule that mimics letterpress */
-.et-rule { height: 1px; background: var(--et-line-2); border: 0; }
-.et-rule-double { height: 5px; border-top: 1px solid var(--et-line-2); border-bottom: 1px solid var(--et-line-2); background: transparent; }
+.et-rule { height: 1px; background: var(--border-default); border: 0; }
+.et-rule-double { height: 5px; border-top: 1px solid var(--border-default); border-bottom: 1px solid var(--border-default); background: transparent; }
 
-/* tag chip (老朋友 / 夜聊伙伴 / 秒回选手 …) */
+/* tag chip (老朋友 / 夜聊伙伴 / 秒回选手 …) — legacy; new code uses <Chip> */
 .et-chip {
   display: inline-flex; align-items: center; gap: 4px;
   padding: 3px 9px; border-radius: 999px;
-  font-family: var(--et-sans); font-size: 11px; font-weight: 500;
+  font-family: var(--font-sans); font-size: 11px; font-weight: 500;
   letter-spacing: 0.04em;
-  background: var(--et-orange-soft);
-  color: var(--et-orange-2);
-  border: 0.5px solid rgba(224, 83, 46, 0.18);
+  /* A tag is one word; never break it (absolutely positioned chips, e.g. the
+     friend hero's avatar badge, otherwise shrink-wrap onto two lines). */
+  white-space: nowrap;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  border: 0.5px solid var(--accent-border);
 }
-.et-chip.ink   { background: rgba(26,43,74,0.06); color: var(--et-ink); border-color: rgba(26,43,74,0.10); }
-.et-chip.sage  { background: rgba(138,164,143,0.18); color: #506656; border-color: rgba(80,102,86,0.18); }
-.et-chip.amber { background: rgba(232,181,122,0.22); color: #8a5a1c; border-color: rgba(138,90,28,0.18); }
-.et-chip.faint { background: transparent; color: var(--et-mute); border: 0.5px dashed var(--et-line-2); }
-
-.et-dark .et-chip.ink { color: var(--et-ink); background: rgba(244,236,218,0.08); border-color: rgba(244,236,218,0.14); }
+.et-chip.ink  { background: var(--surface-hover); color: var(--text-primary); border-color: var(--border-subtle); }
+.et-chip.sage  { background: var(--success-bg); color: var(--success-fg); border-color: var(--success-border); }
+.et-chip.amber { background: var(--warning-bg); color: var(--warning-fg); border-color: var(--warning-border); }
+.et-chip.faint { background: transparent; color: var(--text-muted); border: 0.5px dashed var(--border-default); }

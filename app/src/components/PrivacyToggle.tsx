@@ -1,29 +1,30 @@
 import { togglePrivacyMode } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
+import { cx } from '../ui';
+import { IconEye, IconEyeOff } from '../ui/icons';
 
-/** Floating bottom-right pill — one click flips privacy mode on/off. */
-export function PrivacyToggle({ position = 'bottom-right' }: { position?: 'bottom-right' | 'top-right' }) {
+/** Privacy-mode row at the bottom of the app shell's left nav (styles live in
+ * shell/shell.css). One click flips privacy mode; while it is on the row stays
+ * tinted so nobody forgets it before or after a recording. */
+export function PrivacyToggle({ collapsed = false }: { collapsed?: boolean }) {
   const on = usePrivacy();
-  const pos = position === 'top-right'
-    ? { top: 16, right: 16 }
-    : { bottom: 16, right: 16 };
+  const hint = on
+    ? '隐私模式已开启：名字、wxid、本机路径都已脱敏。点击关闭'
+    : '开启隐私模式：录屏 / 截图前把名字、wxid、本机路径脱敏';
   return (
     <button
+      type="button"
       onClick={() => togglePrivacyMode()}
-      title={on ? '关闭隐私模式 (展示真名)' : '开隐私模式 (脱敏，录视频用)'}
-      style={{
-        all: 'unset',
-        position: 'fixed', zIndex: 9999, ...pos,
-        cursor: 'pointer',
-        padding: '6px 12px', borderRadius: 999,
-        background: on ? '#1A2B4A' : 'rgba(255,255,255,0.92)',
-        color: on ? '#FFE6CF' : '#5A7A99',
-        border: `1px solid ${on ? '#1A2B4A' : 'rgba(26,43,74,0.18)'}`,
-        boxShadow: '0 2px 12px rgba(20,24,42,0.18)',
-        fontSize: 11, fontWeight: 600,
-        backdropFilter: 'blur(6px)',
-      }}>
-      {on ? '🔒 隐私模式：开' : '🔓 隐私模式：关'}
+      aria-pressed={on}
+      aria-label="隐私模式"
+      title={hint}
+      className={cx('app-nav__item', 'app-privacy', on && 'is-on', collapsed && 'is-icon')}
+    >
+      <span className="app-nav__icon">{on ? <IconEyeOff size={18} /> : <IconEye size={18} />}</span>
+      <span className="app-nav__label">隐私模式</span>
+      <span className="app-nav__trail">
+        <span className={cx('app-switch', on && 'is-on')} aria-hidden="true" />
+      </span>
     </button>
   );
 }

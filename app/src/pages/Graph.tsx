@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { GraphView } from '../components/extras/GraphView';
 import type { GraphData, GraphNode, GraphEdge, GraphCluster, Spotlight } from '../components/extras/GraphView';
 import { API_BASE, getFriend, getPairPack, findPairReport, getReport, getFriendConnections, invokeAgent, getInvokeStream, getAgents, invokePairAgent, getPairStream } from '../data/api';
+import { AGENT_CLI_LIST } from '../utils/agents';
 import { PairAnalysisPanel } from './extras/PairAnalysisPanel';
 import type { BatchStatus, LocalAgent } from '../data/api';
 import type { FriendConnection } from '../data/api';
@@ -11,8 +12,11 @@ import { displayName, maskedWxid, maskText } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
 import { useBatchTracker } from '../components/extras/BatchTracker';
 import type { BatchHandle } from '../components/extras/BatchTracker';
-import { ProfileSwitcher } from '../components/ProfileSwitcher';
 import { useActivePlatform } from '../utils/activeProfile';
+import { useTheme } from '../ui/theme';
+import { Button, SegmentedControl } from '../ui';
+import { IconMoon, IconPause, IconPlay, IconSparkle, IconSun } from '../ui/icons';
+import { PageHeader } from '../shell/PageHeader';
 
 const TIER_COLORS: Record<string, string> = {
   self: '#FFE6CF', A: '#FF6B47', B: '#E8B57A',
@@ -255,7 +259,9 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
     if (s) { setSelected(null); setSelectedEdge(null); }
     setSpotlight(s);
   }, []);
-  const [dark, setDark] = useState(false);
+  // Follows the app-wide theme; the in-page ☼/☾ button writes back to it.
+  const { resolved: theme, toggle: toggleTheme } = useTheme();
+  const dark = theme === 'dark';
   const [autoRotate, setAutoRotate] = useState(true);
   const [autoRotateResumeSignal, setAutoRotateResumeSignal] = useState(0);
   const [topN, setTopN] = useState<number>(() => {
@@ -271,7 +277,7 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
   // Load agents once
   useEffect(() => { getAgents().then(setAgents).catch(() => { /* no local agents available */ }); }, []);
 
-  async function startGraphBatch(top_pairs: number, cli: 'claude' | 'codex' | 'both', parallel: number) {
+  async function startGraphBatch(top_pairs: number, cli: string, parallel: number) {
     try {
       const r = await startBatchJob(
         { cli, mode: 'pairs-graph', top: 0, top_pairs, parallel },
@@ -353,7 +359,7 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
   }
   if (!data || loading) {
     return (
-      <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 18 }}>
+      <div style={{ minHeight: 'var(--shell-vh, 100vh)', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 18 }}>
         <div style={{ display: 'inline-block', animation: 'spin 1.4s linear infinite', fontSize: 32 }}>🪐</div>
         <div className="et-meta">正在编织 top {topN} 关系网络…</div>
         <div className="et-meta" style={{ fontSize: 11, color: 'var(--et-faint)' }}>
@@ -366,8 +372,10 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
 
   const selectedNode = selected ? data.nodes.find(n => n.id === selected) : null;
 
+  const batchRunning = Boolean(batch && batchStatus?.running);
+
   return (
-    <div style={{ position: 'fixed', inset: 0, overflow: 'hidden' }}>
+    <div className="app-fill" style={{ overflow: 'hidden' }}>
       <GraphView
         data={data}
         dark={dark}
@@ -381,62 +389,32 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
         spotlight={spotlight}
         onChangeSpotlight={handleSpotlight}
       />
-      {/* Top chrome bar */}
-      <div style={{
-        position: 'absolute', top: 0, left: 0, right: 0, zIndex: 5,
-        padding: '14px 28px', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        background: dark
-          ? 'linear-gradient(180deg, rgba(11,15,34,0.7), transparent)'
-          : 'linear-gradient(180deg, rgba(247,241,230,0.85), transparent)',
-        pointerEvents: 'none',
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, pointerEvents: 'auto' }}>
-          <button onClick={onBack} style={{
-            all: 'unset', cursor: 'pointer', padding: '6px 12px', borderRadius: 8,
-            background: dark ? 'rgba(20,24,42,0.6)' : 'rgba(251,246,238,0.8)',
-            border: `0.5px solid ${dark ? 'rgba(244,236,218,0.18)' : 'rgba(26,43,74,0.18)'}`,
-            fontSize: 12, color: dark ? '#F4ECDA' : '#1A2B4A',
-            backdropFilter: 'blur(8px)',
-          }}>← 返回首页</button>
-          <ProfileSwitcher />
-          <span style={{ fontFamily: 'var(--et-serif)', fontSize: 18, fontWeight: 600,
-            color: dark ? '#F4ECDA' : '#1A2B4A' }}>Murmur · 关系网络</span>
-          <span style={{ fontSize: 11, color: dark ? 'rgba(244,236,218,0.65)' : 'rgba(26,43,74,0.65)',
-            letterSpacing: '0.12em' }}>一张可旋转的社交星图</span>
-        </div>
-        <div style={{ display: 'flex', gap: 8, pointerEvents: 'auto', alignItems: 'center' }}>
-          <span style={{ fontSize: 11, color: dark ? 'rgba(244,236,218,0.7)' : 'rgba(26,43,74,0.7)' }}>显示 top</span>
-          {[50, 100, 200, 300].map(n => (
-            <button key={n} onClick={() => changeTopN(n)}
-              style={{
-                ...chromeBtn(dark),
-                background: topN === n
-                  ? (dark ? 'rgba(255,107,71,0.3)' : 'var(--et-orange-soft)')
-                  : (dark ? 'rgba(20,24,42,0.6)' : 'rgba(251,246,238,0.8)'),
-                color: topN === n ? (dark ? '#FFE6CF' : 'var(--et-orange-2)') : (dark ? '#F4ECDA' : '#1A2B4A'),
-                fontWeight: topN === n ? 600 : 500,
-              }}>{n}</button>
-          ))}
-          <button onClick={toggleAutoRotate} style={chromeBtn(dark)}>
-            {autoRotate ? '⏸ 暂停旋转' : '▶ 自动旋转'}
-          </button>
-          <button onClick={() => setBatchPanelOpen(o => !o)} style={{
-            ...chromeBtn(dark),
-            background: batch && batchStatus?.running
-              ? (dark ? 'rgba(255,107,71,0.4)' : 'var(--et-orange-soft)')
-              : (dark ? 'rgba(20,24,42,0.6)' : 'rgba(251,246,238,0.8)'),
-            color: batch && batchStatus?.running
-              ? (dark ? '#FFE6CF' : 'var(--et-orange-2)')
-              : (dark ? '#F4ECDA' : '#1A2B4A'),
-            fontWeight: batch && batchStatus?.running ? 600 : 500,
-          }} title="一次跑完关系网里所有重要朋友对的 AI 分析">
-            🤖 批量分析关系{batch && batchStatus?.running ? ` (${batchStatus.pairs_done ?? batchStatus.n_pairs} 已完成)` : ''}
-          </button>
-          <button onClick={() => setDark(d => !d)} style={chromeBtn(dark)}>
-            {dark ? '☼ 亮' : '☾ 暗'}
-          </button>
-        </div>
-      </div>
+      <PageHeader title="关系网络" subtitle="一张可旋转的社交星图">
+        <span className="app-header__label">显示 top</span>
+        <SegmentedControl
+          label="显示前多少位朋友"
+          size="sm"
+          value={String(topN)}
+          onChange={(v) => changeTopN(Number(v))}
+          options={TOP_N_OPTIONS.map(n => ({ value: String(n), label: String(n) }))}
+        />
+        <Button size="sm" variant="ghost" onClick={toggleAutoRotate}
+          icon={autoRotate ? <IconPause size={14} /> : <IconPlay size={14} />}>
+          {autoRotate ? '暂停旋转' : '自动旋转'}
+        </Button>
+        <Button size="sm" variant={batchRunning ? 'primary' : 'secondary'}
+          onClick={() => setBatchPanelOpen(o => !o)} aria-expanded={batchPanelOpen}
+          icon={batchRunning ? <span className="ui-spinner" aria-hidden="true" /> : <IconSparkle size={14} />}
+          title="一次跑完关系网里所有重要朋友对的 AI 分析">
+          批量分析关系{batchRunning ? ` (${batchStatus?.pairs_done ?? batchStatus?.n_pairs} 已完成)` : ''}
+        </Button>
+        {/* Writes the app-wide theme (same setting as 设置 → 外观). */}
+        <button type="button" className="ui-icon-btn" onClick={toggleTheme}
+          title={dark ? '切换到浅色（全局）' : '切换到深色（全局）'}
+          aria-label={dark ? '切换到浅色' : '切换到深色'}>
+          {dark ? <IconSun size={16} /> : <IconMoon size={16} />}
+        </button>
+      </PageHeader>
       {batchPanelOpen && (
         <BatchAnalysisPanel
           dark={dark}
@@ -478,16 +456,7 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
   );
 }
 
-function chromeBtn(dark: boolean): React.CSSProperties {
-  return {
-    all: 'unset', cursor: 'pointer', padding: '7px 12px', borderRadius: 999,
-    fontFamily: 'var(--et-sans)', fontSize: 12, fontWeight: 500,
-    background: dark ? 'rgba(20,24,42,0.6)' : 'rgba(251,246,238,0.8)',
-    border: `0.5px solid ${dark ? 'rgba(244,236,218,0.18)' : 'rgba(26,43,74,0.18)'}`,
-    color: dark ? '#F4ECDA' : '#1A2B4A',
-    backdropFilter: 'blur(8px)',
-  };
-}
+const TOP_N_OPTIONS = [50, 100, 200, 300];
 
 function AnalysisStreamBox({ stream }: { stream: { output: string; stage: string; elapsed: number } | null }) {
   const tail = stream?.output?.trim().slice(-2000);
@@ -754,7 +723,7 @@ function SidePanel({ node, onClose, onOpenFriend, onSelectPeer }: {
                 <div style={{ marginTop: 10, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                   {agents.length === 0 ? (
                     <span className="et-meta" style={{ color: 'var(--et-faint)', fontSize: 11 }}>
-                      没检测到 claude / codex CLI；请先安装
+                      没检测到本机 AI CLI（{AGENT_CLI_LIST}）；请先安装其一
                     </span>
                   ) : (
                     agents.map(a => (
@@ -1215,7 +1184,7 @@ function EdgePanelInner({ edge, aName, bName, onClose, onOpenFriend, isQQ }: {
                   <div style={{ marginTop: 10, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                     {agents.length === 0 ? (
                       <span className="et-meta" style={{ color: 'var(--et-faint)', fontSize: 11 }}>
-                        没检测到 claude/codex CLI
+                        没检测到本机 AI CLI（{AGENT_CLI_LIST}）
                       </span>
                     ) : (
                       agents.map(a => (
@@ -1327,7 +1296,7 @@ function EdgePanelInner({ edge, aName, bName, onClose, onOpenFriend, isQQ }: {
                     <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                       {agents.length === 0 ? (
                         <span className="et-meta" style={{ color: 'var(--et-faint)', fontSize: 11 }}>
-                          没检测到 claude/codex CLI
+                          没检测到本机 AI CLI（{AGENT_CLI_LIST}）
                         </span>
                       ) : (
                         agents.map(a => (
@@ -1371,7 +1340,7 @@ function BatchAnalysisPanelInner({
   agents: LocalAgent[];
   batch: BatchHandle | null;
   status: BatchStatus | null;
-  onLaunch: (top_pairs: number, cli: 'claude' | 'codex' | 'both', parallel: number) => void;
+  onLaunch: (top_pairs: number, cli: string, parallel: number) => void;
   onReset: () => void;
   onClose: () => void;
   isQQ: boolean;
@@ -1389,13 +1358,15 @@ function BatchAnalysisPanelInner({
     : '';
   const claudeAgent = agents.find(a => a.cli === 'claude');
   const codexAgent = agents.find(a => a.cli === 'codex');
-  const [selectedCli, setSelectedCli] = useState<'claude' | 'codex' | 'both'>(
-    claudeAgent ? 'claude' : codexAgent ? 'codex' : 'claude'
+  const extraAgents = agents.filter(a => a.cli !== 'claude' && a.cli !== 'codex');
+  const [selectedCli, setSelectedCli] = useState<string>(
+    claudeAgent ? 'claude' : codexAgent ? 'codex' : (extraAgents[0]?.cli ?? 'claude')
   );
   const [parallel, setParallel] = useState(4);
   return (
     <div style={{
-      position: 'absolute', top: 64, right: 28, zIndex: 7, width: 380,
+      // Drops down right under the app top bar's 批量分析关系 button.
+      position: 'absolute', top: 12, right: 28, zIndex: 7, width: 380,
       background: dark ? 'rgba(20,24,42,0.95)' : 'rgba(251,246,238,0.98)',
       border: `0.5px solid ${dark ? 'rgba(244,236,218,0.22)' : 'rgba(26,43,74,0.16)'}`,
       borderRadius: 12, padding: '18px 18px 14px',
@@ -1421,7 +1392,7 @@ function BatchAnalysisPanelInner({
               border: `0.5px solid ${dark ? 'rgba(255,107,71,0.4)' : 'rgba(255,107,71,0.3)'}`,
               borderRadius: 8, fontSize: 12, lineHeight: 1.6,
             }}>
-              没装 claude / codex CLI，AI 分析跑不了。装其一：<br/>
+              没装本机 AI CLI（{AGENT_CLI_LIST}），AI 分析跑不了。装其一，例如：<br/>
               <code style={{ background: 'rgba(0,0,0,0.2)', padding: '1px 5px', borderRadius: 3 }}>npm install -g @anthropic-ai/claude-code</code><br/>
               <code style={{ background: 'rgba(0,0,0,0.2)', padding: '1px 5px', borderRadius: 3 }}>npm install -g @openai/codex</code>
             </div>
@@ -1430,10 +1401,13 @@ function BatchAnalysisPanelInner({
               <div style={{ fontSize: 11, color: dark ? 'rgba(244,236,218,0.55)' : 'rgba(26,43,74,0.55)', marginBottom: 6 }}>
                 选 AI（已检测到 {agents.length} 个）：
               </div>
-              <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 12 }}>
                 <CliPick label="claude" sub="Anthropic" available={!!claudeAgent} selected={selectedCli === 'claude'} onClick={() => setSelectedCli('claude')} dark={dark} />
                 <CliPick label="codex" sub="OpenAI" available={!!codexAgent} selected={selectedCli === 'codex'} onClick={() => setSelectedCli('codex')} dark={dark} />
                 <CliPick label="both" sub="并行双跑" available={!!claudeAgent && !!codexAgent} selected={selectedCli === 'both'} onClick={() => setSelectedCli('both')} dark={dark} />
+                {extraAgents.map(a => (
+                  <CliPick key={a.cli} label={a.cli} sub={a.name} available selected={selectedCli === a.cli} onClick={() => setSelectedCli(a.cli)} dark={dark} />
+                ))}
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
                 <span style={{ fontSize: 11, color: dark ? 'rgba(244,236,218,0.55)' : 'rgba(26,43,74,0.55)' }}>每个 CLI 并发：</span>
@@ -1526,7 +1500,7 @@ function CliPick({ label, sub, available, selected, onClick, dark }: {
 }) {
   return (
     <button onClick={available ? onClick : undefined} disabled={!available} style={{
-      all: 'unset', flex: 1, cursor: available ? 'pointer' : 'not-allowed',
+      all: 'unset', flex: '1 1 28%', cursor: available ? 'pointer' : 'not-allowed',
       padding: '8px 10px', textAlign: 'center', borderRadius: 6,
       background: selected ? 'var(--et-orange)' : (dark ? 'rgba(244,236,218,0.08)' : 'rgba(26,43,74,0.05)'),
       color: selected ? '#fff' : (available ? 'inherit' : (dark ? 'rgba(244,236,218,0.4)' : 'rgba(26,43,74,0.4)')),

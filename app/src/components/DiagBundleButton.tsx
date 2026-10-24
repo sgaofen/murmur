@@ -53,13 +53,15 @@ export function DiagBundleButton({ size = 'sm', label }: Props) {
         display: 'inline-flex', alignItems: 'center', gap: 6,
         padding, fontSize, fontWeight: 500,
         borderRadius: 999,
-        border: '0.5px solid var(--et-line-2)',
-        background: state === 'ok' ? 'rgba(72,167,107,0.18)'
-                  : state === 'err' ? 'rgba(196,90,63,0.15)'
-                  : 'var(--et-paper-2)',
-        color: state === 'ok' ? '#3a7a4f'
-             : state === 'err' ? 'var(--et-rose)'
-             : 'var(--et-ink-soft)',
+        border: `0.5px solid ${state === 'ok' ? 'var(--success-border)'
+                             : state === 'err' ? 'var(--danger-border)'
+                             : 'var(--border-default)'}`,
+        background: state === 'ok' ? 'var(--success-bg)'
+                  : state === 'err' ? 'var(--danger-bg)'
+                  : 'var(--surface-sunken)',
+        color: state === 'ok' ? 'var(--success-fg)'
+             : state === 'err' ? 'var(--danger-fg)'
+             : 'var(--text-secondary)',
         whiteSpace: 'nowrap',
         transition: 'background 120ms ease',
       }}

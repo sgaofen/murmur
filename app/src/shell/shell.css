@@ -1,0 +1,212 @@
+/* App shell — left nav + sticky top bar (see AppShell.tsx).
+ * Same rules as ui/ui.css: colors, radii and shadows only from tokens.css. */
+
+.app-shell {
+  --shell-nav-w: 216px;
+  --shell-top: 56px;
+  /* the content area, for pages and fixed-position page parts */
+  --shell-left: var(--shell-nav-w);
+  --shell-vh: calc(100vh - var(--shell-top));
+  /* layers: in-flow page content < top bar < nav < full-bleed pages < page overlays */
+  --z-topbar: 30;
+  --z-nav: 40;
+  --z-page-fill: 45;
+}
+.app-shell.is-collapsed { --shell-nav-w: 64px; }
+
+/* ——— left nav ——— */
+.app-nav {
+  position: fixed; top: 0; left: 0; bottom: 0; z-index: var(--z-nav);
+  width: var(--shell-nav-w);
+  display: flex; flex-direction: column;
+  background: var(--surface-page);
+  border-right: 0.5px solid var(--border-default);
+  transition: width var(--dur-base) var(--ease-out);
+}
+
+.app-nav__brand {
+  flex: none;
+  height: var(--shell-top);
+  display: flex; align-items: center; gap: 10px;
+  padding: 0 20px;
+  border-bottom: 0.5px solid var(--border-subtle);
+  color: var(--text-primary); text-decoration: none;
+}
+.app-nav__brand:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -3px; border-radius: var(--radius-sm); }
+.app-nav__mark { display: block; flex: none; color: var(--accent); }
+.app-nav__brand-name {
+  font-family: var(--font-serif); font-size: 16px; font-weight: 600;
+  letter-spacing: 0.04em; white-space: nowrap; overflow: hidden;
+}
+
+.app-nav__list {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 12px 10px;
+}
+.app-nav__foot {
+  flex: none;
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 10px;
+  border-top: 0.5px solid var(--border-subtle);
+}
+.app-nav__row { display: flex; align-items: center; gap: 4px; }
+.app-nav__row > .app-nav__item { flex: 1 1 auto; min-width: 0; }
+.app-nav__toggle { width: 34px; height: 34px; }
+
+/* one row: link, account, privacy */
+.app-nav__item {
+  appearance: none; margin: 0; border: 0;
+  width: 100%; min-height: 38px;
+  display: flex; align-items: center; gap: 11px;
+  padding: 0 11px;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-sans); font-size: 13.5px; font-weight: 500; line-height: 1.2;
+  text-align: left; text-decoration: none; white-space: nowrap;
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+.app-nav__item:hover { background: var(--surface-hover); color: var(--text-primary); }
+.app-nav__item:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; border-radius: var(--radius-sm); }
+.app-nav__icon { display: inline-flex; flex: none; color: var(--text-muted); transition: color var(--dur-fast) var(--ease-out); }
+.app-nav__item:hover .app-nav__icon { color: var(--text-secondary); }
+.app-nav__label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.app-nav__trail { flex: none; display: inline-flex; align-items: center; }
+.app-nav__trail .ui-chip { color: var(--text-muted); }
+
+.app-nav__item.is-active {
+  background: var(--surface-card);
+  color: var(--text-primary); font-weight: 600;
+  box-shadow: var(--shadow-sm), inset 0 0 0 0.5px var(--border-subtle);
+}
+.app-nav__item.is-active .app-nav__icon { color: var(--accent); }
+
+/* account row */
+.app-account-anchor { display: block; }
+.app-account { min-height: 48px; padding: 6px 8px; gap: 10px; }
+.app-account.is-open { background: var(--surface-hover); }
+.app-account__avatar {
+  width: 30px; height: 30px; flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 50%;
+  font-size: 15px; line-height: 1;
+  background: var(--accent-soft);
+  border: 0.5px solid var(--accent-border);
+}
+.app-account__avatar--qq { background: var(--info-bg); border-color: var(--info-border); }
+.app-account__text { display: flex; flex-direction: column; gap: 3px; }
+.app-account__name {
+  font-size: 13px; font-weight: 600; color: var(--text-primary);
+  overflow: hidden; text-overflow: ellipsis;
+}
+.app-account__meta { font-size: 11px; font-weight: 500; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; }
+.app-account__caret { color: var(--text-faint); }
+/* account menu (portaled to <body>): its items use inline `all: unset`, which
+   also wipes the focus ring — put a visible one back for keyboard users. */
+.app-account-menu [role="menuitem"]:focus-visible {
+  outline: 2px solid var(--focus-ring) !important;
+  outline-offset: -2px !important;
+}
+
+/* privacy row — stays tinted while on */
+.app-privacy.is-on { background: var(--accent-soft); color: var(--accent-text); }
+.app-privacy.is-on .app-nav__icon { color: var(--accent-strong); }
+.app-switch {
+  position: relative; display: inline-block; flex: none;
+  width: 26px; height: 15px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-pressed);
+  box-shadow: inset 0 0 0 0.5px var(--border-default);
+  transition: background-color var(--dur-fast) var(--ease-out);
+}
+.app-switch::after {
+  content: ''; position: absolute; top: 2px; left: 2px;
+  width: 11px; height: 11px; border-radius: 50%;
+  background: var(--text-faint);
+  transition: transform var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out);
+}
+.app-switch.is-on { background: var(--accent-solid); box-shadow: none; }
+.app-switch.is-on::after { background: var(--text-on-accent); transform: translateX(11px); }
+
+/* icon rail (collapsed, or always below 900px) */
+.app-shell.is-collapsed .app-nav__brand { justify-content: center; padding: 0; }
+.app-shell.is-collapsed .app-nav__brand-name,
+.app-shell.is-collapsed .app-nav__label,
+.app-shell.is-collapsed .app-nav__trail { display: none; }
+.app-shell.is-collapsed .app-nav__item { justify-content: center; padding: 0; min-height: 40px; }
+.app-shell.is-collapsed .app-account { min-height: 44px; }
+.app-shell.is-collapsed .app-nav__row { flex-direction: column; align-items: stretch; }
+.app-shell.is-collapsed .app-nav__toggle { width: 100%; height: 32px; }
+
+/* ——— main column + top bar ——— */
+.app-main {
+  margin-left: var(--shell-nav-w);
+  min-width: 0; min-height: 100vh;
+  display: flex; flex-direction: column;
+  transition: margin-left var(--dur-base) var(--ease-out);
+}
+.app-content { flex: 1 0 auto; min-width: 0; }
+
+.app-topbar {
+  position: sticky; top: 0; z-index: var(--z-topbar);
+  flex: none;
+  height: var(--shell-top);
+  display: flex; align-items: center;
+  padding: 0 24px;
+  background: var(--surface-page);
+  border-bottom: 0.5px solid var(--border-subtle);
+}
+.app-topbar--inline { position: static; }
+.app-topbar__slot,
+.app-topbar__fallback { flex: 1 1 auto; min-width: 0; height: 100%; display: flex; align-items: center; }
+.app-topbar__slot:empty { display: none; }
+.app-topbar__slot:not(:empty) + .app-topbar__fallback { display: none; }
+
+.app-header { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 12px; }
+.app-header__back { margin-left: -8px; }
+.app-header__divider { flex: none; width: 1px; height: 18px; background: var(--border-default); }
+.app-header__titles { flex: 1 1 auto; min-width: 90px; display: flex; align-items: baseline; gap: 12px; }
+.app-header__title {
+  margin: 0; flex: 0 1 auto; min-width: 0;
+  font-family: var(--font-serif); font-size: 17px; font-weight: 600; line-height: 1.3;
+  letter-spacing: 0.02em; color: var(--text-primary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.app-header__subtitle {
+  flex: 0 1 auto; min-width: 0;
+  font-size: 12px; color: var(--text-muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* When the window is too narrow for a page's actions they scroll sideways
+ * inside the bar instead of widening the page. The padding/negative margin
+ * pair keeps focus rings from being clipped by the scroll box. */
+.app-header__actions {
+  flex: 0 1 auto; min-width: 0;
+  display: flex; align-items: center; gap: 10px;
+  padding: 4px; margin: -4px;
+  overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none;
+}
+.app-header__actions::-webkit-scrollbar { display: none; }
+.app-header__actions > * { flex: none; }
+.app-header__label { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
+
+@media (max-width: 640px) {
+  .app-topbar { padding: 0 14px; }
+  .app-header { gap: 8px; }
+  .app-header__subtitle, .app-header__label { display: none; }
+}
+
+/* full-bleed pages (关系网, 报告): fill the content area under the top bar.
+ * Above the nav in z-order so overlays rendered inside them cover the window. */
+.app-fill {
+  position: fixed;
+  top: var(--shell-top, 0px); left: var(--shell-left, 0px); right: 0; bottom: 0;
+  z-index: var(--z-page-fill, auto);
+  transition: left var(--dur-base) var(--ease-out);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-nav, .app-main, .app-fill, .app-switch, .app-switch::after { transition: none; }
+}

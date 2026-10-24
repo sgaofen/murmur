@@ -49,16 +49,27 @@ DISK_IO = "DISK_IO"
 # macOS live key capture (Frida, cli/live_key.py)
 FRIDA_MISSING = "FRIDA_MISSING"
 LIVE_KEY_FAILED = "LIVE_KEY_FAILED"
+# A live-key / private-copy capture round is running; re-signing or a memory
+# scan now would kill WeChat under it (or ask for a second admin password).
+KEY_CAPTURE_BUSY = "KEY_CAPTURE_BUSY"
 
 # QQ
 QQ_DATA_NOT_FOUND = "QQ_DATA_NOT_FOUND"
 QQ_KEY_NOT_FOUND = "QQ_KEY_NOT_FOUND"
 QQ_KEY_INVALID = "QQ_KEY_INVALID"
 
+# App lock (cli/app_lock.py)
+APP_LOCKED = "APP_LOCKED"
+APP_LOCK_WRONG_PASSWORD = "APP_LOCK_WRONG_PASSWORD"
+APP_LOCK_RATE_LIMITED = "APP_LOCK_RATE_LIMITED"
+APP_LOCK_INVALID = "APP_LOCK_INVALID"
+
 # Misc
 TIMEOUT = "TIMEOUT"
 AGENT_NOT_INSTALLED = "AGENT_NOT_INSTALLED"
 ORIGIN_NOT_ALLOWED = "ORIGIN_NOT_ALLOWED"
+# Host header isn't a loopback name + the listening port (DNS rebinding guard).
+HOST_NOT_ALLOWED = "HOST_NOT_ALLOWED"
 INTERNAL_ERROR = "INTERNAL_ERROR"
 
 ALL_CODES = frozenset(
@@ -75,6 +86,7 @@ ALL_CODES = frozenset(
 # extract_key_dll.py, qq endpoints.
 _RULES = (
     (ORIGIN_NOT_ALLOWED, r"origin_not_allowed"),
+    (HOST_NOT_ALLOWED, r"host_not_allowed"),
     # live_key.py job error tokens (exact) and Frida install messages
     (FRIDA_MISSING, r"^frida-missing$|不能在线安装 frida|no module named '?frida"),
     (WECHAT_HARDENED, r"^attach-denied$"),
@@ -104,7 +116,7 @@ _RULES = (
     (PLATFORM_UNSUPPORTED, r"macos only|windows-only|只支持 windows"),
     (TIMEOUT, r"超时|timed out|timeoutexpired"),
     (LIVE_KEY_FAILED, r"^exit-\d+$"),
-    (AGENT_NOT_INSTALLED, r"(claude|codex|gemini|kimi)\b.* not installed|需要同时安装"),
+    (AGENT_NOT_INSTALLED, r"(claude|codex|gemini|kimi|opencode)\b.* not installed|需要同时安装"),
 )
 _COMPILED = tuple((code, re.compile(pat, re.IGNORECASE | re.MULTILINE)) for code, pat in _RULES)
 

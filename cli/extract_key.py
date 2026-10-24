@@ -249,7 +249,7 @@ def scan_for_key(pid: int, validate, sample_db: str, *, log=print) -> bytes | No
 def main():
     p = argparse.ArgumentParser(description="Extract WeChat 4.x SQLCipher key from process memory.")
     p.add_argument("--pid", type=int, help="Weixin.exe PID (auto-detected if omitted)")
-    p.add_argument("--dll-dir", default=r"C:\Users\YY\Downloads\echotrace-windows-v3.0.2",
+    p.add_argument("--dll-dir", default=r"C:\Users\demo\Downloads\echotrace-windows-v3.0.2",
                    help="Directory containing go_decrypt.dll for validation")
     p.add_argument("--save", action="store_true", help="Print only; do not save anywhere")
     p.add_argument("--db", help="Path to a sample encrypted .db to validate against")

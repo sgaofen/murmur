@@ -1,11 +1,15 @@
 import { useEffect, useState } from 'react';
-import { getYearbook } from '../data/api';
+import { errorCode, getYearbook } from '../data/api';
 import type { Yearbook, YearData } from '../data/api';
+import { lookupError } from '../data/errorCatalog';
 import { displayName, maskedWxid, maskText } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
-import { ProfileSwitcher } from '../components/ProfileSwitcher';
+import { PageHeader } from '../shell/PageHeader';
 import { useActivePlatform } from '../utils/activeProfile';
+import { Button, EmptyState, ErrorState, Skeleton, SkeletonText, cx } from '../ui';
+import { IconCalendar } from '../ui/icons';
 import { YearbookCover } from './extras/YearbookCover';
+import './Yearbook.css';
 
 interface Props {
   friendId: string;
@@ -16,71 +20,77 @@ export function YearbookPage({ friendId, onBack }: Props) {
   void usePrivacy();
   const platform = useActivePlatform();
   const [data, setData] = useState<Yearbook | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<unknown>(null);
+  const [nonce, setNonce] = useState(0);
 
   useEffect(() => {
+    let cancelled = false;
     setError(null);
+    setData(null);
     getYearbook(friendId)
-      .then(setData)
-      .catch(e => setError(e?.message || String(e)));
-  }, [friendId]);
+      .then(d => { if (!cancelled) setData(d); })
+      .catch(e => { if (!cancelled) setError(e); });
+    return () => { cancelled = true; };
+  }, [friendId, nonce]);
+
+  const back = { label: '朋友页', onClick: onBack };
 
   if (error) {
+    const code = errorCode(error);
+    const entry = lookupError(code);
+    const raw = error instanceof Error ? error.message : String(error);
     return (
-      <div style={{ padding: 40 }}>
-        <button onClick={onBack} style={{ all: 'unset', cursor: 'pointer', color: 'var(--et-mute)' }}>← 返回</button>
-        <div style={{ marginTop: 20, color: 'var(--et-rose)' }}>加载失败：{maskText(error)}</div>
+      <div className="yb-page et-root">
+        <PageHeader back={back} title="双人年代记" />
+        <ErrorState
+          layout="page"
+          code={code ?? undefined}
+          title={entry?.title ?? '年代记没能编出来'}
+          reason={entry?.reason ?? '按年份整理你们的聊天时，本地服务返回了错误。'}
+          fixes={entry ? [entry.fix] : ['点「重试」再编一次', '还不行就到「设置」里复制诊断信息反馈给我们']}
+          onRetry={() => setNonce(n => n + 1)}
+          details={raw ? <pre>{maskText(raw)}</pre> : undefined}
+        />
       </div>
     );
   }
-  if (!data) return <div style={{ padding: 40 }}><div className="et-meta">编织年代记中…</div></div>;
+  if (!data) return <YearbookSkeleton back={back} />;
+
+  const friendName = displayName(data.wxid, data.name);
   if (data.years.length === 0) {
     return (
-      <div style={{ padding: 60, textAlign: 'center' }}>
-        <button onClick={onBack} style={{ all: 'unset', cursor: 'pointer', color: 'var(--et-mute)' }}>← 返回</button>
-        <div className="et-h2" style={{ marginTop: 20 }}>这位朋友消息不够，编不出年代记。</div>
+      <div className="yb-page et-root">
+        <PageHeader back={back} title={`双人年代记 · 你 ↔ ${friendName}`} />
+        <EmptyState
+          layout="page"
+          icon={<IconCalendar size={26} />}
+          title="消息还不够编成年代记"
+          description={`你和 ${friendName} 目前有 ${data.total_msgs.toLocaleString()} 条消息。等你们聊满一段日子，这里会按年份排出你们的故事。`}
+          actions={<Button onClick={onBack}>回到朋友页</Button>}
+        />
       </div>
     );
   }
 
   const years = [...data.years].reverse();  // newest first
   const yearMaxMsgs = Math.max(...data.years.map(y => y.msg_count));
-  const friendName = displayName(data.wxid, data.name);
 
   return (
-    <div className="et-root" style={{ background: 'var(--et-bg)', minHeight: '100vh' }}>
-      <style>{YEARBOOK_KEYWORDS_CSS}</style>
-      {/* Top bar */}
-      <div style={{
-        padding: '14px 28px', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        borderBottom: '0.5px solid var(--et-line)',
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-          <button onClick={onBack} style={{ all: 'unset', cursor: 'pointer', color: 'var(--et-mute)', fontSize: 13 }}>← 返回</button>
-          <ProfileSwitcher />
-        </div>
-        <div className="et-serif" style={{ fontSize: 14, color: 'var(--et-mute)' }}>双人年代记 · 你 ↔ {friendName}</div>
-        <span style={{ fontFamily: 'var(--et-mono)', fontSize: 11, color: 'var(--et-faint)' }}>{maskedWxid(data.wxid)}</span>
-      </div>
+    <div className="yb-page et-root">
+      <PageHeader
+        back={back}
+        title={`双人年代记 · 你 ↔ ${friendName}`}
+        subtitle={<span className="et-mono">{maskedWxid(data.wxid)}</span>}
+      />
 
       {/* Cover */}
-      <div className="et-paper-grain" style={{
-        margin: '24px 28px', padding: '50px 56px',
-        background: 'var(--et-paper)', border: '0.5px solid var(--et-line-2)',
-        borderRadius: 'var(--et-r-lg)', boxShadow: 'var(--et-shadow-2)',
-        position: 'relative', overflow: 'hidden',
-      }}>
-        <div style={{ position: 'absolute', top: 18, right: 28, padding: '4px 12px',
-          borderRadius: 999, background: 'var(--et-orange)', color: '#fff',
-          fontSize: 11, fontWeight: 600, letterSpacing: 0.5 }}>双人年代记</div>
-        <div className="et-eyebrow" style={{ color: 'var(--et-mute)' }}>关于「{friendName}」</div>
-        <div className="et-display" style={{
-          marginTop: 14, fontFamily: 'var(--et-serif)', fontSize: 40, fontWeight: 600,
-          color: 'var(--et-ink)', lineHeight: 1.3, maxWidth: 700,
-        }}>
+      <section className="yb-cover et-paper-grain">
+        <div className="yb-cover__badge">双人年代记</div>
+        <div className="et-eyebrow">关于「{friendName}」</div>
+        <h2 className="yb-cover__title">
           你和 {friendName} 一起<br />走过 {data.active_years} 年
-        </div>
-        <div style={{ marginTop: 24, display: 'flex', gap: 32, flexWrap: 'wrap' }}>
+        </h2>
+        <div className="yb-cover__stats">
           <Stat label="跨度" value={`${data.span_days} 天`} sub={`${data.first_date} → ${data.last_date}`} />
           <Stat label="总消息" value={data.total_msgs.toLocaleString()} sub="含图文/语音" />
           {platform !== 'qq' && (
@@ -88,12 +98,12 @@ export function YearbookPage({ friendId, onBack }: Props) {
               sub={`他赞你 ${data.moments_back_total} · 你赞他 ${data.moments_out_total}`} />
           )}
         </div>
-      </div>
+      </section>
 
       {/* Shareable year cover (Round 2) — fits in a phone screenshot,
           stacks 5 viral data points. Sits above the existing year-by-year
           cards which stay untouched. */}
-      <div style={{ padding: '12px 28px 28px', maxWidth: 1080, margin: '0 auto' }}>
+      <div className="yb-column">
         <YearbookCover
           friendId={data.wxid}
           friendName={data.name}
@@ -103,10 +113,37 @@ export function YearbookPage({ friendId, onBack }: Props) {
       </div>
 
       {/* Year-by-year cards */}
-      <div style={{ padding: '12px 28px 60px', maxWidth: 1080, margin: '0 auto',
-        display: 'flex', flexDirection: 'column', gap: 22 }}>
+      <div className="yb-column yb-years">
         {years.map(y => (
           <YearCard key={y.year} y={y} maxMsgs={yearMaxMsgs} friendName={friendName} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function YearbookSkeleton({ back }: { back: { label: string; onClick: () => void } }) {
+  return (
+    <div className="yb-page et-root" aria-busy="true">
+      <PageHeader back={back} title="双人年代记" />
+      <section className="yb-cover yb-skel-cover" aria-label="正在编织年代记">
+        <Skeleton width={110} height={11} />
+        <Skeleton width="52%" height={36} />
+        <Skeleton width="34%" height={36} />
+        <div className="yb-skel-stats">
+          {[0, 1, 2].map(i => (
+            <div key={i} className="yb-skel-stat"><SkeletonText lines={3} lastLineWidth="80%" /></div>
+          ))}
+        </div>
+      </section>
+      <div className="yb-column yb-years" aria-hidden="true">
+        {[0, 1].map(i => (
+          <div key={i} className="yb-year">
+            <Skeleton width={120} height={48} />
+            <div className="yb-cells">
+              {[0, 1, 2, 3].map(k => <Skeleton key={k} height={58} radius={8} />)}
+            </div>
+          </div>
         ))}
       </div>
     </div>
@@ -116,10 +153,9 @@ export function YearbookPage({ friendId, onBack }: Props) {
 function Stat({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
     <div>
-      <div className="et-eyebrow" style={{ fontSize: 10, color: 'var(--et-mute)' }}>{label}</div>
-      <div className="et-num" style={{ fontFamily: 'var(--et-serif)', fontSize: 28, fontWeight: 600,
-        color: 'var(--et-ink)', marginTop: 4 }}>{value}</div>
-      {sub && <div className="et-meta" style={{ marginTop: 2, color: 'var(--et-mute)', fontSize: 11 }}>{sub}</div>}
+      <div className="et-eyebrow yb-stat__label">{label}</div>
+      <div className="et-num yb-stat__value">{value}</div>
+      {sub && <div className="et-meta yb-stat__sub">{sub}</div>}
     </div>
   );
 }
@@ -133,7 +169,6 @@ function YearCard({ y, maxMsgs, friendName }: { y: YearData; maxMsgs: number; fr
     y.msg_count >= maxMsgs * 0.7 ? 'hot'
     : y.msg_count >= maxMsgs * 0.3 ? 'warm'
     : 'cool';
-  const accent = tone === 'hot' ? '#FF6B47' : tone === 'warm' ? '#E8B57A' : '#5A7A99';
 
   const allQuotes: Array<{ kind: string; emoji: string; q: Quote }> = [];
   y.vulnerability_quotes.slice(0, 1).forEach(q => allQuotes.push({ kind: '脆弱表达', emoji: '🫂', q }));
@@ -143,37 +178,29 @@ function YearCard({ y, maxMsgs, friendName }: { y: YearData; maxMsgs: number; fr
   y.care_quotes.slice(0, 1).forEach(q => allQuotes.push({ kind: '互相关心', emoji: '☕', q }));
 
   return (
-    <div className="et-paper-grain" style={{
-      background: 'var(--et-paper)', border: '0.5px solid var(--et-line-2)',
-      borderRadius: 'var(--et-r-lg)', boxShadow: 'var(--et-shadow-1)',
-      padding: '28px 32px',
-      borderLeft: `4px solid ${accent}`,
-    }}>
-      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
+    <section className={cx('yb-year et-paper-grain', `is-${tone}`)} aria-label={`${y.year} 年`}>
+      <div className="yb-year__head">
         <div>
-          <div className="et-eyebrow" style={{ color: 'var(--et-mute)' }}>YEAR</div>
-          <div className="et-display" style={{
-            fontFamily: 'var(--et-serif)', fontSize: 56, fontWeight: 600,
-            color: accent, lineHeight: 1, marginTop: 4,
-          }}>{y.year}</div>
+          <div className="et-eyebrow">YEAR</div>
+          <div className="yb-year__num">{y.year}</div>
         </div>
-        <div style={{ textAlign: 'right' }}>
-          <div className="et-num" style={{ fontSize: 28, fontWeight: 600, color: 'var(--et-ink)' }}>
+        <div className="yb-year__total">
+          <div className="et-num yb-year__count">
             {y.msg_count.toLocaleString()}
           </div>
-          <div className="et-meta" style={{ fontSize: 11, color: 'var(--et-mute)' }}>
+          <div className="et-meta yb-year__days">
             条消息 · {y.active_days} 天有交流
           </div>
         </div>
       </div>
 
       {/* Heat bar */}
-      <div style={{ marginTop: 18, height: 4, background: 'rgba(26,43,74,0.06)', borderRadius: 999, overflow: 'hidden' }}>
-        <div style={{ width: `${heatPct}%`, height: '100%', background: accent, borderRadius: 999 }} />
+      <div className="yb-year__bar">
+        <span style={{ width: `${heatPct}%` }} />
       </div>
 
       {/* Inline stats */}
-      <div style={{ marginTop: 20, display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 }}>
+      <div className="yb-cells">
         <Cell label="主导比" value={`你 ${y.self_pct}%`} sub={`${friendName} ${100 - y.self_pct}%`} />
         <Cell label="最热月" value={`${y.busiest_month} 月`} sub={`${y.busiest_month_msgs} 条`} />
         <Cell label="最长沉默" value={y.longest_silence_days > 0 ? `${y.longest_silence_days} 天` : '—'}
@@ -184,23 +211,23 @@ function YearCard({ y, maxMsgs, friendName }: { y: YearData; maxMsgs: number; fr
       <ExtraMetricsRow y={y} friendName={friendName} />
 
       {y.heatmap_24x7 && y.heatmap_24x7.length === 168 && (
-        <HeatmapStrip data={y.heatmap_24x7} accent={accent} />
+        <HeatmapStrip data={y.heatmap_24x7} />
       )}
 
       <YearInsightModule year={y} />
 
       {/* Themed quotes */}
       {allQuotes.length > 0 && (
-        <div style={{ marginTop: 18, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div className="yb-quotes">
           {allQuotes.map((bucket, i) => (
-            <div key={i} style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
-              <span style={{ fontSize: 18 }}>{bucket.emoji}</span>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 10, fontWeight: 600, color: accent, letterSpacing: 0.4 }}>{bucket.kind}</div>
-                <div className="et-serif" style={{ fontSize: 13.5, lineHeight: 1.6, color: 'var(--et-ink-soft)', marginTop: 2 }}>
+            <div key={i} className="yb-quote">
+              <span className="yb-quote__emoji" aria-hidden="true">{bucket.emoji}</span>
+              <div className="yb-quote__body">
+                <div className="yb-quote__kind">{bucket.kind}</div>
+                <div className="yb-quote__text">
                   「{maskText(bucket.q.text)}」
                 </div>
-                <div className="et-meta" style={{ fontSize: 10, color: 'var(--et-faint)', marginTop: 2 }}>
+                <div className="et-meta yb-quote__meta">
                   {displayName(bucket.q.from_id, bucket.q.from)} · {bucket.q.date}
                 </div>
               </div>
@@ -211,12 +238,11 @@ function YearCard({ y, maxMsgs, friendName }: { y: YearData; maxMsgs: number; fr
 
       {/* Calls badge */}
       {y.calls > 0 && (
-        <div style={{ marginTop: 14, display: 'inline-flex', padding: '4px 10px', borderRadius: 999,
-          background: 'var(--et-orange-soft)', color: 'var(--et-orange-2)', fontSize: 11, fontWeight: 600 }}>
+        <div className="yb-calls">
           📞 通话 {y.calls} 次
         </div>
       )}
-    </div>
+    </section>
   );
 }
 
@@ -259,21 +285,16 @@ function WordCloud({ words }: { words: Array<{ word: string; count: number }> })
     <div className="yb-word-cloud">
       {top.map((w, i) => {
         const t = 1 - (i / Math.max(top.length - 1, 1));
-        const size = 13 + Math.round(t * 9);
-        const weight = i < 2 ? 600 : (i < 4 ? 500 : 400);
-        const opacity = 0.55 + t * 0.45;
+        // Size, weight and fade come from the word's rank, so they stay inline.
         return (
           <span
             key={`${w.word}-${i}`}
-            className="yb-word"
+            className={cx('yb-word', i < 2 && 'is-top')}
             title={`出现 ${w.count.toLocaleString()} 次`}
             style={{
-              fontSize: size,
-              fontWeight: weight,
-              opacity,
-              color: i < 2 ? 'var(--et-ink)' : 'var(--et-ink-soft)',
-              borderBottom: i < 2 ? '1.5px solid var(--et-orange)' : 'none',
-              paddingBottom: i < 2 ? 1 : 0,
+              fontSize: 13 + Math.round(t * 9),
+              fontWeight: i < 2 ? 600 : (i < 4 ? 500 : 400),
+              opacity: 0.55 + t * 0.45,
             }}
           >
             {w.word}
@@ -316,13 +337,10 @@ function SignatureBlock({ sig }: {
 
 function Cell({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
-    <div style={{
-      padding: '10px 12px', background: 'var(--et-paper-2)',
-      border: '0.5px solid var(--et-line-2)', borderRadius: 8,
-    }}>
-      <div className="et-eyebrow" style={{ fontSize: 9 }}>{label}</div>
-      <div className="et-num" style={{ fontSize: 16, fontWeight: 600, color: 'var(--et-ink)', marginTop: 2 }}>{value}</div>
-      {sub && <div style={{ fontSize: 10, color: 'var(--et-mute)', marginTop: 2 }}>{sub}</div>}
+    <div className="yb-cell">
+      <div className="et-eyebrow yb-cell__label">{label}</div>
+      <div className="et-num yb-cell__value">{value}</div>
+      {sub && <div className="yb-cell__sub">{sub}</div>}
     </div>
   );
 }
@@ -363,7 +381,7 @@ function ExtraMetricsRow({ y, friendName }: { y: YearData; friendName: string })
   }
 
   return (
-    <div style={{ marginTop: 10, display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 }}>
+    <div className="yb-cells yb-cells--extra">
       <Cell
         label="最长连聊"
         value={hasStreak ? `${y.longest_streak_days} 天` : '—'}
@@ -376,38 +394,32 @@ function ExtraMetricsRow({ y, friendName }: { y: YearData; friendName: string })
   );
 }
 
-function HeatmapStrip({ data, accent }: { data: number[]; accent: string }) {
-  // 168 cells = 7 weekdays × 24 hours. Render as 7 rows of 24 dots, intensity by max-normalized count.
+function HeatmapStrip({ data }: { data: number[] }) {
+  // 168 cells = 7 weekdays × 24 hours. Render as 7 rows of 24 dots, intensity
+  // by max-normalized count, tinted with the year card's --yb-accent.
   const max = Math.max(1, ...data);
   const days = ['一', '二', '三', '四', '五', '六', '日'];
   return (
-    <div style={{
-      marginTop: 16, padding: '12px 14px',
-      background: 'var(--et-paper-2)', border: '0.5px solid var(--et-line-2)', borderRadius: 8,
-    }}>
-      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 6 }}>
-        <div className="et-eyebrow" style={{ fontSize: 9 }}>168 格热力图 · 周×小时</div>
-        <div style={{ fontSize: 10, color: 'var(--et-faint)', fontFamily: 'var(--et-mono)' }}>
-          0 → 24 时
-        </div>
+    <div className="yb-heat">
+      <div className="yb-heat__head">
+        <div className="et-eyebrow yb-cell__label">168 格热力图 · 周×小时</div>
+        <div className="yb-heat__axis">0 → 24 时</div>
       </div>
-      <div style={{ display: 'grid', gridTemplateRows: 'repeat(7, 10px)', gap: 2 }}>
+      <div className="yb-heat__grid" role="img" aria-label="一周七天 × 二十四小时的消息分布">
         {days.map((d, w) => (
-          <div key={w} style={{ display: 'grid', gridTemplateColumns: '14px repeat(24, 1fr)', gap: 2, alignItems: 'center' }}>
-            <span style={{ fontSize: 9, color: 'var(--et-faint)', textAlign: 'right', paddingRight: 2 }}>{d}</span>
+          <div key={w} className="yb-heat__row">
+            <span className="yb-heat__day">{d}</span>
             {Array.from({ length: 24 }, (_, h) => {
               const v = data[w * 24 + h] || 0;
               const a = v / max;
               return (
                 <div
                   key={h}
+                  className="yb-heat__cell"
                   title={`周${d} ${h}:00 · ${v} 条`}
-                  style={{
-                    height: 10, borderRadius: 2,
-                    background: a > 0
-                      ? `color-mix(in srgb, ${accent} ${10 + a * 80}%, var(--et-paper))`
-                      : 'rgba(26,43,74,0.04)',
-                  }}
+                  style={a > 0
+                    ? { background: `color-mix(in srgb, var(--yb-accent) ${10 + a * 80}%, var(--surface-card))` }
+                    : undefined}
                 />
               );
             })}
@@ -417,187 +429,3 @@ function HeatmapStrip({ data, accent }: { data: number[]; accent: string }) {
     </div>
   );
 }
-
-const YEARBOOK_KEYWORDS_CSS = `
-.yb-keyword-module {
-  margin-top: 20px;
-  padding: 18px 0 20px;
-  border-top: 0.5px solid var(--et-line);
-  border-bottom: 0.5px solid var(--et-line);
-}
-.yb-keyword-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 0.85fr) 1px minmax(0, 1.15fr);
-  gap: 24px;
-  align-items: stretch;
-}
-.yb-keyword-grid.single {
-  grid-template-columns: 1fr;
-}
-.yb-keyword-pane {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-.yb-module-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-}
-.yb-eyebrow {
-  font-family: var(--et-sans);
-  font-weight: 600;
-  font-size: 10px;
-  letter-spacing: 0;
-  text-transform: uppercase;
-  color: var(--et-faint);
-}
-.yb-hint {
-  font-family: var(--et-sans);
-  font-size: 10.5px;
-  font-weight: 500;
-  color: var(--et-faint);
-  white-space: nowrap;
-}
-.yb-divider-v {
-  width: 1px;
-  align-self: stretch;
-  background: linear-gradient(180deg, transparent, var(--et-line) 18%, var(--et-line) 82%, transparent);
-}
-.yb-word-cloud {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  column-gap: 14px;
-  row-gap: 8px;
-}
-.yb-word {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 4px;
-  font-family: var(--et-serif);
-  line-height: 1;
-  cursor: default;
-  transition: color 120ms ease;
-}
-.yb-word:hover {
-  color: var(--et-orange-2) !important;
-}
-.yb-word-count {
-  font-family: var(--et-mono);
-  font-size: 10px;
-  color: var(--et-faint);
-  align-self: flex-end;
-  padding-bottom: 2px;
-}
-.yb-signature {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.yb-signature-text {
-  font-family: var(--et-serif);
-  font-size: 15.5px;
-  line-height: 1.55;
-  color: var(--et-ink-soft);
-  font-weight: 400;
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-.yb-quote-mark {
-  color: var(--et-orange);
-  font-family: var(--et-serif);
-  font-weight: 600;
-  font-size: 28px;
-  line-height: 0;
-  vertical-align: -8px;
-  margin-right: 4px;
-}
-.yb-quote-mark.close {
-  margin-left: 2px;
-  margin-right: 0;
-}
-.yb-signature-meta {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  flex-wrap: wrap;
-  font-family: var(--et-sans);
-  font-size: 11.5px;
-  font-weight: 500;
-  color: var(--et-mute);
-}
-.yb-meta-name {
-  color: var(--et-ink);
-  font-weight: 500;
-}
-.yb-meta-date {
-  font-family: var(--et-mono);
-}
-.yb-meta-dot {
-  width: 2px;
-  height: 2px;
-  border-radius: 50%;
-  background: var(--et-faint);
-}
-.yb-reason {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-family: var(--et-mono);
-  font-size: 10.5px;
-  color: var(--et-ink-soft);
-  padding: 3px 8px 3px 6px;
-  border-radius: 4px;
-  background: rgba(26,43,74,0.045);
-  border: 0.5px solid var(--et-line);
-}
-.yb-reason::before {
-  content: "";
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--et-orange);
-  flex-shrink: 0;
-  box-shadow: 0 0 0 2px rgba(255,107,71,0.18);
-}
-.yb-reason b {
-  font-weight: 600;
-  color: var(--et-ink);
-}
-.yb-term-wrap {
-  display: inline-flex;
-  gap: 4px;
-  flex-wrap: wrap;
-}
-.yb-term {
-  font-family: var(--et-mono);
-  font-size: 10.5px;
-  color: var(--et-orange-2);
-  padding: 1px 5px;
-  border-radius: 3px;
-  background: rgba(255,107,71,0.08);
-}
-@media (max-width: 780px) {
-  .yb-keyword-grid {
-    grid-template-columns: 1fr;
-    gap: 16px;
-  }
-  .yb-divider-v {
-    width: auto;
-    height: 1px;
-    background: var(--et-line);
-  }
-  .yb-module-head {
-    align-items: flex-start;
-  }
-  .yb-signature-text {
-    font-size: 14.5px;
-    -webkit-line-clamp: 2;
-  }
-}
-`;

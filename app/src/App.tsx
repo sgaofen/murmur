@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import { HomePage } from './pages/Home';
 import { FriendPage } from './pages/Friend';
 import { LoadingPage } from './pages/Loading';
@@ -11,10 +11,20 @@ import { AnnualReportPage } from './pages/AnnualReport';
 import { getDiagnose, getInfo } from './data/api';
 import { TaskCenterProvider } from './components/extras/TaskCenter';
 import { BatchStatusPill, BatchTrackerProvider } from './components/extras/BatchTracker';
-import { PrivacyToggle } from './components/PrivacyToggle';
 import { PrivacyIdentityIndex } from './components/extras/PrivacyIdentityIndex';
 import { QQOnboardingDialog } from './pages/QQOnboardingDialog';
+import { SettingsPage } from './pages/Settings';
+import { SearchPage } from './pages/Search';
+import { ChatPage } from './pages/Chat';
 import { supportsQQOnboarding, syncActiveToBackend } from './utils/activeProfile';
+import { searchBackPath } from './utils/searchLinks';
+import { useTheme } from './ui';
+import { AppShell } from './shell/AppShell';
+import type { NavKey } from './shell/AppShell';
+import type { PageHeaderProps } from './shell/PageHeader';
+
+// Component gallery (#/ui-gallery) — not linked from the app; loaded on demand.
+const UiGalleryPage = lazy(() => import('./pages/UiGallery'));
 
 type Route =
   | { name: 'loading' }
@@ -24,28 +34,85 @@ type Route =
   | { name: 'graph' }
   | { name: 'table' }
   | { name: 'reports' }
-  | { name: 'annual' };
+  | { name: 'annual' }
+  | { name: 'search'; query: string }
+  | { name: 'chat'; id: string; query: string }
+  | { name: 'settings' }
+  | { name: 'ui-gallery' };
 
+// Accepts both `#graph` and `#/graph`; existing links and bookmarks keep working.
+// `search` and `chat/<id>` may carry a `?query` that the page reads itself.
 function parseHash(h: string): Route {
-  const s = h.replace(/^#\/?/, '');
+  const full = h.replace(/^#\/?/, '');
+  const qi = full.indexOf('?');
+  const s = qi < 0 ? full : full.slice(0, qi);
+  const query = qi < 0 ? '' : full.slice(qi + 1);
   if (!s) return { name: 'home' };
   if (s === 'loading') return { name: 'loading' };
   if (s === 'graph') return { name: 'graph' };
   if (s === 'table') return { name: 'table' };
   if (s === 'reports') return { name: 'reports' };
   if (s === 'annual') return { name: 'annual' };
+  if (s === 'search') return { name: 'search', query };
+  if (s === 'settings') return { name: 'settings' };
+  if (s === 'ui-gallery') return { name: 'ui-gallery' };
   if (s.startsWith('yearbook/')) return { name: 'yearbook', id: s.slice('yearbook/'.length) };
   if (s.startsWith('friend/')) return { name: 'friend', id: s.slice('friend/'.length) };
+  if (s.startsWith('chat/')) return { name: 'chat', id: safeDecode(s.slice('chat/'.length)), query };
   return { name: 'home' };
+}
+
+function safeDecode(s: string): string {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s;
+  }
+}
+
+/** Which nav entry is lit, and what the top bar says until the page mounts
+ * its own <PageHeader> (loading / error states). */
+function shellFor(route: Route, go: (path: string) => void): { active: NavKey | null; header: PageHeaderProps } {
+  switch (route.name) {
+    case 'friend':
+      return { active: 'home', header: { title: '朋友', back: { label: '首页', onClick: () => go('') } } };
+    case 'yearbook':
+      return {
+        active: 'home',
+        header: { title: '双人年代记', back: { label: '朋友页', onClick: () => go(`friend/${route.id}`) } },
+      };
+    case 'graph':
+      return { active: 'graph', header: { title: '关系网络' } };
+    case 'annual':
+      return { active: 'annual', header: { title: '年度总览' } };
+    case 'reports':
+      return { active: 'reports', header: { title: 'AI 关系档案' } };
+    case 'table':
+      return { active: 'table', header: { title: '离线证据表' } };
+    case 'search':
+      return { active: 'search', header: { title: '搜索' } };
+    case 'chat': {
+      const params = new URLSearchParams(route.query);
+      if (params.get('from') === 'search') {
+        return { active: 'search', header: { title: '聊天', back: { label: '搜索', onClick: () => go(searchBackPath(params)) } } };
+      }
+      // Same rule as the page's own header: groups have no friend page.
+      return route.id.endsWith('@chatroom')
+        ? { active: 'home', header: { title: '聊天', back: { label: '首页', onClick: () => go('') } } }
+        : { active: 'home', header: { title: '聊天', back: { label: '朋友页', onClick: () => go(`friend/${route.id}`) } } };
+    }
+    case 'settings':
+      return { active: 'settings', header: { title: '设置' } };
+    default:
+      return { active: 'home', header: { title: '首页' } };
+  }
 }
 
 const ONBOARDING_SEEN_KEY = 'murmur.onboarding.seen';
 
 export default function App() {
   const [route, setRoute] = useState<Route>(() => parseHash(window.location.hash));
-  const [dark, setDark] = useState<boolean>(
-    () => window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false
-  );
+  const { resolved: theme, toggle: toggleTheme } = useTheme();
   const [onboarding, setOnboarding] = useState(false);
   const [qqOnboarding, setQQOnboarding] = useState(false);
   // Set when /api/info reports bootstrap=true with a non-null init_error.
@@ -56,14 +123,18 @@ export default function App() {
   const qqSupported = supportsQQOnboarding();
 
   useEffect(() => {
-    const onHash = () => setRoute(parseHash(window.location.hash));
+    const onHash = () => {
+      setRoute(parseHash(window.location.hash));
+      // The document scrolls (not the content pane), so a new page would
+      // otherwise open at the previous page's scroll offset.
+      window.scrollTo(0, 0);
+    };
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
 
-  // Any ProfileSwitcher (mounted on any chrome bar) can ask to open onboarding
-  // via this event — avoids prop-drilling onAddNew through every page that has
-  // a chrome bar (Friend / Graph / Reports / Yearbook / Table).
+  // The sidebar's ProfileSwitcher (and the settings page) ask to open
+  // onboarding via this event instead of prop-drilling a callback.
   useEffect(() => {
     const onReq = (e: Event) => {
       const platform = (e as CustomEvent<{ platform: 'wechat' | 'qq' }>).detail?.platform;
@@ -77,11 +148,6 @@ export default function App() {
   function go(path: string) {
     window.location.hash = path;
   }
-
-  // Apply dark class on root
-  useEffect(() => {
-    document.documentElement.classList.toggle('et-dark', dark);
-  }, [dark]);
 
   // Auto-show onboarding when data isn't ready. Three triggers:
   //   1. Backend in bootstrap mode (no decrypted data) — ALWAYS show, regardless
@@ -115,7 +181,7 @@ export default function App() {
 
       // #loading is a deliberate dev route — don't auto-pop the onboarding.
       const initialRoute = parseHash(window.location.hash);
-      if (initialRoute.name === 'loading') {
+      if (initialRoute.name === 'loading' || initialRoute.name === 'ui-gallery') {
         return;
       }
       const info = await probe(() => getInfo());
@@ -169,10 +235,10 @@ export default function App() {
               }}>引导</button>
       <button onClick={() => go('loading')} style={chipBtn}>加载</button>
       <button onClick={() => go('')} style={chipBtn}>首页</button>
-      <button onClick={() => setDark(d => !d)} style={{
+      <button onClick={toggleTheme} style={{
         all: 'unset', cursor: 'pointer', padding: '4px 10px', borderRadius: 999,
         background: 'var(--et-ink)', color: 'var(--et-paper)', fontWeight: 500,
-      }}>{dark ? '亮' : '暗'}</button>
+      }}>{theme === 'dark' ? '亮' : '暗'}</button>
     </div>
   );
 
@@ -200,23 +266,42 @@ export default function App() {
     case 'annual':
       body = <AnnualReportPage onBack={() => go('')} onOpenFriend={(id) => go(`friend/${id}`)} />;
       break;
+    case 'search':
+      body = <SearchPage query={route.query} navigate={go} />;
+      break;
+    case 'chat':
+      body = <ChatPage key={`${route.id}?${route.query}`} chatId={route.id} query={route.query} navigate={go} />;
+      break;
+    case 'settings':
+      body = <SettingsPage />;
+      break;
+    case 'ui-gallery':
+      body = <Suspense fallback={null}><UiGalleryPage onBack={() => go('')} /></Suspense>;
+      break;
     default:
       body = <HomePage
-        dark={dark}
         onOpenFriend={(id) => go(`friend/${id}`)}
         onOpenOnboarding={() => setOnboarding(true)}
         onOpenQQ={qqSupported ? () => setQQOnboarding(true) : undefined}
       />;
   }
 
+  // The splash (#loading) and the component gallery are full-screen dev
+  // routes; everything else lives inside the app shell.
+  const bare = route.name === 'loading' || route.name === 'ui-gallery';
+  const shell = shellFor(route, go);
+
   return (
     <TaskCenterProvider>
       <BatchTrackerProvider>
         <PrivacyIdentityIndex />
-        {body}
-        <BatchStatusPill onOpenReports={() => go('reports')} />
+        {bare ? body : (
+          <AppShell active={shell.active} fallbackHeader={shell.header}>
+            {body}
+            <BatchStatusPill onOpenReports={() => go('reports')} />
+          </AppShell>
+        )}
         {showDevControls && DevControls}
-        <PrivacyToggle position={showDevControls ? 'top-right' : 'bottom-right'} />
         <OnboardingDialog
           open={onboarding}
           onClose={() => { localStorage.setItem(ONBOARDING_SEEN_KEY, '1'); setOnboarding(false); setBootstrapInitError(null); }}

@@ -127,6 +127,12 @@ export const ERROR_CATALOG: Record<string, ErrorEntry> = {
     reason: '抓取子进程意外退出（日志里的 exit-N 是它的退出码）。',
     fix: '再试一次；仍然失败就展开日志，复制诊断信息发 issue。',
   },
+  KEY_CAPTURE_BUSY: {
+    level: 'retry',
+    title: '实时抓取还在进行',
+    reason: '一轮实时抓取（Frida 或免 Frida 副本）正在跑。这时候重签名或扫内存会把微信关掉、打断这一轮，或者再弹一次管理员密码窗。',
+    fix: '进「实时抓取」看正在跑的这一轮：等它结束，或点「提前结束这一轮」，再回来重试这一步。',
+  },
 
   // ---- 解密与数据 ----
   NO_DECRYPTED_DATA: {
@@ -192,6 +198,32 @@ export const ERROR_CATALOG: Record<string, ErrorEntry> = {
     fix: '重新登录要导出的 QQ，然后重新抓 key 再解密。',
   },
 
+  // ---- 应用锁 ----
+  APP_LOCKED: {
+    level: 'action',
+    title: 'Murmur 已锁定',
+    reason: '开启了应用锁，解锁前本地服务不返回任何聊天数据。',
+    fix: '输入应用锁密码解锁。忘记密码见「设置 → 应用锁」里的重置说明。',
+  },
+  APP_LOCK_WRONG_PASSWORD: {
+    level: 'action',
+    title: '密码不对',
+    reason: '输入的应用锁密码和设置的不一致。连续输错几次后要等一会儿才能再试。',
+    fix: '检查大小写和输入法后重新输入。',
+  },
+  APP_LOCK_RATE_LIMITED: {
+    level: 'retry',
+    title: '尝试次数过多',
+    reason: '连续输错密码，为了防止被猜中，需要等一会儿才能再试；每多错一次等待时间翻倍，最长 5 分钟。',
+    fix: '等倒计时结束后再输入。',
+  },
+  APP_LOCK_INVALID: {
+    level: 'action',
+    title: '应用锁设置不对',
+    reason: '密码太短，或者闲置时间不在可选范围里。',
+    fix: '密码至少 4 位；闲置时间选 5 / 15 / 30 分钟或从不。',
+  },
+
   // ---- 其他 ----
   TIMEOUT: {
     level: 'retry',
@@ -210,6 +242,12 @@ export const ERROR_CATALOG: Record<string, ErrorEntry> = {
     title: '请求来源被拒绝',
     reason: '本地后端只接受 Murmur 自己的页面发来的请求。',
     fix: '请从 Murmur 应用里操作；开发模式下前端要跑在 5173 端口。',
+  },
+  HOST_NOT_ALLOWED: {
+    level: 'info',
+    title: '请求地址被拒绝',
+    reason: '本地后端只接受发往 127.0.0.1、localhost 或 [::1]（加上它实际监听的端口）的请求，用来挡住借用其他域名指向本机的网页（DNS 重绑定）。',
+    fix: '用 http://127.0.0.1:9100 访问本地服务；Murmur 应用和开发模式默认就是这个地址，不用改。',
   },
   INTERNAL_ERROR: {
     level: 'info',

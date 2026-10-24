@@ -57,6 +57,11 @@ async function j<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       // Non-JSON body — leave code/raw empty.
     }
+    // The app lock engaged (idle timeout, another window, backend restart):
+    // let AppLockGate swap the UI for the lock screen.
+    if (res.status === 423 && code === 'APP_LOCKED') {
+      window.dispatchEvent(new Event('murmur:app-locked'));
+    }
     throw new ApiError(`API ${path}: ${res.status} ${text.slice(0, 200)}`, { code, status: res.status, raw });
   }
   return res.json();
@@ -81,9 +86,9 @@ export interface InfoResponse {
 
 // Cross-platform profile listing — drives the ProfileSwitcher.
 export interface ProfileEntry {
-  id: string;                 // 'wxid_xxx' for WeChat, 'qq:939919010' for QQ
+  id: string;                 // 'wxid_xxx' for WeChat, 'qq:246813579' for QQ
   platform: 'wechat' | 'qq';
-  display_id: string;         // already masked: 'wxid_n…97a5' / 'QQ 939…010'
+  display_id: string;         // already masked: 'wxid_q…8f3c' / 'QQ 246…579'
   // Surfaced from xwechat_files/all_users/config/global_config — raw nickname
   // and avatar URL pulled by cli/global_config.py. Empty string when the file
   // doesn't exist or this profile isn't the active account in that file.
@@ -168,6 +173,9 @@ export interface Diagnose {
   wechat_version?: string | null;
   /** macOS only: whether live capture (Frida) is the recommended key path. */
   live_key?: { recommended: boolean; frida: FridaStatus } | null;
+  /** macOS only: Frida-free private-copy capture — `available` once the
+   * capture dylib (murmur_keycap.dylib) is built / bundled. */
+  private_copy?: { available: boolean; copy_exists: boolean } | null;
 }
 
 export async function getDiagnose(): Promise<Diagnose> {
@@ -239,6 +247,13 @@ export async function getMoments(id: string, n = 4): Promise<Moment[]> {
   return j(`/api/friend/${encodeURIComponent(id)}/moments?n=${n}`);
 }
 
+/** Media items (images / videos) of one chat from media-index.json. An empty
+ * list means "nothing indexed yet"; a failed request throws ApiError. */
+export async function getFriendMedia<T = unknown>(id: string): Promise<T[]> {
+  const d = await j<unknown>(`/api/friend/${encodeURIComponent(id)}/media`);
+  return Array.isArray(d) ? (d as T[]) : [];
+}
+
 export interface ChatMessage {
   ts: number;
   time: string;
@@ -252,6 +267,73 @@ export async function getMessages(id: string, opts: { limit?: number } = {}): Pr
   const params = new URLSearchParams();
   if (opts.limit) params.set('limit', String(opts.limit));
   return j(`/api/friend/${encodeURIComponent(id)}/messages${params.toString() ? '?' + params : ''}`);
+}
+
+// ---- Chat page: paged history (backend: cli/chat_view.py) ----
+// Like search results, names and text are raw: run them through
+// utils/privacy (displayName / maskText) before showing.
+
+/** One message on the chat page. `id` is its cursor "<ts>:<local_id>:<db>". */
+export interface ChatPageMessage {
+  id: string;
+  ts: number;
+  time: string;                   // ISO, China time
+  from: string;
+  from_id: string;                // "self" or wxid / QQ uid
+  type: string;                   // text / image / video / share / system / revoke / ...
+  type_code: number;
+  text: string;
+  /** image / video only; url is a backend path (see mediaUrl), null when the file isn't on this computer. */
+  media: { kind: 'image' | 'video'; url: string | null } | null;
+}
+
+export interface ChatPageInfo {
+  id: string;
+  name: string;
+  is_group: boolean;
+  platform: 'wechat' | 'qq';
+  count: number;
+  first_ts: number | null;
+  last_ts: number | null;
+}
+
+export interface ChatPageResponse {
+  /** Present on initial loads (latest / around / at), not on before / after pages. */
+  chat?: ChatPageInfo;
+  messages: ChatPageMessage[];        // oldest first
+  has_more_before: boolean | null;    // null = not answered by this request
+  has_more_after: boolean | null;
+  /** around / at: the message to scroll to and highlight. */
+  anchor: string | null;
+}
+
+export interface ChatPageParams {
+  before?: string;
+  after?: string;
+  around?: string;
+  /** unix seconds or YYYY-MM-DD (China time) */
+  at?: string | number;
+  limit?: number;
+}
+
+export async function getChatPage(chat: string, p: ChatPageParams = {}): Promise<ChatPageResponse> {
+  const params = new URLSearchParams({ chat });
+  if (p.before) params.set('before', p.before);
+  if (p.after) params.set('after', p.after);
+  if (p.around) params.set('around', p.around);
+  if (p.at !== undefined && p.at !== '') params.set('at', String(p.at));
+  if (p.limit) params.set('limit', String(p.limit));
+  return j(`/api/chat/messages?${params}`);
+}
+
+/** Chat-page cursor for a search hit (keyword or semantic). */
+export function chatCursorFor(hit: { ts: number; locator: SearchHit['locator'] }): string {
+  return `${hit.ts}:${hit.locator.local_id}:${hit.locator.db}`;
+}
+
+/** Absolute URL for a backend-relative media path such as `/api/media/<md5>`. */
+export function mediaUrl(path: string): string {
+  return /^https?:/.test(path) ? path : API_BASE + path;
 }
 
 // ---- Global message search (backend: cli/search_index.py, docs/API_SEARCH.md) ----
@@ -345,6 +427,178 @@ export async function getSearchStatus(): Promise<SearchIndexStatus> {
 
 export async function rebuildSearchIndex(): Promise<SearchIndexStatus & { ok: boolean; started: boolean; queued: boolean }> {
   return j('/api/search/rebuild', { method: 'POST' });
+}
+
+// ---- Optional on-device semantic search (backend: cli/semantic_index.py) ----
+// Off by default; needs `pip install -r requirements-semantic.txt` plus a
+// one-time model download the user must start explicitly. Never calls a
+// cloud API. Same privacy rule as keyword search: apply maskText/displayName.
+
+export type SemanticState =
+  | 'not_installed'   // optional Python deps missing → show install_hint
+  | 'disabled'        // user hasn't turned it on
+  | 'model_missing'   // show model.size_bytes + repo, ask before downloading
+  | 'downloading'
+  | 'empty'           // ready, but no index built yet
+  | 'building'
+  | 'ready'
+  | 'error';
+
+export interface SemanticMirror {
+  id: string;                     // 'huggingface' | 'hf-mirror' | 'custom'
+  label: string;
+  endpoint: string;
+}
+
+export interface SemanticIndexStatus {
+  state: 'empty' | 'building' | 'ready' | 'error';
+  phase: '' | 'keyword_index' | 'planning' | 'embedding' | 'done';
+  full_rebuild: boolean;
+  done: number;                   // messages processed in this pass
+  total: number;
+  percent: number;
+  chunks: number;
+  indexed_messages: number;
+  last_built_at: number | null;   // unix seconds
+  last_error: string | null;
+  stale: boolean;                 // keyword index rebuilt since; next incremental pass re-embeds
+}
+
+export interface SemanticStatus {
+  state: SemanticState;
+  message: string;                // Chinese, ready to show
+  installed: boolean;
+  missing_deps: string[];
+  install_hint: string;
+  enabled: boolean;
+  mirror: string;
+  mirrors: SemanticMirror[];
+  model: {
+    id: string;
+    name: string;
+    repo: string;
+    revision: string;
+    license: string;
+    homepage: string;
+    size_bytes: number;
+    files: { path: string; size: number; sha256: string }[];
+    downloaded: boolean;
+    dir: string;
+  };
+  download: {
+    state: 'idle' | 'downloading' | 'done' | 'error';
+    mirror: string | null;
+    file: string | null;
+    done_bytes: number;
+    total_bytes: number;
+    error: string | null;
+    finished_at: number | null;
+  };
+  local_only: true;
+  index: SemanticIndexStatus | null;  // null before decrypted data exists
+}
+
+export interface SemanticChunkMessage {
+  sender: string;
+  sender_name: string;
+  ts: number;
+  time: string;
+  type: string;
+  text: string;
+  locator: SearchHit['locator'];
+}
+
+export interface SemanticSearchHit extends SearchHit {
+  score: number;                  // cosine similarity, higher = closer
+  chunk: {
+    id: number;
+    ts_start: number;
+    ts_end: number;
+    message_count: number;
+    anchor_index: number;         // which of `messages` the hit points at
+    messages: SemanticChunkMessage[];
+  };
+}
+
+export interface SemanticSearchResponse extends Omit<SearchResponse, 'mode' | 'match' | 'results' | 'index'> {
+  mode: 'semantic';
+  match: 'semantic';
+  model: string;
+  results: SemanticSearchHit[];
+  index: SemanticIndexStatus;
+}
+
+export interface SemanticSearchParams extends Omit<SearchParams, 'type' | 'limit'> {
+  limit?: number;                 // 1..100, default 20
+  minScore?: number;
+}
+
+/** Thrown when semantic search isn't usable (HTTP 409); carries the status. */
+export class SemanticUnavailableError extends Error {
+  status: SemanticStatus;
+  constructor(message: string, status: SemanticStatus) {
+    super(message);
+    this.name = 'SemanticUnavailableError';
+    this.status = status;
+  }
+}
+
+async function semanticJ<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(API_BASE + path, init);
+  if (res.status === 409) {
+    const body = await res.json().catch(() => null);
+    if (body && body.status) throw new SemanticUnavailableError(body.message || '语义搜索不可用', body.status);
+    throw new Error(`API ${path}: 409`);
+  }
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`API ${path}: ${res.status} ${text.slice(0, 200)}`);
+  }
+  return res.json();
+}
+
+const postJson = (body: unknown): RequestInit => ({
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(body),
+});
+
+export async function getSemanticStatus(): Promise<SemanticStatus> {
+  return j('/api/search/semantic/status');
+}
+
+export async function setSemanticSettings(
+  s: { enabled?: boolean; mirror?: string },
+): Promise<SemanticStatus & { ok: boolean }> {
+  return j('/api/search/semantic/settings', postJson(s));
+}
+
+/** Starts the model download — only after the user confirmed size + source. */
+export async function downloadSemanticModel(
+  mirror?: string,
+): Promise<SemanticStatus & { ok: boolean; started: boolean; already_running: boolean }> {
+  return semanticJ('/api/search/semantic/download', postJson(mirror ? { mirror } : {}));
+}
+
+export async function buildSemanticIndex(
+  full = false,
+): Promise<SemanticStatus & { ok: boolean; started: boolean; queued: boolean }> {
+  return semanticJ('/api/search/semantic/build', postJson({ full }));
+}
+
+export async function searchSemantic(p: SemanticSearchParams): Promise<SemanticSearchResponse> {
+  const params = new URLSearchParams({ q: p.q, mode: 'semantic' });
+  const list = (v?: string | string[]) => (Array.isArray(v) ? v.join(',') : v);
+  const chat = list(p.chat);
+  const sender = list(p.sender);
+  if (chat) params.set('chat', chat);
+  if (sender) params.set('sender', sender);
+  if (p.from !== undefined && p.from !== '') params.set('from', String(p.from));
+  if (p.to !== undefined && p.to !== '') params.set('to', String(p.to));
+  if (p.limit) params.set('limit', String(p.limit));
+  if (p.offset) params.set('offset', String(p.offset));
+  if (p.minScore !== undefined) params.set('min_score', String(p.minScore));
+  return semanticJ(`/api/search?${params}`);
 }
 
 export async function indexMedia(): Promise<{
@@ -509,6 +763,61 @@ export async function installFrida(): Promise<{ ok: boolean; started?: boolean; 
   return j('/api/live-key/install-frida', { method: 'POST' });
 }
 
+// ---- macOS Frida-free / root-free capture (private WeChat copy) ----
+
+export type PrivateCopyPhase =
+  | 'idle' | 'starting' | 'copying' | 'launching' | 'capturing' | 'done' | 'error';
+
+export interface PrivateCopyJob {
+  running: boolean;
+  phase: PrivateCopyPhase;
+  seconds: number;
+  remaining: number | null;
+  total: number;
+  known: number;
+  matched_count: number;
+  new: string[];
+  passphrase_found: boolean;
+  /** 'no-keys' | free text */
+  error: string | null;
+  log: string;
+  round: number;
+  /** a private WeChat copy is on disk (can be deleted) */
+  copy_exists: boolean;
+  /** the capture dylib was built / bundled */
+  dylib_available: boolean;
+}
+
+export interface PrivateCopyStatus {
+  platform_ok: boolean;
+  job: PrivateCopyJob;
+  coverage?: { total: number; known: number; pending?: string[]; error?: string };
+}
+
+export async function getPrivateCopyStatus(opts: { coverage?: boolean } = {}): Promise<PrivateCopyStatus> {
+  return j(`/api/private-copy/status${opts.coverage ? '?coverage=1' : ''}`);
+}
+
+export async function startPrivateCopy(seconds: number): Promise<{
+  ok: boolean; started?: boolean; complete?: boolean; already_running?: boolean; error?: string;
+  /** 'copy-running' | 'original-running' */
+  code?: string;
+}> {
+  return j('/api/private-copy/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ seconds }),
+  });
+}
+
+export async function cancelPrivateCopy(): Promise<{ ok: boolean }> {
+  return j('/api/private-copy/cancel', { method: 'POST' });
+}
+
+export async function deletePrivateCopy(): Promise<{ ok: boolean; deleted?: boolean; error?: string; pids?: number[] }> {
+  return j('/api/private-copy/delete', { method: 'POST' });
+}
+
 export async function saveKey(key: string): Promise<{ ok: boolean; path?: string; error?: string; code?: string }> {
   return j('/api/save-key', {
     method: 'POST',
@@ -519,6 +828,8 @@ export async function saveKey(key: string): Promise<{ ok: boolean; path?: string
 
 export async function saveWeChatRoot(path: string): Promise<{
   ok: boolean; saved?: string; error?: string; profiles?: Diagnose['profiles']; wechat_search_roots?: string[];
+  /** Stable error code when !ok (data/errorCatalog.ts). */
+  code?: string | null;
 }> {
   return j('/api/wechat-root', {
     method: 'POST',
@@ -959,8 +1270,15 @@ export async function exportFriendChat(
   format: ExportFormat,
   media: MediaPolicy = 'none',
 ): Promise<ExportReport | null> {
-  const url = `${API_BASE}/api/export?wxid=${encodeURIComponent(wxid)}&format=${format}&media=${media}`;
-  const res = await fetch(url);
+  // With attachments the backend writes a folder to disk and returns a report;
+  // that side effect is POST-only. Plain downloads stay on GET.
+  const res = media !== 'none'
+    ? await fetch(`${API_BASE}/api/export`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ wxid, format, media }),
+      })
+    : await fetch(`${API_BASE}/api/export?wxid=${encodeURIComponent(wxid)}&format=${format}`);
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     throw new Error(`导出失败：${res.status} ${text.slice(0, 200)}`);
@@ -999,7 +1317,7 @@ export async function exportPairChat(a: string, b: string, format: PairExportFor
 }
 
 export interface BatchStartReq {
-  cli: 'claude' | 'codex' | 'both';
+  cli: string;  // a local agent cli (see /api/agents) or 'both' (claude + codex)
   mode: 'top' | 'all' | 'pairs-graph';
   pair_mode?: 'mention' | 'graph';
   top?: number;
@@ -1074,7 +1392,7 @@ export async function getPairStream(a: string, b: string): Promise<{
 }
 
 export interface ReportEntry {
-  path: string;       // relative path under reports root (friends/01_kevin.md)
+  path: string;       // relative path under reports root (friends/01_friend_a.md)
   name: string;       // basename without .md
   size: number;
   mtime: number;

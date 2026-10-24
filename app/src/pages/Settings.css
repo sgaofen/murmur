@@ -1,0 +1,82 @@
+/* 设置 page — tokens only (see app/src/ui/README.md). */
+.settings {
+  max-width: 780px;
+  margin: 0 auto;
+  padding: 28px 28px 64px;
+  display: flex; flex-direction: column; gap: 18px;
+  font-family: var(--font-sans);
+  color: var(--text-secondary);
+}
+.settings .ui-card__header { margin-bottom: 6px; }
+
+/* label column + control column; stacks on narrow windows */
+.settings-row {
+  display: grid;
+  grid-template-columns: 148px minmax(0, 1fr);
+  gap: 8px 20px;
+  align-items: center;
+  padding: 14px 0;
+  border-top: 0.5px solid var(--border-subtle);
+}
+.ui-card__header + .settings-row { border-top: 0; }
+.settings-row__head { min-width: 0; }
+.settings-row__label { font-size: 13.5px; font-weight: 600; color: var(--text-primary); }
+.settings-row__hint { margin-top: 3px; font-size: 11.5px; line-height: 1.45; color: var(--text-muted); }
+.settings-row__body { min-width: 0; }
+
+.settings-muted { font-size: 12.5px; color: var(--text-muted); }
+.settings-empty { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: 13px; color: var(--text-muted); }
+
+/* a path: mono well + copy / open */
+.settings-path { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; min-width: 0; }
+.settings-path__value {
+  flex: 1 1 260px; min-width: 0;
+  padding: 6px 10px;
+  font-family: var(--font-mono); font-size: 12px; line-height: 1.5;
+  color: var(--text-secondary);
+  background: var(--surface-sunken);
+  border: 0.5px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  overflow-wrap: anywhere;
+}
+.settings-path__actions { flex: none; display: flex; gap: 2px; }
+.settings-path__error { flex-basis: 100%; font-size: 12px; color: var(--danger-fg); }
+
+/* local agents */
+.settings-agents { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.settings-agent {
+  padding: 10px 12px;
+  background: var(--surface-sunken);
+  border: 0.5px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+.settings-agent__main { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.settings-agent__name { font-size: 13.5px; font-weight: 600; color: var(--text-primary); }
+.settings-agent__version { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-muted); }
+.settings-agent__path {
+  display: block; margin-top: 4px;
+  font-family: var(--font-mono); font-size: 11.5px; color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+.settings .ui-callout code {
+  font-family: var(--font-mono);
+}
+
+/* about */
+.settings-about__brand { display: flex; align-items: center; gap: 10px; }
+.settings-about__name { font-family: var(--font-serif); font-size: 20px; font-weight: 600; color: var(--text-primary); letter-spacing: 0.03em; }
+.settings-about__lede { margin: 8px 0 0; font-size: 13px; line-height: 1.7; color: var(--text-muted); }
+.settings-facts {
+  margin: 16px 0 0;
+  display: grid; grid-template-columns: 148px minmax(0, 1fr); gap: 10px 20px;
+  font-size: 13px;
+}
+.settings-facts dt { color: var(--text-muted); }
+.settings-facts dd { margin: 0; color: var(--text-primary); min-width: 0; overflow-wrap: anywhere; }
+.settings-facts code { font-family: var(--font-mono); font-size: 12px; }
+
+@media (max-width: 640px) {
+  .settings { padding: 20px 16px 48px; }
+  .settings-row, .settings-facts { grid-template-columns: minmax(0, 1fr); }
+  .settings-row { gap: 8px; }
+}

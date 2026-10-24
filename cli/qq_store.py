@@ -9,7 +9,7 @@ Shape translation:
     --------------------------    --------------------------------
     wxid_xxx (private peer)   →   u_xxx                  (QQNT uid, stable)
     xxx@chatroom (group)      →   <group_number>@chatroom
-    Contact.alias (微信号)    →   QQ number (numeric, e.g. "939919010")
+    Contact.alias (微信号)    →   QQ number (numeric, e.g. "246813579")
     Contact.nick_name         →   QQNT nickname
     Contact.is_real_friend    →   uid present in buddy_list
     Message.sender_wxid       →   "self" if from me, else u_xxx
@@ -220,7 +220,7 @@ class QQStore:
 
     Layout: <decrypted_dir>/{nt_msg.db, profile_info.db, group_info.db, ...}
 
-    The directory name is the QQ number ("939919010"). `me` here is the QQNT
+    The directory name is the QQ number ("246813579"). `me` here is the QQNT
     uid ("u_..."), looked up lazily from profile_info_v6.
     """
 
@@ -788,7 +788,7 @@ class QQStore:
 
 
 if __name__ == "__main__":
-    decrypted_root = Path.home() / "Documents" / "Murmur" / "decrypted_qq" / "939919010"
+    decrypted_root = Path.home() / "Documents" / "Murmur" / "decrypted_qq" / "246813579"
     s = QQStore(decrypted_root)
     print(f"self uid: {s._resolve_self_uid()}")
     print(f"contacts: {len(s.contacts())}")

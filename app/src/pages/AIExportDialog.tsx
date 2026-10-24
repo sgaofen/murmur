@@ -73,8 +73,9 @@ export function AIExportDialog({ open, onClose, friend, onLocalAgent }: Props) {
         overflow: 'hidden', position: 'relative',
       }}>
         <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 6, background: 'var(--et-orange)' }} />
-        <button onClick={onClose} style={{
-          position: 'absolute', top: 14, right: 14, all: 'unset', cursor: 'pointer',
+        <button onClick={onClose} aria-label="关闭" style={{
+          // `all: 'unset'` first, or it resets `position` and the × lands top-left.
+          all: 'unset', position: 'absolute', top: 14, right: 14, cursor: 'pointer',
           width: 28, height: 28, borderRadius: 8, color: 'var(--et-mute)',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
         }}>
