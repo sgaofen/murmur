@@ -24,6 +24,10 @@ if sys.platform.startswith("win") and native_dir.is_dir():
     for f in native_dir.iterdir():
         if f.is_file():
             native_files.append((str(f), "native"))
+# Mac: the QQ NT lldb capture script runs inside lldb's own Python, so it must
+# ship as a plain .py file (not inside the PYZ archive).
+if sys.platform == "darwin" and (native_dir / "qq_lldb_capture.py").is_file():
+    native_files.append((str(native_dir / "qq_lldb_capture.py"), "native"))
 
 # macOS: ship the Frida-free capture dylib (cli/native/murmur_keycap.c, built
 # by build_keycap.sh in release CI) → _internal/native/murmur_keycap.dylib.
@@ -68,6 +72,7 @@ a = Analysis(
         "extract_image_key_v2",
         "qq_paths",
         "qq_decrypt",
+        "qq_mac_key",
         "qq_store",
         "search_index",
         "semantic_index",

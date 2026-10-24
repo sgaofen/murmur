@@ -17,11 +17,15 @@ export interface ActiveProfile {
   id: string;
 }
 
+/** QQ NT import works on Windows and macOS (Mac: re-sign QQ.app + lldb).
+ * Linux has no QQ NT data layout support yet. */
 export function supportsQQOnboarding(): boolean {
   if (typeof navigator === 'undefined') return true;
   const ua = navigator.userAgent || '';
   const platform = navigator.platform || '';
-  return !/Macintosh|Mac OS|MacIntel/i.test(`${ua} ${platform}`);
+  const s = `${ua} ${platform}`;
+  if (/Windows|Win32|Win64|Macintosh|Mac OS|MacIntel/i.test(s)) return true;
+  return !/Linux|X11/i.test(s);
 }
 
 export function readStoredActive(): ActiveProfile | null {

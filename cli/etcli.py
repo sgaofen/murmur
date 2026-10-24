@@ -6940,14 +6940,16 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         if path == "/api/qq/profiles":
             # Onboarding-only listing (keys + has_decrypted flags). For the
             # cross-platform switcher use /api/profiles instead.
-            if not _qpaths.IS_WINDOWS:
+            os_name = "windows" if _qpaths.IS_WINDOWS else "macos" if _qpaths.IS_MAC else "linux"
+            if not (_qpaths.IS_WINDOWS or _qpaths.IS_MAC):
                 return self._send_json({
                     "platform": "qq",
+                    "os": os_name,
                     "supported": False,
                     "profiles": [],
                     "qq_running": False,
                     "qq_install": None,
-                    "error": "QQ 导入目前只支持 Windows。Mac 版暂时可以继续使用微信数据，QQ for Mac 适配还在开发中。",
+                    "error": "QQ 导入目前只支持 Windows 和 macOS。",
                 })
             profiles = _qpaths.discover_qq_profiles()
             keys = self._qq_load_keys_config()
@@ -6962,13 +6964,38 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     "has_decrypted_data": has_decrypted,
                     "has_saved_key": p.qq_number in keys,
                 })
-            return self._send_json({
+            install = _qpaths.find_qq_install_dir()
+            payload = {
                 "platform": "qq",
+                "os": os_name,
                 "profiles": out,
                 "qq_running": bool(_qpaths.qq_running_pids()),
-                "qq_install": str(_qpaths.find_qq_install_dir()) if _qpaths.find_qq_install_dir() else None,
+                "qq_install": str(install) if install else None,
                 "search_roots": [str(p) for p in _qpaths.qq_search_paths()],
-            })
+            }
+            if _qpaths.IS_MAC:
+                # Read right after discover_qq_profiles() so it reflects this listing.
+                payload["tcc_blocked"] = _qpaths.qq_tcc_blocked()
+                import qq_mac_key as _qmac  # noqa: E402
+                main_exec = _qpaths.mac_qq_main_exec(install) if install else None
+                sig = _qmac.inspect_signature(main_exec) if main_exec else {}
+                lldb_path, lldb_err = _qmac.find_lldb()
+                payload["mac"] = {
+                    "qq_app": str(install) if install else None,
+                    "debuggable": sig.get("debuggable"),
+                    "hardened": sig.get("hardened"),
+                    "get_task_allow": sig.get("get_task_allow"),
+                    "lldb": lldb_path,
+                    "lldb_error": lldb_err,
+                    "backup": _qmac.backup_info(install),
+                }
+            return self._send_json(payload)
+
+        if path == "/api/qq/extract-key/status":
+            if not _qpaths.IS_MAC:
+                return self._send_json({"error": "macOS only"}, 400)
+            import qq_mac_key as _qmac  # noqa: E402
+            return self._send_json(_qmac.capture_state())
 
         if path == "/api/qq/scan-disks/status":
             return self._send_json(_qpaths.get_qq_scan_state())
@@ -7006,7 +7033,11 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     return self._send_json({
                         "ok": False,
                         "saved": str(saved),
-                        "error": "已保存路径，但里面没找到 <QQ号>/nt_qq/nt_db/nt_msg.db。请确认你粘的是 Tencent Files 文件夹。",
+                        "error": ("已保存路径，但里面没找到 nt_qq_<编号>/nt_db/nt_msg.db。"
+                                  "请确认你粘的是 QQ 数据目录（里面有 nt_qq_ 开头的文件夹）；"
+                                  "如果在 ~/Library/Containers 下，还要给 Murmur 完全磁盘访问权限。"
+                                  if _qpaths.IS_MAC else
+                                  "已保存路径，但里面没找到 <QQ号>/nt_qq/nt_db/nt_msg.db。请确认你粘的是 Tencent Files 文件夹。"),
                         "search_roots": [str(p) for p in _qpaths.qq_search_paths()],
                     })
                 return self._send_json({
@@ -7043,8 +7074,50 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             # Every candidate the script captures is HMAC-checked against
             # nt_msg.db; only a verified key is returned (issue #5).
             dbs = _qdec.verify_dbs_for_profiles(_qpaths.discover_qq_profiles(), prefer_qq)
+            if _qpaths.IS_MAC:
+                # macOS: lldb on the re-signed QQ.app. The UI starts it in the
+                # background and polls /api/qq/extract-key/status, because the
+                # user has to log in to QQ while it runs.
+                import qq_mac_key as _qmac  # noqa: E402
+                if opts.get("async"):
+                    return self._send_json(_qmac.start_capture(dbs, timeout=timeout))
+                # No lldb log / candidate hex in the HTTP response.
+                return self._send_json(_qmac.public_result(_qmac.run_capture(dbs, timeout=timeout)))
             r = _qdec.extract_key_via_powershell(timeout=timeout, verify_dbs=dbs)
             return self._send_json(r)
+
+        if path == "/api/qq/extract-key/cancel":
+            if not _qpaths.IS_MAC:
+                return self._send_json({"ok": False, "error": "macOS only"}, 400)
+            import qq_mac_key as _qmac  # noqa: E402
+            return self._send_json(_qmac.cancel_capture())
+
+        if path == "/api/qq/resign":
+            # macOS only: ad-hoc re-sign QQ.app's main executable (drop hardened
+            # runtime, add get-task-allow) so lldb can attach with SIP on.
+            # Quits QQ first; macOS shows its own admin-password prompt.
+            if not _qpaths.IS_MAC:
+                return self._send_json({"ok": False, "error": "macOS only"}, 400)
+            import qq_mac_key as _qmac  # noqa: E402
+            try:
+                return self._send_json(_qmac.resign_qq())
+            except subprocess.TimeoutExpired:
+                return self._send_json({"ok": False, "error": "重签名超时（系统授权窗口没有及时确认）。"})
+            except Exception as e:
+                return self._send_json({"ok": False, "error": f"{type(e).__name__}: {e}"})
+
+        if path == "/api/qq/restore-signature":
+            # macOS only: put back the Tencent signature backed up to
+            # ~/.murmur/qq-backup/<version>/ before /api/qq/resign.
+            if not _qpaths.IS_MAC:
+                return self._send_json({"ok": False, "error": "macOS only"}, 400)
+            import qq_mac_key as _qmac  # noqa: E402
+            try:
+                return self._send_json(_qmac.restore_original())
+            except subprocess.TimeoutExpired:
+                return self._send_json({"ok": False, "error": "恢复超时（系统授权窗口没有及时确认）。"})
+            except Exception as e:
+                return self._send_json({"ok": False, "error": f"{type(e).__name__}: {e}"})
 
         if path == "/api/qq/save-key":
             qq = str(opts.get("qq", "")).strip()
