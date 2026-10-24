@@ -147,6 +147,7 @@ def _render_appmsg(xml_text: str) -> str:
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import paths as _paths  # noqa: E402  (cross-platform discovery helper)
+import local_agents as _local_agents  # noqa: E402  (AI CLI registry)
 
 
 def _flutter_prefs_path() -> Path:
@@ -1006,9 +1007,6 @@ def _agent_reports_root() -> Path:
         return Path(override).expanduser()
     return _agent_workspace_root() / "agent_reports" / _account_slug()
 
-def _codex_model_args() -> list[str]:
-    model = os.environ.get("MURMUR_CODEX_MODEL", "gpt-5.2").strip()
-    return ["-m", model] if model else []
 
 def _safe_filename(s: str) -> str:
     return re.sub(r'[<>:"/\\|?*]', "_", s)[:80]
@@ -5055,10 +5053,11 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 cli_names = [c for c in ("claude", "codex") if c in installed]
                 if len(cli_names) < 2:
                     return self._send_json({"ok": False, "error": "需要同时安装 Claude 和 Codex 才能跑双引擎"}, 400)
-            elif cli_name in ("claude", "codex"):
+            elif cli_name in _local_agents.agent_clis():
                 cli_names = [cli_name]
             else:
-                return self._send_json({"ok": False, "error": "cli must be claude, codex, or both"}, 400)
+                return self._send_json({"ok": False, "error": "cli must be one of "
+                                        + ", ".join(_local_agents.agent_clis()) + ", or both"}, 400)
             extra: list = ["--parallel", str(parallel), "--sample", str(sample)]
             if mode == "all":
                 pair_arg = top_pairs if top_pairs >= 0 else 0
@@ -5262,50 +5261,14 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     with _STORE_READ_LOCK:
                         pack = build_pair_inference_pack(store_ref, a, b)
                     state["stage"] = f"running {cli_name}"
-                    use_shell = sys.platform.startswith("win") and agent_path.lower().endswith((".cmd", ".bat", ".ps1"))
-                    cmd_args = ([agent_path, "--print"] if cli_name == "claude" else
-                                 [agent_path, "exec", "--skip-git-repo-check", "--ephemeral", *_codex_model_args(), "-"] if cli_name == "codex" else
-                                 [agent_path])
                     t_start = _time.time()
-
-                    # Popen + stream stdout line by line so frontend can show live output
-                    if use_shell:
-                        cmd = " ".join(f'"{x}"' if " " in x or x.startswith("-") is False else x for x in cmd_args)
-                    else:
-                        cmd = cmd_args
-
-                    # Run agent from a writable user dir, NOT the bundled .app's
-                    # read-only Resources dir (where etcli's own cwd may live).
-                    # codex creates session dirs in cwd → fails if cwd isn't writable.
-                    _agent_cwd = _agent_workspace_root()
-                    try: _agent_cwd.mkdir(parents=True, exist_ok=True)
-                    except OSError: _agent_cwd = Path.home()
-                    proc = subprocess.Popen(
-                        cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                        bufsize=1, text=True, encoding="utf-8", errors="replace",
-                        shell=use_shell, cwd=str(_agent_cwd),
-                    )
-                    if proc.stdin:
-                        proc.stdin.write(pack)
-                        proc.stdin.close()
-                    if proc.stdout:
-                        for line in proc.stdout:
-                            state["output"] += line
-                    rc = proc.wait(timeout=900)
+                    rc, agent_err = _run_local_agent_streaming(cli_name, agent_path, pack, state)
                     elapsed = int(_time.time() - t_start)
                     output = state["output"]
                     sys.stderr.write(f"[invoke-pair] {name_a}↔{name_b} done rc={rc} chars={len(output)} {elapsed}s\n")
 
                     if rc == 0 and len(output) > 100:
-                        clean_output = output
-                        if cli_name == "codex":
-                            cidx = output.rfind("\ncodex\n")
-                            if cidx > 0:
-                                clean_output = output[cidx + len("\ncodex\n"):]
-                                tidx = clean_output.find("\ntokens used\n")
-                                if tidx > 0:
-                                    clean_output = clean_output[:tidx]
-                        clean_output = clean_output.strip()
+                        clean_output = _local_agents.clean_output(cli_name, output, server=True)
                         pairs_root = _agent_reports_root() / "pairs"
                         pairs_root.mkdir(parents=True, exist_ok=True)
                         safe_a = re.sub(r'[<>:"/\\|?*]', "_", name_a) or a
@@ -5324,7 +5287,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                         sys.stderr.write(f"[invoke-pair] saved → {fname}\n")
                         state["stage"] = "saved"
                     else:
-                        state["error"] = f"agent rc={rc}, output {len(output)} chars (need ≥100)"
+                        state["error"] = f"agent rc={rc}, output {len(output)} chars (need ≥100)" + agent_err
                         state["stage"] = "failed"
                     pck = "pairreport_" + "__".join(sorted([a, b]))
                     _PAIR_REPORT_CACHE.pop(pck, None)
@@ -5426,53 +5389,15 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     pack_path.write_text(pack, encoding="utf-8")
                     state["stage"] = f"running {cli_name}"
 
-                    use_shell = sys.platform.startswith("win") and agent_path.lower().endswith((".cmd", ".bat", ".ps1"))
-                    if cli_name == "claude":
-                        cmd_args = [agent_path, "--print"]
-                    elif cli_name == "codex":
-                        cmd_args = [agent_path, "exec", "--skip-git-repo-check", "--ephemeral", *_codex_model_args(), "-"]
-                    else:
-                        cmd_args = [agent_path]
-
-                    if use_shell:
-                        cmd = " ".join(f'"{x}"' if " " in x or x.startswith("-") is False else x for x in cmd_args)
-                    else:
-                        cmd = cmd_args
-
                     t_start = _time.time()
-                    # Run agent from a writable user dir, NOT the bundled .app's
-                    # read-only Resources dir (where etcli's own cwd may live).
-                    # codex creates session dirs in cwd → fails if cwd isn't writable.
-                    _agent_cwd = _agent_workspace_root()
-                    try: _agent_cwd.mkdir(parents=True, exist_ok=True)
-                    except OSError: _agent_cwd = Path.home()
-                    proc = subprocess.Popen(
-                        cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                        bufsize=1, text=True, encoding="utf-8", errors="replace",
-                        shell=use_shell, cwd=str(_agent_cwd),
-                    )
-                    if proc.stdin:
-                        proc.stdin.write(pack)
-                        proc.stdin.close()
-                    if proc.stdout:
-                        for line in proc.stdout:
-                            state["output"] += line
-                    rc = proc.wait(timeout=900)
+                    rc, agent_err = _run_local_agent_streaming(cli_name, agent_path, pack, state)
                     elapsed = int(_time.time() - t_start)
                     output = state["output"]
                     sys.stderr.write(f"[invoke] {name} rc={rc} chars={len(output)} {elapsed}s\n")
 
                     if rc == 0 and len(output) > 100:
-                        # Strip codex banner: keep only between "\ncodex\n" and "\ntokens used\n"
-                        clean_output = output
-                        if cli_name == "codex":
-                            cidx = output.rfind("\ncodex\n")
-                            if cidx > 0:
-                                clean_output = output[cidx + len("\ncodex\n"):]
-                                tidx = clean_output.find("\ntokens used\n")
-                                if tidx > 0:
-                                    clean_output = clean_output[:tidx]
-                        clean_output = clean_output.strip()
+                        # e.g. strip the codex banner: keep only between "\ncodex\n" and "\ntokens used\n"
+                        clean_output = _local_agents.clean_output(cli_name, output, server=True)
                         reports_root = _agent_reports_root() / "friends"
                         reports_root.mkdir(parents=True, exist_ok=True)
                         safe_full = re.sub(r'[<>:"/\\|?*]', "_", name) or wxid
@@ -5493,7 +5418,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                         except Exception:
                             pass
                     else:
-                        state["error"] = f"agent rc={rc}, output {len(output)} chars"
+                        state["error"] = f"agent rc={rc}, output {len(output)} chars" + agent_err
                         state["stage"] = "failed"
                 except Exception as e:
                     state["error"] = f"{type(e).__name__}: {e}"
@@ -6361,6 +6286,69 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         self._send_cors_headers()
         self.end_headers()
         self.wfile.write(data)
+
+
+def _run_local_agent_streaming(cli_name: str, agent_path: str, prompt: str, state: dict) -> tuple[int, str]:
+    """Run one local agent on `prompt`, appending its stdout to state["output"]
+    line by line so the frontend can poll live progress.
+
+    Returns (returncode, error_suffix). error_suffix is "" or a short
+    "\n[stderr] ..." tail, only for agents whose stderr is kept apart from
+    stdout (claude/codex keep the legacy merged stream).
+    """
+    # Run agent from a writable user dir, NOT the bundled .app's
+    # read-only Resources dir (where etcli's own cwd may live).
+    # codex creates session dirs in cwd → fails if cwd isn't writable.
+    _agent_cwd = _agent_workspace_root()
+    try: _agent_cwd.mkdir(parents=True, exist_ok=True)
+    except OSError: _agent_cwd = Path.home()
+    inv = _local_agents.build_invocation(cli_name, agent_path, prompt, _agent_cwd)
+    cmd_args = inv.argv
+    use_shell = _local_agents.needs_shell(agent_path)
+    # Popen + stream stdout line by line so frontend can show live output
+    if use_shell:
+        cmd = " ".join(f'"{x}"' if " " in x or x.startswith("-") is False else x for x in cmd_args)
+    else:
+        cmd = cmd_args
+    env = None
+    if inv.env:
+        env = os.environ.copy()
+        env.update(inv.env)
+    err_chunks: list[str] = []
+    err_thread = None
+    proc = None
+    try:
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT if inv.merge_stderr else subprocess.PIPE,
+            bufsize=1, text=True, encoding="utf-8", errors="replace",
+            shell=use_shell, cwd=str(_agent_cwd), env=env,
+        )
+        if not inv.merge_stderr and proc.stderr:
+            def _drain(stream=proc.stderr):
+                for line in stream:
+                    err_chunks.append(line)
+            err_thread = threading.Thread(target=_drain, daemon=True)
+            err_thread.start()
+        if proc.stdin:
+            if inv.stdin_text is not None:
+                proc.stdin.write(inv.stdin_text)
+            proc.stdin.close()
+        if proc.stdout:
+            for line in proc.stdout:
+                state["output"] += line
+        rc = proc.wait(timeout=inv.timeout)
+        if err_thread is not None:
+            err_thread.join(timeout=5)
+    finally:
+        inv.cleanup()
+        if proc is not None and proc.returncode is not None:
+            for stream in (proc.stdout, proc.stderr):
+                if stream:
+                    try: stream.close()
+                    except OSError: pass
+    err_tail = "".join(err_chunks).strip()
+    return rc, (f"\n[stderr] {err_tail[-600:]}" if err_tail else "")
 
 
 def _which(cli: str) -> str | None:
@@ -7335,29 +7323,12 @@ def _compute_friend_topology(
 
 
 def _detect_local_agents() -> list[dict]:
-    """Detect installed AI CLIs that Murmur can actually invoke safely."""
-    candidates = [
-        ("claude", "Claude Code", "anthropic"),
-        ("codex", "Codex CLI", "openai"),
-    ]
-    found = []
-    for cli, name, vendor in candidates:
-        path = _which(cli)
-        if not path:
-            continue
-        try:
-            # On Windows .cmd needs shell=True; on POSIX direct invocation works
-            use_shell = sys.platform.startswith("win") and path.lower().endswith((".cmd", ".bat", ".ps1"))
-            cmd = f'"{path}" --version' if use_shell else [path, "--version"]
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=5,
-                               encoding="utf-8", errors="replace", shell=use_shell)
-            version = (r.stdout or r.stderr or "").strip().split("\n")[0][:80]
-            if r.returncode == 0 or version:
-                found.append({"cli": cli, "name": name, "vendor": vendor,
-                              "version": version, "path": path})
-        except (subprocess.TimeoutExpired, OSError):
-            pass
-    return found
+    """Detect installed AI CLIs that Murmur can actually invoke safely.
+
+    The candidate list (claude, codex, gemini, kimi, opencode) and how each is
+    probed live in local_agents.AGENTS.
+    """
+    return _local_agents.detect_local_agents(_which)
 
 
 def _run_server(args) -> int:

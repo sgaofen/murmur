@@ -63,6 +63,7 @@ a = Analysis(
         "decrypt_py",
         "decrypted_media_index",
         "batch_analyze",
+        "local_agents",
     ],
     hookspath=[],
     hooksconfig={},

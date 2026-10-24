@@ -60,6 +60,41 @@ export function IconCodex(p: Props) {
   );
 }
 
+// Gemini: four-point spark
+export function IconGemini(p: Props) {
+  return (
+    <Svg {...p}>
+      <g {...STROKE}>
+        <path d="M12 4c.6 4.2 3.8 7.4 8 8 -4.2.6 -7.4 3.8 -8 8 -.6 -4.2 -3.8 -7.4 -8 -8 4.2 -.6 7.4 -3.8 8 -8z" />
+      </g>
+    </Svg>
+  );
+}
+
+// Kimi: crescent moon (Moonshot)
+export function IconKimi(p: Props) {
+  return (
+    <Svg {...p}>
+      <g {...STROKE}>
+        <path d="M18.5 15.5A7.5 7.5 0 0 1 8.5 5.5a7.5 7.5 0 1 0 10 10z" />
+      </g>
+    </Svg>
+  );
+}
+
+// OpenCode: open terminal window with prompt caret
+export function IconOpenCode(p: Props) {
+  return (
+    <Svg {...p}>
+      <g {...STROKE}>
+        <rect x="4" y="5" width="16" height="14" rx="1.5" />
+        <path d="M8 10l2.5 2 -2.5 2" />
+        <path d="M13 15h3" />
+      </g>
+    </Svg>
+  );
+}
+
 export function IconGeneric(p: Props) {
   return (
     <Svg {...p}>
@@ -331,6 +366,9 @@ export const Info = IconInfo;
 export function iconForCli(cli: string): React.ComponentType<Props> {
   if (cli === 'claude') return IconClaude;
   if (cli === 'codex') return IconCodex;
+  if (cli === 'gemini') return IconGemini;
+  if (cli === 'kimi') return IconKimi;
+  if (cli === 'opencode') return IconOpenCode;
   return IconGeneric;
 }
 
