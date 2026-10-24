@@ -73,6 +73,7 @@ a = Analysis(
         "decrypted_media_index",
         "batch_analyze",
         "local_agents",
+        "mcp_server",
         "live_key",
         "hook_cc_key_frida",
         # macOS live key capture (WeChat 4.1.9+). frida is optional: bundled
