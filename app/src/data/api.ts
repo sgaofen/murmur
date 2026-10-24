@@ -208,6 +208,99 @@ export async function getMessages(id: string, opts: { limit?: number } = {}): Pr
   return j(`/api/friend/${encodeURIComponent(id)}/messages${params.toString() ? '?' + params : ''}`);
 }
 
+// ---- Global message search (backend: cli/search_index.py, docs/API_SEARCH.md) ----
+// Results carry raw names/text: the backend does not apply privacy mode, so
+// callers must run names and snippet segments through utils/privacy.
+
+export type SearchIndexMode = 'fts5_trigram' | 'like';
+
+export interface SearchIndexStatus {
+  platform: 'wechat' | 'qq';
+  account: string;
+  mode: SearchIndexMode;
+  state: 'empty' | 'building' | 'ready' | 'error';
+  phase: '' | 'scanning' | 'indexing' | 'done';
+  full_rebuild: boolean;
+  done: number;
+  total: number;
+  percent: number;
+  indexed_messages: number;
+  sources: number;
+  last_built_at: number | null;   // unix seconds
+  last_error: string | null;
+  short_query_note: string;
+  auto_started?: boolean;         // only on GET /api/search/status
+}
+
+export interface SearchHit {
+  platform: 'wechat' | 'qq';
+  chat: string;                   // session username (wxid / xxx@chatroom / QQ uid)
+  chat_name: string;
+  is_group: boolean;
+  sender: string;                 // "self" or wxid / QQ uid
+  sender_name: string;
+  ts: number;
+  time: string;                   // ISO, China time
+  type: string;                   // label: text / share / ...
+  type_code: number;
+  snippet: string;
+  segments: { text: string; hit: boolean }[];
+  highlights: [number, number][]; // UTF-16 offsets into snippet
+  locator: {
+    db: string;                   // message_N.db / nt_msg.db
+    table: string;                // Msg_<md5> / c2c_msg_table / group_msg_table
+    local_id: number;             // WeChat local_id, QQ rowid
+    server_id: string | null;     // string to keep int64 precision
+  };
+}
+
+export interface SearchResponse {
+  query: string;
+  terms: string[];
+  mode: SearchIndexMode;
+  match: 'fts' | 'like' | 'fts+like';
+  total: number;
+  limit: number;
+  offset: number;
+  results: SearchHit[];
+  index: SearchIndexStatus;
+}
+
+export interface SearchParams {
+  q: string;
+  chat?: string | string[];
+  sender?: string | string[];
+  from?: string | number;         // unix seconds or YYYY-MM-DD
+  to?: string | number;           // date-only means end of that day
+  type?: string | string[];       // labels (text, share, ...) or numeric codes
+  limit?: number;                 // 1..200, default 50
+  offset?: number;
+}
+
+export async function searchMessages(p: SearchParams): Promise<SearchResponse> {
+  const params = new URLSearchParams({ q: p.q });
+  const list = (v?: string | string[]) => (Array.isArray(v) ? v.join(',') : v);
+  const chat = list(p.chat);
+  const sender = list(p.sender);
+  const type = list(p.type);
+  if (chat) params.set('chat', chat);
+  if (sender) params.set('sender', sender);
+  if (type) params.set('type', type);
+  if (p.from !== undefined && p.from !== '') params.set('from', String(p.from));
+  if (p.to !== undefined && p.to !== '') params.set('to', String(p.to));
+  if (p.limit) params.set('limit', String(p.limit));
+  if (p.offset) params.set('offset', String(p.offset));
+  return j(`/api/search?${params}`);
+}
+
+export async function getSearchStatus(): Promise<SearchIndexStatus> {
+  return j('/api/search/status');
+}
+
+export async function rebuildSearchIndex(): Promise<SearchIndexStatus & { ok: boolean; started: boolean; queued: boolean }> {
+  return j('/api/search/rebuild', { method: 'POST' });
+}
+
 export async function indexMedia(): Promise<{
   ok: boolean; total?: number; indexed?: number; existing?: number; ms?: number; details?: string; error?: string;
 }> {
