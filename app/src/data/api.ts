@@ -57,6 +57,11 @@ async function j<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       // Non-JSON body — leave code/raw empty.
     }
+    // The app lock engaged (idle timeout, another window, backend restart):
+    // let AppLockGate swap the UI for the lock screen.
+    if (res.status === 423 && code === 'APP_LOCKED') {
+      window.dispatchEvent(new Event('murmur:app-locked'));
+    }
     throw new ApiError(`API ${path}: ${res.status} ${text.slice(0, 200)}`, { code, status: res.status, raw });
   }
   return res.json();

@@ -192,6 +192,32 @@ export const ERROR_CATALOG: Record<string, ErrorEntry> = {
     fix: '重新登录要导出的 QQ，然后重新抓 key 再解密。',
   },
 
+  // ---- 应用锁 ----
+  APP_LOCKED: {
+    level: 'action',
+    title: 'Murmur 已锁定',
+    reason: '开启了应用锁，解锁前本地服务不返回任何聊天数据。',
+    fix: '输入应用锁密码解锁。忘记密码见「设置 → 应用锁」里的重置说明。',
+  },
+  APP_LOCK_WRONG_PASSWORD: {
+    level: 'action',
+    title: '密码不对',
+    reason: '输入的应用锁密码和设置的不一致。连续输错几次后要等一会儿才能再试。',
+    fix: '检查大小写和输入法后重新输入。',
+  },
+  APP_LOCK_RATE_LIMITED: {
+    level: 'retry',
+    title: '尝试次数过多',
+    reason: '连续输错密码，为了防止被猜中，需要等一会儿才能再试；每多错一次等待时间翻倍，最长 5 分钟。',
+    fix: '等倒计时结束后再输入。',
+  },
+  APP_LOCK_INVALID: {
+    level: 'action',
+    title: '应用锁设置不对',
+    reason: '密码太短，或者闲置时间不在可选范围里。',
+    fix: '密码至少 4 位；闲置时间选 5 / 15 / 30 分钟或从不。',
+  },
+
   // ---- 其他 ----
   TIMEOUT: {
     level: 'retry',
