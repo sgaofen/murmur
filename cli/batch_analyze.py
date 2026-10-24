@@ -16,7 +16,7 @@
     python batch_analyze.py --top 20    # top 20 朋友
     python batch_analyze.py --pairs-only
     python batch_analyze.py --friends-only
-    python batch_analyze.py --cli codex  # 用 codex 替代
+    python batch_analyze.py --cli codex  # 用 codex 替代（也支持 gemini / kimi / opencode）
 
 Codex 默认使用 gpt-5.2，避免旧 Codex CLI 默认模型过新导致启动失败。
 可用 MURMUR_CODEX_MODEL 覆盖。
@@ -36,6 +36,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from threading import Lock
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import local_agents  # noqa: E402  (AI CLI registry shared with etcli.py)
 
 # Force stdout/stderr to UTF-8 so unicode characters like ↔ don't crash threads.
 # On Windows, default stdout is GBK and any unicode print raises UnicodeEncodeError —
@@ -72,9 +75,6 @@ def _agent_workspace_root() -> Path:
     return Path.home() / "Desktop" / "Murmur"
 
 
-def _codex_model_args() -> list[str]:
-    model = os.environ.get("MURMUR_CODEX_MODEL", "gpt-5.2").strip()
-    return ["-m", model] if model else []
 
 
 def _which_agent(cli: str) -> Path | None:
@@ -107,15 +107,7 @@ def _safe_filename(name: str) -> str:
 
 
 def _clean_agent_output(cli: str, output: str) -> str:
-    out = (output or "").strip()
-    if cli == "codex":
-        banner = re.search(r"(?:^|\n)codex\s*\n", out, flags=re.IGNORECASE)
-        if banner:
-            out = out[banner.end():]
-        tokens = re.search(r"\ntokens used\b", out, flags=re.IGNORECASE)
-        if tokens:
-            out = out[:tokens.start()]
-    return out.strip()
+    return local_agents.clean_output(cli, output)
 
 
 def call_agent(cli: str, agent_path: Path, prompt: str, timeout: int = 900) -> tuple[bool, str]:
@@ -126,12 +118,6 @@ def call_agent(cli: str, agent_path: Path, prompt: str, timeout: int = 900) -> t
     so we explicitly switch to a user-writable dir before spawning the agent.
     """
     use_shell = sys.platform.startswith("win") and agent_path.suffix.lower() in (".cmd", ".bat", ".ps1")
-    if cli == "claude":
-        cmd_args = [str(agent_path), "--print"]
-    elif cli == "codex":
-        cmd_args = [str(agent_path), "exec", "--skip-git-repo-check", "--ephemeral", *_codex_model_args(), "-"]
-    else:
-        cmd_args = [str(agent_path)]
 
     # Always run agents from a writable user dir. In packaged apps, cwd may be
     # read-only, so use the reports workspace; fall back to $HOME.
@@ -141,25 +127,35 @@ def call_agent(cli: str, agent_path: Path, prompt: str, timeout: int = 900) -> t
     except OSError:
         work_dir = Path.home()
 
+    inv = None
     try:
+        inv = local_agents.build_invocation(cli, str(agent_path), prompt, work_dir)
+        cmd_args = inv.argv
+        env = None
+        if inv.env:
+            env = os.environ.copy()
+            env.update(inv.env)
+        # run_captured kills the agent's whole process tree on timeout
+        # (subprocess.run would only kill the direct child / cmd.exe shim).
         if use_shell:
             cmd_str = " ".join(f'"{a}"' if " " in a else a for a in cmd_args)
-            r = subprocess.run(cmd_str, input=prompt, capture_output=True, text=True,
-                               timeout=timeout, encoding="utf-8", errors="replace",
-                               shell=True, cwd=str(work_dir))
+            r = local_agents.run_captured(cmd_str, input=inv.stdin_text, timeout=timeout,
+                                          shell=True, cwd=str(work_dir), env=env)
         else:
-            r = subprocess.run(cmd_args, input=prompt, capture_output=True, text=True,
-                               timeout=timeout, encoding="utf-8", errors="replace",
-                               cwd=str(work_dir))
+            r = local_agents.run_captured(cmd_args, input=inv.stdin_text, timeout=timeout,
+                                          cwd=str(work_dir), env=env)
         ok = r.returncode == 0 and len(r.stdout or "") > 100
         out = _clean_agent_output(cli, r.stdout or "") if ok else (r.stdout or "")
         if r.stderr and not ok:
             out += "\n\n[stderr]\n" + r.stderr
         return ok, out
     except subprocess.TimeoutExpired:
-        return False, "[TIMEOUT after %ds]" % timeout
+        return False, "[TIMEOUT after %ds] agent 超时，已结束进程" % timeout
     except Exception as e:
         return False, f"[EXCEPTION] {type(e).__name__}: {e}"
+    finally:
+        if inv is not None:
+            inv.cleanup()
 
 
 # ---------------- Main batch logic ----------------
@@ -416,13 +412,13 @@ def cmd_run(args):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--cli", default="claude", choices=["claude", "codex"])
+    p.add_argument("--cli", default="claude", choices=local_agents.agent_clis())
     p.add_argument("--top", type=int, default=10, help="Top N friends to analyze; 0 means all (default 10)")
     p.add_argument("--top-pairs", type=int, default=10, help="Top N friend pairs; 0 means all (default 10)")
     p.add_argument("--sample", type=int, default=80, help="Pack sample size (default 80)")
     p.add_argument("--timeout", type=int, default=900, help="Agent timeout per call (default 900s = 15min)")
     p.add_argument("--parallel", type=int, default=5, help="How many agents to run concurrently (default 5)")
-    p.add_argument("--tag-cli", action="store_true", help="Append __claude/__codex to report filenames")
+    p.add_argument("--tag-cli", action="store_true", help="Append __<cli> (e.g. __claude/__codex) to report filenames")
     p.add_argument("--min-mentions", type=int, default=3, help="Min mention count (mention mode only, default 3)")
     p.add_argument("--pair-mode", choices=["mention", "graph"], default="mention",
                     help="How to pick pairs: 'mention' (only pairs cross-mentioned in chat) | "

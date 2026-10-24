@@ -39,6 +39,8 @@ class ClassifyTest(unittest.TestCase):
         ("QQ 导入目前只支持 Windows。Mac 版暂时可以继续使用微信数据", ec.PLATFORM_UNSUPPORTED),
         ("超时", ec.TIMEOUT),
         ("codex not installed", ec.AGENT_NOT_INSTALLED),
+        ("opencode not installed", ec.AGENT_NOT_INSTALLED),
+        ("[TIMEOUT after 900s] agent 超时，已结束进程", ec.TIMEOUT),
         # refresh.py
         ("找不到 Mac 解密密钥。\n请先回到 Murmur 点「密钥」", ec.KEY_NOT_FOUND),
         ("找不到密钥。请先运行：", ec.KEY_NOT_FOUND),
