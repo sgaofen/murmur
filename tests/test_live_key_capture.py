@@ -401,13 +401,14 @@ class ReviewFixesTest(unittest.TestCase):
     def test_should_stop_signals(self):
         stop = self.d / "job" / "stop"
         stop.parent.mkdir()
-        self.assertFalse(hck.should_stop(str(stop), os.getpid()))
+        self.assertFalse(hck.should_stop(str(stop), os.getpid() if os.name == "posix" else None))
         stop.write_text("x")
         self.assertTrue(hck.should_stop(str(stop)))
         stop.unlink()
         stop.parent.rmdir()
         self.assertTrue(hck.should_stop(str(stop)))   # backend cleaned up
-        with mock.patch.object(hck.os, "kill", side_effect=ProcessLookupError):
+        with mock.patch.object(hck.os, "kill", side_effect=ProcessLookupError), \
+                mock.patch.object(hck.os, "name", "posix"):
             self.assertTrue(hck.should_stop(None, 999999))
 
     def test_stop_requested_before_attach_never_attaches(self):

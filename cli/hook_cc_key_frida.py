@@ -388,7 +388,8 @@ def should_stop(stop_file=None, parent_pid=None):
             return True
         if not os.path.isdir(os.path.dirname(os.path.abspath(stop_file))):
             return True
-    if parent_pid:
+    # POSIX only: on Windows os.kill(pid, 0) is CTRL_C_EVENT, not a probe.
+    if parent_pid and os.name == "posix":
         try:
             os.kill(parent_pid, 0)
         except ProcessLookupError:
