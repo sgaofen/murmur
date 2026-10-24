@@ -492,9 +492,7 @@ export async function getLiveKeyStatus(opts: { coverage?: boolean } = {}): Promi
 }
 
 export async function startLiveKey(seconds: number): Promise<{
-  ok: boolean; started?: boolean; complete?: boolean; already_running?: boolean; error?: string;
-  /** 'copy-running' | 'original-running' */
-  code?: string; code?: string;
+  ok: boolean; started?: boolean; complete?: boolean; already_running?: boolean; error?: string; code?: string;
 }> {
   return j('/api/live-key/start', {
     method: 'POST',
