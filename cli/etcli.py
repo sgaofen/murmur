@@ -6745,38 +6745,58 @@ def _run_local_agent_streaming(cli_name: str, agent_path: str, prompt: str, stat
     err_chunks: list[str] = []
     err_thread = None
     proc = None
+    watchdog = None
     try:
         proc = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT if inv.merge_stderr else subprocess.PIPE,
             bufsize=1, text=True, encoding="utf-8", errors="replace",
             shell=use_shell, cwd=str(_agent_cwd), env=env,
+            **_local_agents.popen_group_kwargs(),
         )
-        if not inv.merge_stderr and proc.stderr:
-            def _drain(stream=proc.stderr):
-                for line in stream:
-                    err_chunks.append(line)
-            err_thread = threading.Thread(target=_drain, daemon=True)
-            err_thread.start()
-        if proc.stdin:
-            if inv.stdin_text is not None:
-                proc.stdin.write(inv.stdin_text)
-            proc.stdin.close()
-        if proc.stdout:
-            for line in proc.stdout:
-                state["output"] += line
-        rc = proc.wait(timeout=inv.timeout)
+        # The read loop below blocks until the agent closes stdout, so the
+        # timeout has to come from a watchdog that kills the process tree.
+        watchdog = _local_agents.Watchdog(proc, inv.timeout)
+        with watchdog:
+            if not inv.merge_stderr and proc.stderr:
+                def _drain(stream=proc.stderr):
+                    for line in stream:
+                        err_chunks.append(line)
+                err_thread = threading.Thread(target=_drain, daemon=True)
+                err_thread.start()
+            if proc.stdin:
+                try:
+                    if inv.stdin_text is not None:
+                        proc.stdin.write(inv.stdin_text)
+                    proc.stdin.close()
+                except OSError:
+                    pass  # agent exited / was killed before reading all input
+            if proc.stdout:
+                for line in proc.stdout:
+                    state["output"] += line
+            try:
+                rc = proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                # stdout closed but the process lingers (detached child etc.)
+                _local_agents.kill_process_tree(proc)
+                rc = proc.wait()
         if err_thread is not None:
             err_thread.join(timeout=5)
     finally:
         inv.cleanup()
-        if proc is not None and proc.returncode is not None:
+        if proc is not None:
+            # Never leave the agent running: timeout, a stuck child keeping
+            # the pipe open, or an exception in this thread all end up here.
+            _local_agents.kill_process_tree(proc)
             for stream in (proc.stdout, proc.stderr):
                 if stream:
                     try: stream.close()
                     except OSError: pass
     err_tail = "".join(err_chunks).strip()
-    return rc, (f"\n[stderr] {err_tail[-600:]}" if err_tail else "")
+    suffix = f"\n[stderr] {err_tail[-600:]}" if err_tail else ""
+    if watchdog is not None and watchdog.fired:
+        suffix = f"\nagent 超时（{inv.timeout}s 无结果），已结束进程" + suffix
+    return rc, suffix
 
 
 # ---------- live sync (实时同步, WeChat only) ----------

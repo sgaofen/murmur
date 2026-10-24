@@ -135,22 +135,22 @@ def call_agent(cli: str, agent_path: Path, prompt: str, timeout: int = 900) -> t
         if inv.env:
             env = os.environ.copy()
             env.update(inv.env)
+        # run_captured kills the agent's whole process tree on timeout
+        # (subprocess.run would only kill the direct child / cmd.exe shim).
         if use_shell:
             cmd_str = " ".join(f'"{a}"' if " " in a else a for a in cmd_args)
-            r = subprocess.run(cmd_str, input=inv.stdin_text, capture_output=True, text=True,
-                               timeout=timeout, encoding="utf-8", errors="replace",
-                               shell=True, cwd=str(work_dir), env=env)
+            r = local_agents.run_captured(cmd_str, input=inv.stdin_text, timeout=timeout,
+                                          shell=True, cwd=str(work_dir), env=env)
         else:
-            r = subprocess.run(cmd_args, input=inv.stdin_text, capture_output=True, text=True,
-                               timeout=timeout, encoding="utf-8", errors="replace",
-                               cwd=str(work_dir), env=env)
+            r = local_agents.run_captured(cmd_args, input=inv.stdin_text, timeout=timeout,
+                                          cwd=str(work_dir), env=env)
         ok = r.returncode == 0 and len(r.stdout or "") > 100
         out = _clean_agent_output(cli, r.stdout or "") if ok else (r.stdout or "")
         if r.stderr and not ok:
             out += "\n\n[stderr]\n" + r.stderr
         return ok, out
     except subprocess.TimeoutExpired:
-        return False, "[TIMEOUT after %ds]" % timeout
+        return False, "[TIMEOUT after %ds] agent 超时，已结束进程" % timeout
     except Exception as e:
         return False, f"[EXCEPTION] {type(e).__name__}: {e}"
     finally:
