@@ -14,7 +14,8 @@ import { BatchStatusPill, BatchTrackerProvider } from './components/extras/Batch
 import { PrivacyIdentityIndex } from './components/extras/PrivacyIdentityIndex';
 import { QQOnboardingDialog } from './pages/QQOnboardingDialog';
 import { SettingsPage } from './pages/Settings';
-import { SearchPlaceholderPage } from './pages/SearchPlaceholder';
+import { SearchPage } from './pages/Search';
+import { ChatPage } from './pages/Chat';
 import { supportsQQOnboarding, syncActiveToBackend } from './utils/activeProfile';
 import { useTheme } from './ui';
 import { AppShell } from './shell/AppShell';
@@ -33,25 +34,39 @@ type Route =
   | { name: 'table' }
   | { name: 'reports' }
   | { name: 'annual' }
-  | { name: 'search' }
+  | { name: 'search'; query: string }
+  | { name: 'chat'; id: string; query: string }
   | { name: 'settings' }
   | { name: 'ui-gallery' };
 
 // Accepts both `#graph` and `#/graph`; existing links and bookmarks keep working.
+// `search` and `chat/<id>` may carry a `?query` that the page reads itself.
 function parseHash(h: string): Route {
-  const s = h.replace(/^#\/?/, '');
+  const full = h.replace(/^#\/?/, '');
+  const qi = full.indexOf('?');
+  const s = qi < 0 ? full : full.slice(0, qi);
+  const query = qi < 0 ? '' : full.slice(qi + 1);
   if (!s) return { name: 'home' };
   if (s === 'loading') return { name: 'loading' };
   if (s === 'graph') return { name: 'graph' };
   if (s === 'table') return { name: 'table' };
   if (s === 'reports') return { name: 'reports' };
   if (s === 'annual') return { name: 'annual' };
-  if (s === 'search') return { name: 'search' };
+  if (s === 'search') return { name: 'search', query };
   if (s === 'settings') return { name: 'settings' };
   if (s === 'ui-gallery') return { name: 'ui-gallery' };
   if (s.startsWith('yearbook/')) return { name: 'yearbook', id: s.slice('yearbook/'.length) };
   if (s.startsWith('friend/')) return { name: 'friend', id: s.slice('friend/'.length) };
+  if (s.startsWith('chat/')) return { name: 'chat', id: safeDecode(s.slice('chat/'.length)), query };
   return { name: 'home' };
+}
+
+function safeDecode(s: string): string {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s;
+  }
 }
 
 /** Which nav entry is lit, and what the top bar says until the page mounts
@@ -75,6 +90,10 @@ function shellFor(route: Route, go: (path: string) => void): { active: NavKey | 
       return { active: 'table', header: { title: '离线证据表' } };
     case 'search':
       return { active: 'search', header: { title: '搜索' } };
+    case 'chat':
+      return new URLSearchParams(route.query).get('from') === 'search'
+        ? { active: 'search', header: { title: '聊天', back: { label: '搜索', onClick: () => go('search') } } }
+        : { active: 'home', header: { title: '聊天', back: { label: '朋友页', onClick: () => go(`friend/${route.id}`) } } };
     case 'settings':
       return { active: 'settings', header: { title: '设置' } };
     default:
@@ -241,7 +260,10 @@ export default function App() {
       body = <AnnualReportPage onBack={() => go('')} onOpenFriend={(id) => go(`friend/${id}`)} />;
       break;
     case 'search':
-      body = <SearchPlaceholderPage onGoHome={() => go('')} />;
+      body = <SearchPage query={route.query} navigate={go} />;
+      break;
+    case 'chat':
+      body = <ChatPage key={`${route.id}?${route.query}`} chatId={route.id} query={route.query} navigate={go} />;
       break;
     case 'settings':
       body = <SettingsPage />;

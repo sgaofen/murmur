@@ -259,6 +259,73 @@ export async function getMessages(id: string, opts: { limit?: number } = {}): Pr
   return j(`/api/friend/${encodeURIComponent(id)}/messages${params.toString() ? '?' + params : ''}`);
 }
 
+// ---- Chat page: paged history (backend: cli/chat_view.py) ----
+// Like search results, names and text are raw: run them through
+// utils/privacy (displayName / maskText) before showing.
+
+/** One message on the chat page. `id` is its cursor "<ts>:<local_id>:<db>". */
+export interface ChatPageMessage {
+  id: string;
+  ts: number;
+  time: string;                   // ISO, China time
+  from: string;
+  from_id: string;                // "self" or wxid / QQ uid
+  type: string;                   // text / image / video / share / system / revoke / ...
+  type_code: number;
+  text: string;
+  /** image / video only; url is a backend path (see mediaUrl), null when the file isn't on this computer. */
+  media: { kind: 'image' | 'video'; url: string | null } | null;
+}
+
+export interface ChatPageInfo {
+  id: string;
+  name: string;
+  is_group: boolean;
+  platform: 'wechat' | 'qq';
+  count: number;
+  first_ts: number | null;
+  last_ts: number | null;
+}
+
+export interface ChatPageResponse {
+  /** Present on initial loads (latest / around / at), not on before / after pages. */
+  chat?: ChatPageInfo;
+  messages: ChatPageMessage[];        // oldest first
+  has_more_before: boolean | null;    // null = not answered by this request
+  has_more_after: boolean | null;
+  /** around / at: the message to scroll to and highlight. */
+  anchor: string | null;
+}
+
+export interface ChatPageParams {
+  before?: string;
+  after?: string;
+  around?: string;
+  /** unix seconds or YYYY-MM-DD (China time) */
+  at?: string | number;
+  limit?: number;
+}
+
+export async function getChatPage(chat: string, p: ChatPageParams = {}): Promise<ChatPageResponse> {
+  const params = new URLSearchParams({ chat });
+  if (p.before) params.set('before', p.before);
+  if (p.after) params.set('after', p.after);
+  if (p.around) params.set('around', p.around);
+  if (p.at !== undefined && p.at !== '') params.set('at', String(p.at));
+  if (p.limit) params.set('limit', String(p.limit));
+  return j(`/api/chat/messages?${params}`);
+}
+
+/** Chat-page cursor for a search hit (keyword or semantic). */
+export function chatCursorFor(hit: { ts: number; locator: SearchHit['locator'] }): string {
+  return `${hit.ts}:${hit.locator.local_id}:${hit.locator.db}`;
+}
+
+/** Absolute URL for a backend-relative media path such as `/api/media/<md5>`. */
+export function mediaUrl(path: string): string {
+  return /^https?:/.test(path) ? path : API_BASE + path;
+}
+
 // ---- Global message search (backend: cli/search_index.py, docs/API_SEARCH.md) ----
 // Results carry raw names/text: the backend does not apply privacy mode, so
 // callers must run names and snippet segments through utils/privacy.
