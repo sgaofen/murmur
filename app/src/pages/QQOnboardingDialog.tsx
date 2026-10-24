@@ -186,14 +186,19 @@ export function QQOnboardingDialog({ open, onClose, onDone }: Props) {
     setProgress('正在启动 QQ + 装调试器，请在 QQ 弹出窗口里扫码登录…');
     setErrMsg(null);
     try {
-      const r = await extractQQKey(240);
+      const r = await extractQQKey(240, activeQQ);
       if (!r.ok || !r.key) {
         setErrMsg(r.error || '抓 key 失败 — 详细日志见 ~/Documents/Murmur/logs/');
         setPhase('error');
         return;
       }
       setKeyHex(r.key);
-      await saveQQKey(activeQQ, r.key);
+      const saved = await saveQQKey(activeQQ, r.key);
+      if (!saved.ok) {
+        setErrMsg(saved.error || 'key 校验失败，未保存');
+        setPhase('error');
+        return;
+      }
       setPhase('decrypting');
       setProgress(`抓到 key (${r.key.slice(0, 4)}…)，正在解密 6 个数据库…`);
       const dec = await decryptQQ(activeQQ, r.key);
