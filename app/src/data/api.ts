@@ -985,7 +985,7 @@ export async function exportPairChat(a: string, b: string, format: PairExportFor
 }
 
 export interface BatchStartReq {
-  cli: 'claude' | 'codex' | 'both';
+  cli: string;  // a local agent cli (see /api/agents) or 'both' (claude + codex)
   mode: 'top' | 'all' | 'pairs-graph';
   pair_mode?: 'mention' | 'graph';
   top?: number;

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { GraphView } from '../components/extras/GraphView';
 import type { GraphData, GraphNode, GraphEdge, GraphCluster, Spotlight } from '../components/extras/GraphView';
 import { API_BASE, getFriend, getPairPack, findPairReport, getReport, getFriendConnections, invokeAgent, getInvokeStream, getAgents, invokePairAgent, getPairStream } from '../data/api';
+import { AGENT_CLI_LIST } from '../utils/agents';
 import { PairAnalysisPanel } from './extras/PairAnalysisPanel';
 import type { BatchStatus, LocalAgent } from '../data/api';
 import type { FriendConnection } from '../data/api';
@@ -271,7 +272,7 @@ export function GraphPage({ onBack, onOpenFriend }: Props) {
   // Load agents once
   useEffect(() => { getAgents().then(setAgents).catch(() => { /* no local agents available */ }); }, []);
 
-  async function startGraphBatch(top_pairs: number, cli: 'claude' | 'codex' | 'both', parallel: number) {
+  async function startGraphBatch(top_pairs: number, cli: string, parallel: number) {
     try {
       const r = await startBatchJob(
         { cli, mode: 'pairs-graph', top: 0, top_pairs, parallel },
@@ -754,7 +755,7 @@ function SidePanel({ node, onClose, onOpenFriend, onSelectPeer }: {
                 <div style={{ marginTop: 10, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                   {agents.length === 0 ? (
                     <span className="et-meta" style={{ color: 'var(--et-faint)', fontSize: 11 }}>
-                      没检测到 claude / codex CLI；请先安装
+                      没检测到本机 AI CLI（{AGENT_CLI_LIST}）；请先安装其一
                     </span>
                   ) : (
                     agents.map(a => (
@@ -1215,7 +1216,7 @@ function EdgePanelInner({ edge, aName, bName, onClose, onOpenFriend, isQQ }: {
                   <div style={{ marginTop: 10, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                     {agents.length === 0 ? (
                       <span className="et-meta" style={{ color: 'var(--et-faint)', fontSize: 11 }}>
-                        没检测到 claude/codex CLI
+                        没检测到本机 AI CLI（{AGENT_CLI_LIST}）
                       </span>
                     ) : (
                       agents.map(a => (
@@ -1327,7 +1328,7 @@ function EdgePanelInner({ edge, aName, bName, onClose, onOpenFriend, isQQ }: {
                     <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                       {agents.length === 0 ? (
                         <span className="et-meta" style={{ color: 'var(--et-faint)', fontSize: 11 }}>
-                          没检测到 claude/codex CLI
+                          没检测到本机 AI CLI（{AGENT_CLI_LIST}）
                         </span>
                       ) : (
                         agents.map(a => (
@@ -1371,7 +1372,7 @@ function BatchAnalysisPanelInner({
   agents: LocalAgent[];
   batch: BatchHandle | null;
   status: BatchStatus | null;
-  onLaunch: (top_pairs: number, cli: 'claude' | 'codex' | 'both', parallel: number) => void;
+  onLaunch: (top_pairs: number, cli: string, parallel: number) => void;
   onReset: () => void;
   onClose: () => void;
   isQQ: boolean;
@@ -1389,8 +1390,9 @@ function BatchAnalysisPanelInner({
     : '';
   const claudeAgent = agents.find(a => a.cli === 'claude');
   const codexAgent = agents.find(a => a.cli === 'codex');
-  const [selectedCli, setSelectedCli] = useState<'claude' | 'codex' | 'both'>(
-    claudeAgent ? 'claude' : codexAgent ? 'codex' : 'claude'
+  const extraAgents = agents.filter(a => a.cli !== 'claude' && a.cli !== 'codex');
+  const [selectedCli, setSelectedCli] = useState<string>(
+    claudeAgent ? 'claude' : codexAgent ? 'codex' : (extraAgents[0]?.cli ?? 'claude')
   );
   const [parallel, setParallel] = useState(4);
   return (
@@ -1421,7 +1423,7 @@ function BatchAnalysisPanelInner({
               border: `0.5px solid ${dark ? 'rgba(255,107,71,0.4)' : 'rgba(255,107,71,0.3)'}`,
               borderRadius: 8, fontSize: 12, lineHeight: 1.6,
             }}>
-              没装 claude / codex CLI，AI 分析跑不了。装其一：<br/>
+              没装本机 AI CLI（{AGENT_CLI_LIST}），AI 分析跑不了。装其一，例如：<br/>
               <code style={{ background: 'rgba(0,0,0,0.2)', padding: '1px 5px', borderRadius: 3 }}>npm install -g @anthropic-ai/claude-code</code><br/>
               <code style={{ background: 'rgba(0,0,0,0.2)', padding: '1px 5px', borderRadius: 3 }}>npm install -g @openai/codex</code>
             </div>
@@ -1430,10 +1432,13 @@ function BatchAnalysisPanelInner({
               <div style={{ fontSize: 11, color: dark ? 'rgba(244,236,218,0.55)' : 'rgba(26,43,74,0.55)', marginBottom: 6 }}>
                 选 AI（已检测到 {agents.length} 个）：
               </div>
-              <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 12 }}>
                 <CliPick label="claude" sub="Anthropic" available={!!claudeAgent} selected={selectedCli === 'claude'} onClick={() => setSelectedCli('claude')} dark={dark} />
                 <CliPick label="codex" sub="OpenAI" available={!!codexAgent} selected={selectedCli === 'codex'} onClick={() => setSelectedCli('codex')} dark={dark} />
                 <CliPick label="both" sub="并行双跑" available={!!claudeAgent && !!codexAgent} selected={selectedCli === 'both'} onClick={() => setSelectedCli('both')} dark={dark} />
+                {extraAgents.map(a => (
+                  <CliPick key={a.cli} label={a.cli} sub={a.name} available selected={selectedCli === a.cli} onClick={() => setSelectedCli(a.cli)} dark={dark} />
+                ))}
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
                 <span style={{ fontSize: 11, color: dark ? 'rgba(244,236,218,0.55)' : 'rgba(26,43,74,0.55)' }}>每个 CLI 并发：</span>
@@ -1526,7 +1531,7 @@ function CliPick({ label, sub, available, selected, onClick, dark }: {
 }) {
   return (
     <button onClick={available ? onClick : undefined} disabled={!available} style={{
-      all: 'unset', flex: 1, cursor: available ? 'pointer' : 'not-allowed',
+      all: 'unset', flex: '1 1 28%', cursor: available ? 'pointer' : 'not-allowed',
       padding: '8px 10px', textAlign: 'center', borderRadius: 6,
       background: selected ? 'var(--et-orange)' : (dark ? 'rgba(244,236,218,0.08)' : 'rgba(26,43,74,0.05)'),
       color: selected ? '#fff' : (available ? 'inherit' : (dark ? 'rgba(244,236,218,0.4)' : 'rgba(26,43,74,0.4)')),

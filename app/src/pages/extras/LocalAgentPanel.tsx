@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { LocalAgent } from '../../data/api';
 import { getAgents } from '../../data/api';
+import { AGENT_CLI_LIST, agentBlurb } from '../../utils/agents';
 
 export function LocalAgentPanel({
   selected, onSelect, onInvoke,
@@ -27,12 +28,12 @@ export function LocalAgentPanel({
     return (
       <div style={{
         padding: '14px 16px', marginBottom: 18,
-        background: 'rgba(26,43,74,0.04)',
+        background: 'var(--et-paper-2)',
         border: '0.5px dashed var(--et-line-2)',
         borderRadius: 'var(--et-r)',
       }}>
         <div className="et-meta" style={{ fontSize: 12, color: 'var(--et-mute)' }}>
-          没在你电脑上检测到 Claude Code / Codex 命令行 AI。下面可以选「通用 AI」生成分析包，自己拷给在线 AI。
+          没在你电脑上检测到 {AGENT_CLI_LIST} 命令行 AI。下面可以选「通用 AI」生成分析包，自己拷给在线 AI。
         </div>
       </div>
     );
@@ -58,8 +59,8 @@ export function LocalAgentPanel({
             <div key={a.cli} style={{
               display: 'flex', alignItems: 'center', gap: 12,
               padding: '10px 12px', borderRadius: 10,
-              background: active ? 'var(--et-paper)' : 'rgba(255,255,255,0.45)',
-              border: `0.5px solid ${active ? 'var(--et-orange)' : 'rgba(26,43,74,0.10)'}`,
+              background: active ? 'var(--et-paper)' : 'var(--et-paper-2)',
+              border: `0.5px solid ${active ? 'var(--et-orange)' : 'var(--et-line)'}`,
               boxShadow: active ? '0 1px 0 rgba(255,255,255,0.6) inset, 0 4px 12px rgba(255,107,71,0.14)' : 'none',
               cursor: 'pointer',
             }}
@@ -84,7 +85,7 @@ export function LocalAgentPanel({
                   <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--et-ink)' }}>{a.name}</span>
                   <span className="et-meta" style={{ fontFamily: 'var(--et-mono)', fontSize: 11 }}>{a.vendor} · {a.version}</span>
                 </div>
-                <div className="et-meta" style={{ marginTop: 2 }}>「{describe(a.cli)}」</div>
+                <div className="et-meta" style={{ marginTop: 2 }}>「{agentBlurb(a.cli)}」</div>
               </div>
               {active && (
                 <button
@@ -102,17 +103,9 @@ export function LocalAgentPanel({
         })}
       </div>
       <div className="et-meta" style={{ marginTop: 10, fontSize: 11, color: 'var(--et-mute)', display: 'flex', alignItems: 'center', gap: 6 }}>
-        <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#48a76b' }} />
-        由本机命令行启动 · Claude/Codex 会交给对应服务商处理
+        <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--et-sage)' }} />
+        由本机命令行启动 · 内容会交给对应服务商的模型处理
       </div>
     </div>
   );
-}
-
-function describe(cli: string): string {
-  switch (cli) {
-    case 'claude': return '我电脑上的 Claude，最聪明的助手';
-    case 'codex': return 'OpenAI 出的命令行助手';
-    default: return '本机 AI 工具';
-  }
 }

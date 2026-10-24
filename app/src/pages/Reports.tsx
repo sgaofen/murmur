@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { getReport, listReports, getAgents } from '../data/api';
+import { AGENT_CLI_LIST } from '../utils/agents';
 import type { ReportEntry, ReportsList, LocalAgent } from '../data/api';
 import { mdToHtml, MURMUR_MD_CSS } from '../utils/markdown';
 import { useBatchTracker } from '../components/extras/BatchTracker';
@@ -19,7 +20,7 @@ export function ReportsPage({ onBack }: Props) {
   const [active, setActive] = useState<{ path: string; content: string } | null>(null);
   const [activeLoading, setActiveLoading] = useState(false);
   const [agents, setAgents] = useState<LocalAgent[]>([]);
-  const [selectedCli, setSelectedCli] = useState<'claude' | 'codex' | 'both' | ''>('');
+  const [selectedCli, setSelectedCli] = useState<string>('');
   const [parallel, setParallel] = useState(2);
   const [batchOpen, setBatchOpen] = useState(false);
   const [refreshedBatchPid, setRefreshedBatchPid] = useState<number | null>(null);
@@ -33,9 +34,7 @@ export function ReportsPage({ onBack }: Props) {
   useEffect(() => {
     if (selectedCli || agents.length === 0) return;
     const preferred = agents.find(a => a.cli === 'claude') || agents.find(a => a.cli === 'codex') || agents[0];
-    if (preferred?.cli === 'claude' || preferred?.cli === 'codex') {
-      setSelectedCli(preferred.cli);
-    }
+    if (preferred) setSelectedCli(preferred.cli);
   }, [agents, selectedCli]);
 
   // Refresh the list when a background batch finishes, even if it was started
@@ -55,11 +54,11 @@ export function ReportsPage({ onBack }: Props) {
     force = false,
   ) {
     if (agents.length === 0) {
-      alert('没检测到 claude / codex CLI，请先安装 (npm install -g @anthropic-ai/claude-code)');
+      alert(`没检测到本机 AI CLI（${AGENT_CLI_LIST}），请先安装其一，例如 npm install -g @anthropic-ai/claude-code`);
       return;
     }
-    if (selectedCli !== 'claude' && selectedCli !== 'codex' && selectedCli !== 'both') {
-      alert('请选择 Claude、Codex 或双引擎');
+    if (selectedCli !== 'both' && !agents.some(a => a.cli === selectedCli)) {
+      alert('请选择一个本机 AI，或双引擎');
       return;
     }
     const cli = selectedCli;
@@ -216,6 +215,7 @@ ${sections}
   const hasClaude = agents.some(a => a.cli === 'claude');
   const hasCodex = agents.some(a => a.cli === 'codex');
   const hasBoth = hasClaude && hasCodex;
+  const extraAgents = agents.filter(a => a.cli !== 'claude' && a.cli !== 'codex');
 
   return (
     <div style={{ position: 'fixed', inset: 0, display: 'flex',
@@ -268,6 +268,10 @@ ${sections}
                   sub={hasCodex ? '已检测' : '未安装'} onClick={() => setSelectedCli('codex')} />
                 <ChoiceBtn label="双引擎" active={selectedCli === 'both'} disabled={!hasBoth || batchRunning}
                   sub={hasBoth ? '对照跑' : '需两者'} onClick={() => setSelectedCli('both')} />
+                {extraAgents.map(a => (
+                  <ChoiceBtn key={a.cli} label={a.name} active={selectedCli === a.cli} disabled={batchRunning}
+                    sub="已检测" onClick={() => setSelectedCli(a.cli)} />
+                ))}
               </div>
               <div style={{ fontWeight: 600, marginBottom: 6 }}>速度：</div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6, marginBottom: 10 }}>
