@@ -12,6 +12,7 @@ import { PageHeader } from '../shell/PageHeader';
 import { AppLockSettings } from '../components/AppLockSettings';
 import { maskText, setPrivacyMode } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
+import { AGENT_CLI_LIST } from '../utils/agents';
 import './Settings.css';
 
 /** etcli ≥ 0.5 adds export_dir to /api/info; older backends simply omit it. */
@@ -135,7 +136,9 @@ function DataSection({ data, loading }: { data: Loaded | null; loading: boolean 
     <Card padding="lg">
       <CardHeader title="数据与目录" description="Murmur 只读写下面这些本机文件夹，不会把内容上传到任何地方。" />
       <Row label="解密数据" hint="解密后的聊天数据库">
-        {loading ? <PathSkeleton /> : decrypted ? <PathValue path={decrypted} /> : (
+        {loading ? <PathSkeleton /> : decrypted ? <PathValue path={decrypted} /> : !info ? (
+          <span className="settings-muted">读不到（后端未连接）</span>
+        ) : (
           <div className="settings-empty">
             <span>还没有解密数据。</span>
             <Button size="sm" variant="secondary" onClick={requestOnboarding}>打开初始化引导</Button>
@@ -218,7 +221,7 @@ function AgentsSection({ agents, loading }: { agents: LocalAgent[] | null; loadi
         <span className="settings-muted">读不到本机 AI 列表（后端没响应）。</span>
       ) : agents.length === 0 ? (
         <Callout tone="info" title="没检测到本机 AI 命令行工具">
-          装好其中一个，再重新打开 Murmur：<code>npm install -g @anthropic-ai/claude-code</code> 或 <code>npm install -g @openai/codex</code>
+          Murmur 支持 {AGENT_CLI_LIST}。装好其中任意一个并登录，再重新打开 Murmur，例如 <code>npm install -g @anthropic-ai/claude-code</code>。
         </Callout>
       ) : (
         <ul className="settings-agents">
