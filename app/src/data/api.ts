@@ -9,11 +9,55 @@ import type { Friend, FriendStats, HomeSummary, Moment } from './types';
 // Fixes "Could not connect to the server" / "Load failed" in production .app builds.
 export const API_BASE = (import.meta.env?.VITE_ETCLI_URL as string) || 'http://127.0.0.1:9100';
 
+/** Error thrown for non-2xx responses (and unreachable backend). `message`
+ * keeps the historical `API <path>: <status> <body>` shape so existing
+ * string checks keep working; `code` is the stable backend error code
+ * (cli/error_codes.py → data/errorCatalog.ts) when the body carried one. */
+export class ApiError extends Error {
+  code: string | null;
+  status: number;
+  /** Original `error` text from the JSON body, if any. */
+  raw: string | null;
+  constructor(message: string, opts: { code?: string | null; status?: number; raw?: string | null } = {}) {
+    super(message);
+    this.name = 'ApiError';
+    this.code = opts.code ?? null;
+    this.status = opts.status ?? 0;
+    this.raw = opts.raw ?? null;
+  }
+}
+
+/** Stable error code from anything a request can throw or return:
+ * ApiError, a JSON payload with `code`, or null when unknown. */
+export function errorCode(e: unknown): string | null {
+  if (!e || typeof e !== 'object') return null;
+  const c = (e as { code?: unknown }).code;
+  return typeof c === 'string' && c ? c : null;
+}
+
 async function j<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(API_BASE + path, init);
+  let res: Response;
+  try {
+    res = await fetch(API_BASE + path, init);
+  } catch (e) {
+    // Network-level failure (backend not running / connection refused).
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new ApiError(`API ${path}: ${msg}`, { code: 'BACKEND_UNREACHABLE', raw: msg });
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => '');
-    throw new Error(`API ${path}: ${res.status} ${text.slice(0, 200)}`);
+    let code: string | null = null;
+    let raw: string | null = null;
+    try {
+      const body = JSON.parse(text);
+      if (body && typeof body === 'object') {
+        code = typeof body.code === 'string' ? body.code : null;
+        raw = typeof body.error === 'string' ? body.error : null;
+      }
+    } catch {
+      // Non-JSON body — leave code/raw empty.
+    }
+    throw new ApiError(`API ${path}: ${res.status} ${text.slice(0, 200)}`, { code, status: res.status, raw });
   }
   return res.json();
 }
@@ -31,6 +75,8 @@ export interface InfoResponse {
   // Last EchoStore/QQStore init exception, surfaced so OnboardingDialog
   // shows the real cause instead of silently looping back to extract-key.
   init_error?: string | null;
+  /** Stable code for init_error (see data/errorCatalog.ts). */
+  init_error_code?: string | null;
 }
 
 // Cross-platform profile listing — drives the ProfileSwitcher.
@@ -314,6 +360,8 @@ export interface RefreshResult {
   // Set when the decrypt subprocess returned 0 but the post-decrypt store
   // re-init still threw — caller should treat success+init_error as failure.
   init_error?: string | null;
+  /** Stable error code when !ok or init_error is set (data/errorCatalog.ts). */
+  code?: string | null;
 }
 
 export interface RefreshOpts {
@@ -342,6 +390,8 @@ export async function generateAIPack(id: string, opts: { sample?: number } = {})
 
 export async function extractKey(opts: { autoRestart?: boolean; timeout?: number } = {}): Promise<{
   ok: boolean; key?: string; mac_keys_count?: number; ms?: number; log?: string;
+  /** Stable error code when !ok (data/errorCatalog.ts). */
+  code?: string | null;
   /** macOS: number of encrypted DBs found on disk. */
   total_dbs?: number;
   /** macOS: memory scan missed some/all DBs — offer live capture (Frida). */
@@ -388,6 +438,8 @@ export interface LiveKeyJob {
   elevated: boolean;
   /** 'frida-missing' | 'attach-denied' | 'auth-cancelled' | 'exit-N' | free text */
   error: string | null;
+  /** Stable code for `error` (data/errorCatalog.ts). */
+  code?: string | null;
   log: string;
   round: number;
 }
@@ -406,7 +458,7 @@ export async function getLiveKeyStatus(opts: { coverage?: boolean } = {}): Promi
 }
 
 export async function startLiveKey(seconds: number): Promise<{
-  ok: boolean; started?: boolean; complete?: boolean; already_running?: boolean; error?: string;
+  ok: boolean; started?: boolean; complete?: boolean; already_running?: boolean; error?: string; code?: string;
 }> {
   return j('/api/live-key/start', {
     method: 'POST',
@@ -419,11 +471,11 @@ export async function cancelLiveKey(): Promise<{ ok: boolean }> {
   return j('/api/live-key/cancel', { method: 'POST' });
 }
 
-export async function installFrida(): Promise<{ ok: boolean; started?: boolean; already_running?: boolean; error?: string }> {
+export async function installFrida(): Promise<{ ok: boolean; started?: boolean; already_running?: boolean; error?: string; code?: string }> {
   return j('/api/live-key/install-frida', { method: 'POST' });
 }
 
-export async function saveKey(key: string): Promise<{ ok: boolean; path?: string; error?: string }> {
+export async function saveKey(key: string): Promise<{ ok: boolean; path?: string; error?: string; code?: string }> {
   return j('/api/save-key', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -566,7 +618,7 @@ export async function decryptQQ(qq: string, key?: string): Promise<{ ok: boolean
 }
 
 export async function resignWechat(opts: { relaunch?: boolean } = {}): Promise<{
-  ok: boolean; ms?: number; log?: string[]; error?: string; stderr?: string; next_steps?: string;
+  ok: boolean; ms?: number; log?: string[]; error?: string; stderr?: string; next_steps?: string; code?: string;
 }> {
   return j('/api/resign-wechat', {
     method: 'POST',

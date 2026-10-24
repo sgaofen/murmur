@@ -11,6 +11,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { cancelLiveKey, getLiveKeyStatus, installFrida, startLiveKey } from '../data/api';
 import type { LiveKeyStatus } from '../data/api';
+import { lookupError } from '../data/errorCatalog';
+import { ErrorExplain } from './ErrorExplain';
 
 interface Props {
   /** Keys are saved — run the existing decrypt flow. */
@@ -41,6 +43,8 @@ export function LiveKeyCapture({ onDecrypt, reason = 'manual', wechatVersion, on
   const [st, setSt] = useState<LiveKeyStatus | null>(null);
   const [seconds, setSeconds] = useState(90);
   const [err, setErr] = useState<string | null>(null);
+  // Stable backend code for `err` (data/errorCatalog.ts); only shown while err is set.
+  const [errCode, setErrCode] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const pollRef = useRef<number | null>(null);
 
@@ -82,6 +86,7 @@ export function LiveKeyCapture({ onDecrypt, reason = 'manual', wechatVersion, on
       const r = await startLiveKey(seconds);
       if (!r.ok) {
         setErr(r.error === 'frida-missing' ? '还没装 Frida，先点上面的安装按钮。' : (r.error || '启动失败'));
+        setErrCode(r.code ?? null);
       }
       await refresh(!!r.complete);
     } catch (e: any) {
@@ -95,7 +100,7 @@ export function LiveKeyCapture({ onDecrypt, reason = 'manual', wechatVersion, on
     setErr(null);
     try {
       const r = await installFrida();
-      if (!r.ok) setErr(r.error || '安装失败');
+      if (!r.ok) { setErr(r.error || '安装失败'); setErrCode(r.code ?? null); }
       await refresh(false);
     } catch (e: any) {
       setErr(e?.message || String(e));
@@ -128,7 +133,7 @@ export function LiveKeyCapture({ onDecrypt, reason = 'manual', wechatVersion, on
             <RoundSummary newCount={job.new.length} matched={matched} total={total}
               missingCore={missingCore} round={job.round} />
           )}
-          {job.phase === 'error' && <JobError error={job.error} log={job.log} />}
+          {job.phase === 'error' && <JobError error={job.error} code={job.code} log={job.log} />}
           {!finished && total > 0 && (
             <div className="et-meta" style={{ marginBottom: 10 }}>
               已有 <strong>{matched}</strong> / {total} 个数据库的密钥{matched > 0 ? '（之前抓到的会保留）' : ''}
@@ -180,6 +185,7 @@ export function LiveKeyCapture({ onDecrypt, reason = 'manual', wechatVersion, on
         }} />
       )}
 
+      {err && <ErrorExplain code={errCode} style={{ marginTop: 10, marginBottom: 0 }} />}
       {err && <div style={{ marginTop: 10, fontSize: 12, color: 'var(--et-rose)' }}>{err}</div>}
 
       {onPaste && !job.running && (
@@ -290,7 +296,8 @@ function RoundSummary({ newCount, matched, total, missingCore, round }: {
   );
 }
 
-function JobError({ error, log }: { error: string | null; log: string }) {
+function JobError({ error, code, log }: { error: string | null; code?: string | null; log: string }) {
+  const known = lookupError(code) !== null;
   const msg =
     error === 'frida-missing' ? '找不到 Frida（后端进程里 import 失败）。' :
     error === 'attach-denied' ? '没能挂到微信进程上：请先在引导里做「重签名」，并确认微信是重签名之后重新打开的。' :
@@ -299,11 +306,13 @@ function JobError({ error, log }: { error: string | null; log: string }) {
     error === 'no-dbs' ? '没找到微信的加密数据库，请确认微信已经登录并完成首次同步。' :
     `抓取失败：${error || '未知错误'}`;
   return (
-    <div style={{
+    <div style={known ? { marginBottom: 12 } : {
       padding: '12px 14px', background: 'rgba(196,90,63,0.12)', border: '0.5px solid rgba(196,90,63,0.4)',
       borderRadius: 8, marginBottom: 12,
     }}>
-      <div style={{ fontSize: 13, color: 'var(--et-rose)', fontWeight: 600 }}>{msg}</div>
+      {known
+        ? <ErrorExplain code={code} style={{ marginBottom: 0 }} />
+        : <div style={{ fontSize: 13, color: 'var(--et-rose)', fontWeight: 600 }}>{msg}</div>}
       {log && (
         <details style={{ marginTop: 6 }}>
           <summary style={{ cursor: 'pointer', fontSize: 11, color: 'var(--et-mute)' }}>查看日志</summary>
