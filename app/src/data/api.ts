@@ -374,11 +374,11 @@ export async function cancelQQScan(): Promise<{ ok: boolean; cancelled: boolean 
   return j('/api/qq/scan-disks/cancel', { method: 'POST' });
 }
 
-export async function extractQQKey(timeout = 240): Promise<{ ok: boolean; key: string | null; log: string; error: string | null }> {
+export async function extractQQKey(timeout = 240, qq?: string): Promise<{ ok: boolean; key: string | null; qq?: string | null; log: string; error: string | null }> {
   return j('/api/qq/extract-key', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ timeout }),
+    body: JSON.stringify({ timeout, qq }),
   });
 }
 
