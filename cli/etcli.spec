@@ -60,6 +60,7 @@ a = Analysis(
         "paths",
         "error_codes",
         "diag_redact",
+        "app_lock",
         "refresh",
         "extract_key_dll",
         "extract_key_mac",
