@@ -30,8 +30,6 @@ notice); Murmur only reads this machine's own data and uploads nothing.
 """
 from __future__ import annotations
 
-import hashlib
-import json
 import os
 import plistlib
 import shutil
@@ -54,9 +52,6 @@ WATCHDOG_GRACE = 120
 PAGE_SIZE = 4096
 SALT_SIZE = 16
 KEY_SIZE = 32
-
-# CommonCrypto CCPseudoRandomAlgorithm -> hashlib name (SQLCipher uses SHA512).
-PRF_HASHES = {1: "sha1", 2: "sha224", 3: "sha256", 4: "sha384", 5: "sha512"}
 
 _MERGE_LOCK = threading.Lock()
 
@@ -203,16 +198,16 @@ def _verify(page1: bytes, key: bytes) -> bool:
 
 def derive_db_key(passphrase: bytes, page1: bytes, prf: int = 5, rounds: int = 256000) -> Optional[bytes]:
     """Derive one DB's AES key from the account passphrase (salt = page 1's
-    first 16 bytes) and return it only if it HMAC-verifies. Kept local so this
-    module doesn't depend on cli/mac-key-pbkdf (#32)."""
-    name = PRF_HASHES.get(prf)
-    if not name or len(page1) != PAGE_SIZE:
+    first 16 bytes) and return it only if it HMAC-verifies. Same derivation
+    as the Frida flow (#32), shared via hook_cc_key_frida."""
+    sys.path.insert(0, str(CLI_DIR))
+    from hook_cc_key_frida import derive_db_key as _derive
+    if len(page1) != PAGE_SIZE:
         return None
     try:
-        key = hashlib.pbkdf2_hmac(name, passphrase, page1[:SALT_SIZE], rounds, KEY_SIZE)
+        return _derive(passphrase, page1, prf, rounds)
     except (ValueError, TypeError):
         return None
-    return key if _verify(page1, key) else None
 
 
 def match_candidates(candidates: dict, pending: dict) -> dict:

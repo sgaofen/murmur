@@ -12,6 +12,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { cancelLiveKey, getLiveKeyStatus, installFrida, startLiveKey } from '../data/api';
 import type { LiveKeyStatus } from '../data/api';
 import { PrivateCopyCapture } from './PrivateCopyCapture';
+import { lookupError } from '../data/errorCatalog';
+import { ErrorExplain } from './ErrorExplain';
 
 interface Props {
   /** Keys are saved — run the existing decrypt flow. */
@@ -30,6 +32,7 @@ const DURATIONS = [60, 90, 180];
 const CORE_DBS = ['session/session.db', 'contact/contact.db'];
 
 const TODO: Array<[string, string]> = [
+  ['最快：退出微信（⌘Q）再重新打开并登录', '登录时微信会重新派生全部密钥，通常一次就能全部抓到'],
   ['给任意好友或文件传输助手发一条消息', '解锁会话库和消息库'],
   ['点开几个这次登录后还没点开过的对话，往上翻一翻', '每个消息分库要单独触发'],
   ['打开「通讯录」，点进一两个联系人', '联系人库'],
@@ -41,6 +44,8 @@ export function LiveKeyCapture({ onDecrypt, reason = 'manual', wechatVersion, on
   const [st, setSt] = useState<LiveKeyStatus | null>(null);
   const [seconds, setSeconds] = useState(90);
   const [err, setErr] = useState<string | null>(null);
+  // Stable backend code for `err` (data/errorCatalog.ts); only shown while err is set.
+  const [errCode, setErrCode] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   // Entry point: let the user pick the Frida flow (below) or the Frida-free
   // "private copy" flow (PrivateCopyCapture). null = chooser not answered yet.
@@ -85,6 +90,7 @@ export function LiveKeyCapture({ onDecrypt, reason = 'manual', wechatVersion, on
       const r = await startLiveKey(seconds);
       if (!r.ok) {
         setErr(r.error === 'frida-missing' ? '还没装 Frida，先点上面的安装按钮。' : (r.error || '启动失败'));
+        setErrCode(r.code ?? null);
       }
       await refresh(!!r.complete);
     } catch (e: any) {
@@ -98,7 +104,7 @@ export function LiveKeyCapture({ onDecrypt, reason = 'manual', wechatVersion, on
     setErr(null);
     try {
       const r = await installFrida();
-      if (!r.ok) setErr(r.error || '安装失败');
+      if (!r.ok) { setErr(r.error || '安装失败'); setErrCode(r.code ?? null); }
       await refresh(false);
     } catch (e: any) {
       setErr(e?.message || String(e));
@@ -139,7 +145,7 @@ export function LiveKeyCapture({ onDecrypt, reason = 'manual', wechatVersion, on
             <RoundSummary newCount={job.new.length} matched={matched} total={total}
               missingCore={missingCore} round={job.round} />
           )}
-          {job.phase === 'error' && <JobError error={job.error} log={job.log} />}
+          {job.phase === 'error' && <JobError error={job.error} code={job.code} log={job.log} />}
           {!finished && total > 0 && (
             <div className="et-meta" style={{ marginBottom: 10 }}>
               已有 <strong>{matched}</strong> / {total} 个数据库的密钥{matched > 0 ? '（之前抓到的会保留）' : ''}
@@ -191,6 +197,7 @@ export function LiveKeyCapture({ onDecrypt, reason = 'manual', wechatVersion, on
         }} />
       )}
 
+      {err && <ErrorExplain code={errCode} style={{ marginTop: 10, marginBottom: 0 }} />}
       {err && <div style={{ marginTop: 10, fontSize: 12, color: 'var(--et-rose)' }}>{err}</div>}
 
       {onPaste && !job.running && (
@@ -277,12 +284,13 @@ function Running({ status, matched, total, onStop }: {
   const head =
     job.phase === 'auth' ? '请在系统弹窗里输入开机密码…' :
     job.phase === 'capturing' ? '正在抓取 —— 现在去微信里操作' :
+    job.phase === 'waiting-wechat' ? '微信已退出 —— 重新打开并登录，我会自动接上' :
     '正在挂钩微信…';
   return (
     <div style={{ padding: '8px 0 4px' }}>
       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12 }}>
         <div className="et-h3">{head}</div>
-        {job.phase === 'capturing' && job.remaining != null && (
+        {(job.phase === 'capturing' || job.phase === 'waiting-wechat') && job.remaining != null && (
           <div style={{ fontFamily: 'var(--et-mono)', fontSize: 34, fontWeight: 600, color: 'var(--et-orange)' }}>
             {job.remaining}s
           </div>
@@ -296,12 +304,17 @@ function Running({ status, matched, total, onStop }: {
         {job.new.length > 0 && <>（这轮新增 {job.new.length} 个）</>}
         {job.phase === 'capturing' && <> · 已截获 {job.hits} 次加解密调用</>}
       </div>
+      {job.passphrase_found && (
+        <div className="et-meta" style={{ marginBottom: 10, color: 'var(--et-sage)' }}>
+          ✓ 已截获账号口令，其余数据库的密钥直接推算出来了
+        </div>
+      )}
       {job.new.length > 0 && (
         <div style={{ fontFamily: 'var(--et-mono)', fontSize: 11, color: 'var(--et-ink-soft)', lineHeight: 1.6, marginBottom: 10 }}>
           {job.new.slice(-6).map(n => <div key={n}>✓ {n}</div>)}
         </div>
       )}
-      {job.phase === 'capturing' && <TodoList />}
+      {(job.phase === 'capturing' || job.phase === 'waiting-wechat') && <TodoList />}
       <button onClick={onStop} style={secondaryBtn}>提前结束这一轮</button>
     </div>
   );
@@ -335,7 +348,8 @@ function RoundSummary({ newCount, matched, total, missingCore, round }: {
   );
 }
 
-function JobError({ error, log }: { error: string | null; log: string }) {
+function JobError({ error, code, log }: { error: string | null; code?: string | null; log: string }) {
+  const known = lookupError(code) !== null;
   const msg =
     error === 'frida-missing' ? '找不到 Frida（后端进程里 import 失败）。' :
     error === 'attach-denied' ? '没能挂到微信进程上：请先在引导里做「重签名」，并确认微信是重签名之后重新打开的。' :
@@ -344,11 +358,13 @@ function JobError({ error, log }: { error: string | null; log: string }) {
     error === 'no-dbs' ? '没找到微信的加密数据库，请确认微信已经登录并完成首次同步。' :
     `抓取失败：${error || '未知错误'}`;
   return (
-    <div style={{
+    <div style={known ? { marginBottom: 12 } : {
       padding: '12px 14px', background: 'rgba(196,90,63,0.12)', border: '0.5px solid rgba(196,90,63,0.4)',
       borderRadius: 8, marginBottom: 12,
     }}>
-      <div style={{ fontSize: 13, color: 'var(--et-rose)', fontWeight: 600 }}>{msg}</div>
+      {known
+        ? <ErrorExplain code={code} style={{ marginBottom: 0 }} />
+        : <div style={{ fontSize: 13, color: 'var(--et-rose)', fontWeight: 600 }}>{msg}</div>}
       {log && (
         <details style={{ marginTop: 6 }}>
           <summary style={{ cursor: 'pointer', fontSize: 11, color: 'var(--et-mute)' }}>查看日志</summary>

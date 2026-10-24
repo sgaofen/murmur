@@ -25,14 +25,20 @@ from __future__ import annotations
 
 import hashlib
 import hmac as hmac_mod
+import re
 import sys
 from pathlib import Path
 
-try:
-    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-    from cryptography.hazmat.backends import default_backend
-except ImportError as e:
-    raise SystemExit("missing dep: cryptography (pip install cryptography)") from e
+
+def _load_aes():
+    """Import the AES primitives lazily so key verification (pure hashlib/hmac)
+    works — and is testable — without the `cryptography` package installed."""
+    try:
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        from cryptography.hazmat.backends import default_backend
+    except ImportError as e:
+        raise SystemExit("missing dep: cryptography (pip install cryptography)") from e
+    return Cipher, algorithms, modes, default_backend
 
 
 # QQNT cipher constants. Both SHA1 and SHA512 HMAC variants exist in the wild:
@@ -88,13 +94,19 @@ def _verify_with_variant(stripped: bytes, passphrase: bytes,
     return hmac_mod.compare_digest(m.digest()[:hmac_size], stored_hmac)
 
 
-def detect_cipher_variant(db_path: Path, passphrase: str) -> tuple[str, int, int] | None:
-    """Identify which QQNT cipher variant this DB uses with this passphrase.
-    Returns (hmac_hash, hmac_size, reserve) or None if no variant matches."""
-    raw = db_path.read_bytes()
-    if len(raw) < HEADER_PAGE_BYTES + PAGE_SIZE:
+def read_first_page(db_path: Path) -> bytes | None:
+    """Return page 1 (after stripping the 1024-byte QQNT header), or None if
+    the file is too small. Reads only the bytes we need, not the whole DB."""
+    with open(db_path, "rb") as f:
+        head = f.read(HEADER_PAGE_BYTES + PAGE_SIZE)
+    if len(head) < HEADER_PAGE_BYTES + PAGE_SIZE:
         return None
-    stripped = raw[HEADER_PAGE_BYTES:HEADER_PAGE_BYTES + PAGE_SIZE]
+    return head[HEADER_PAGE_BYTES:]
+
+
+def detect_variant_on_page(stripped: bytes, passphrase: str) -> tuple[str, int, int] | None:
+    """Same as detect_cipher_variant but on an already-read page 1, so callers
+    trying many candidate keys don't re-read the file each time."""
     pp = passphrase.encode("utf-8")
     for label, hmac_hash, hmac_size, reserve in _QQNT_CIPHER_VARIANTS:
         try:
@@ -103,6 +115,15 @@ def detect_cipher_variant(db_path: Path, passphrase: str) -> tuple[str, int, int
         except Exception:
             continue
     return None
+
+
+def detect_cipher_variant(db_path: Path, passphrase: str) -> tuple[str, int, int] | None:
+    """Identify which QQNT cipher variant this DB uses with this passphrase.
+    Returns (hmac_hash, hmac_size, reserve) or None if no variant matches."""
+    stripped = read_first_page(db_path)
+    if stripped is None:
+        return None
+    return detect_variant_on_page(stripped, passphrase)
 
 
 def verify_passphrase(db_path: Path, passphrase: str) -> bool:
@@ -132,6 +153,7 @@ def decrypt_db(src: Path, dst: Path, passphrase: str) -> int:
         raise WrongKeyError("passphrase failed HMAC on page 1 — wrong key")
     hmac_hash, hmac_size, reserve = variant
 
+    Cipher, algorithms, modes, default_backend = _load_aes()
     salt = stripped[:IV_SIZE]
     aes_key, hmac_key = _derive_keys(passphrase.encode("utf-8"), salt)
     body_end = PAGE_SIZE - reserve
@@ -217,27 +239,205 @@ def decrypt_profile(src_dir: Path, dst_dir: Path, passphrase: str) -> dict:
     return out
 
 
+# --- key candidates: filtering + HMAC verification ---
+#
+# qq_get_key.ps1 breakpoints the function that references the
+# "nt_sqlite3_key_v2: db=%p zDb=%s" log string. On some wrapper.node builds that
+# function is the real sqlite3_key_v2 (pKey in R8), on others it is a logging
+# wrapper where R8 is just a leftover (often zDb or the login.db key) — see
+# issue #5. So the script no longer trusts one register: it reports every
+# plausible ASCII string it sees (RCX/RDX/R8/R9 + stack args) across many hits,
+# and we keep only the candidate that passes the page-1 HMAC of nt_msg.db.
+
+# login.db is encrypted with this global constant; it is hit first on startup
+# and is never the message-DB key (QQBackup's qq_key_extractor.py skips it too).
+LOGIN_DB_FIXED_KEY = "BD156D6710D54D8782F4"
+QQ_KEY_LEN = 16
+MAX_CANDIDATE_LEN = 64
+CANDIDATE_MARKER = "MURMUR_KEY_CANDIDATE"
+_HEX20_RE = re.compile(r"^[0-9A-Fa-f]{20}$")
+
+
+def candidate_skip_reason(value: str) -> str | None:
+    """Why a captured string can't be the message-DB passphrase, or None if it
+    is worth an HMAC check."""
+    if not value:
+        return "空字符串"
+    if value == LOGIN_DB_FIXED_KEY or (len(value) >= 8 and LOGIN_DB_FIXED_KEY.startswith(value)):
+        return "login.db 的全局固定 key"
+    if _HEX20_RE.match(value):
+        return "20 位十六进制（数据库名 zDb）"
+    if any(not (0x20 <= ord(c) < 0x7F) for c in value):
+        return "含不可打印字符"
+    if len(value) > MAX_CANDIDATE_LEN:
+        return "长度不合理"
+    return None
+
+
+def _parse_marker_line(line: str) -> dict | None:
+    """Parse `MURMUR_KEY_CANDIDATE source=R8 len=16 hex=4142...` -> {source, value}."""
+    idx = line.find(CANDIDATE_MARKER)
+    if idx < 0:
+        return None
+    fields = {}
+    for tok in line[idx + len(CANDIDATE_MARKER):].split():
+        if "=" in tok:
+            k, v = tok.split("=", 1)
+            fields[k] = v
+    hx = fields.get("hex", "")
+    try:
+        value = bytes.fromhex(hx).decode("ascii")
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return {"source": fields.get("source", "?"), "value": value}
+
+
+def parse_key_candidates(log: str) -> list[dict]:
+    """Extract all key candidates the PowerShell script printed, de-duplicated
+    in first-seen order. Also accepts the legacy `找到密钥: <key>` line from
+    older copies of the script."""
+    out: list[dict] = []
+    seen: set = set()
+    for raw in (log or "").splitlines():
+        line = raw.strip()
+        cand = _parse_marker_line(line)
+        if cand is None:
+            for prefix in ("找到密钥:", "Key found:"):
+                if line.startswith(prefix):
+                    cand = {"source": "legacy", "value": line[len(prefix):].strip()}
+                    break
+        if cand is None or cand["value"] in seen:
+            continue
+        seen.add(cand["value"])
+        out.append(cand)
+    return out
+
+
+def filter_key_candidates(cands: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Split raw candidates into (to_try, skipped). Strings longer than 16 chars
+    also contribute their first 16 chars (the passphrase is 16 bytes and the
+    script may have read past it when nKey was unknown). 16-char candidates
+    are tried first."""
+    to_try: list[dict] = []
+    skipped: list[dict] = []
+    seen: set = set()
+
+    def _add(source: str, value: str) -> str | None:
+        if value in seen:
+            return None
+        seen.add(value)
+        reason = candidate_skip_reason(value)
+        if reason:
+            skipped.append({"source": source, "value": value, "reason": reason})
+        else:
+            to_try.append({"source": source, "value": value})
+        return reason
+
+    for c in cands:
+        reason = _add(c["source"], c["value"])
+        # Prefixes of known non-keys (login.db constant, zDb hex names) are
+        # never tried; overly long strings still get their 16-char prefix.
+        if len(c["value"]) > QQ_KEY_LEN and reason in (None, "长度不合理"):
+            _add(c["source"] + "[:16]", c["value"][:QQ_KEY_LEN])
+    to_try.sort(key=lambda c: 0 if len(c["value"]) == QQ_KEY_LEN else 1)
+    return to_try, skipped
+
+
+def _mask(value: str) -> str:
+    return (value[:3] + "…") if len(value) > 3 else "…"
+
+
+def summarize_candidates(to_try: list[dict], skipped: list[dict]) -> list[dict]:
+    """Masked candidate list, safe to return to the UI / paste into an issue."""
+    rows = [{"source": c["source"], "len": len(c["value"]), "preview": _mask(c["value"]),
+             "status": "hmac-failed"} for c in to_try]
+    rows += [{"source": c["source"], "len": len(c["value"]), "preview": _mask(c["value"]),
+              "status": "skipped", "reason": c["reason"]} for c in skipped]
+    return rows
+
+
+def select_verified_key(cands: list[dict], dbs: list) -> dict:
+    """Try every plausible candidate against page 1 of each DB in `dbs`
+    (a list of (tag, Path) — tag is usually the QQ number).
+
+    Returns {ok, key, tag, db, variant, candidates, error}. ok is True only
+    when some candidate passes HMAC verification."""
+    to_try, skipped = filter_key_candidates(cands)
+    pages = []
+    for tag, path in dbs:
+        try:
+            page = read_first_page(Path(path))
+        except OSError:
+            page = None
+        if page is not None:
+            pages.append((tag, Path(path), page))
+
+    for c in to_try:
+        for tag, path, page in pages:
+            variant = detect_variant_on_page(page, c["value"])
+            if variant is not None:
+                rows = summarize_candidates([x for x in to_try if x is not c], skipped)
+                rows.insert(0, {"source": c["source"], "len": len(c["value"]),
+                                "preview": _mask(c["value"]), "status": "verified"})
+                return {"ok": True, "key": c["value"], "tag": tag, "db": str(path),
+                        "variant": variant[0], "candidates": rows, "error": None}
+
+    return {"ok": False, "key": None, "tag": None, "db": None, "variant": None,
+            "candidates": summarize_candidates(to_try, skipped),
+            "error": _no_match_error(len(cands), to_try, skipped, len(pages))}
+
+
+def _no_match_error(n_raw: int, to_try: list[dict], skipped: list[dict], n_dbs: int) -> str:
+    next_steps = (
+        "下一步：① 重新点「抓 key」，在弹出的 QQ 窗口里登录你要导入的那个 QQ 号，"
+        "等聊天列表完全加载出来后再等 20 秒左右，脚本会自动结束；"
+        "② 如果还是失败，请到 https://github.com/sgaofen/murmur/issues/5 反馈 QQ 版本号和日志"
+        "（日志里的候选值可能就是密钥，贴之前请打码）。"
+    )
+    if n_dbs == 0:
+        return ("没有找到可读的 nt_msg.db，无法验证抓到的 key。"
+                "请先确认 QQ 数据目录（<QQ号>/nt_qq/nt_db/nt_msg.db）能被找到。")
+    if n_raw == 0:
+        return ("抓 key 脚本没有输出任何候选值：断点可能没有命中（QQ 没有登录完成就超时，"
+                "或者这个版本的 wrapper.node 结构变了）。" + next_steps)
+    reasons: dict = {}
+    for s in skipped:
+        reasons[s["reason"]] = reasons.get(s["reason"], 0) + 1
+    parts = [f"抓到 {n_raw} 个候选值，但没有一个能解开 nt_msg.db。"]
+    if skipped:
+        detail = "、".join(f"{r} ×{n}" for r, n in reasons.items())
+        parts.append(f"其中 {len(skipped)} 个是已知的非消息库字符串，直接跳过（{detail}）。")
+    if to_try:
+        parts.append(f"另外 {len(to_try)} 个在 nt_msg.db 第 1 页做 HMAC 校验都没通过"
+                     "（已试 HMAC-SHA1 reserve=48 和 HMAC-SHA512 reserve=64）。")
+    parts.append("这通常说明脚本结束时 QQ 还没打开消息库，或者登录的不是这个 QQ 号。")
+    return "".join(parts) + next_steps
+
+
+def verify_key_for_db(db_path: Path, key: str) -> tuple[bool, str | None]:
+    """Check a user-supplied / captured key against page 1 of `db_path`.
+    Returns (ok, chinese_error_or_None). Used by /api/qq/save-key so we never
+    persist a key that would fail at decrypt time."""
+    key = (key or "").strip()
+    reason = candidate_skip_reason(key)
+    if reason:
+        return False, f"这个 key 不是消息库密钥（{reason}）。"
+    try:
+        page = read_first_page(Path(db_path))
+    except OSError as e:
+        return False, f"读不了 {db_path}：{e}"
+    if page is None:
+        return False, f"{db_path} 太小，不像 QQ NT 数据库。"
+    if detect_variant_on_page(page, key) is None:
+        return False, ("key 校验失败：用它对 nt_msg.db 第 1 页做 HMAC 校验不通过"
+                       "（已试 HMAC-SHA1 reserve=48 和 HMAC-SHA512 reserve=64）。"
+                       "请确认这个 key 属于这个 QQ 号，或者重新抓 key。")
+    return True, None
+
+
 # --- key extraction (calls the bundled PowerShell script) ---
 
-def extract_key_via_powershell(timeout: int = 180) -> dict:
-    """Run the bundled qq_get_key.ps1 to capture the QQNT SQLCipher passphrase.
-
-    Returns: {ok: bool, key: str | None, log: str, error: str | None}.
-
-    The script:
-      1. Auto-detects QQNT install + wrapper.node
-      2. Statically parses the PE to find the sqlite3_key_v2 function RVA
-         (string-reference based, so version-independent in the 9.9.x family)
-      3. Spawns QQ.exe with a debugger attached and breakpoints the function
-      4. Waits for user to log in; key is captured at the breakpoint
-      5. Detaches + terminates QQ
-    """
-    if sys.platform != "win32":
-        return {"ok": False, "key": None, "log": "", "error": "Windows-only"}
-
-    import subprocess as _sp
-
-    # Resolve path to bundled PowerShell script.
+def _find_ps_script() -> Path:
     cli_dir = Path(__file__).resolve().parent
     ps_script = cli_dir / "native" / "qq_get_key.ps1"
     if not ps_script.exists():
@@ -247,49 +447,96 @@ def extract_key_via_powershell(timeout: int = 180) -> dict:
             cand = Path(meipass) / "native" / "qq_get_key.ps1"
             if cand.exists():
                 ps_script = cand
-    if not ps_script.exists():
-        return {"ok": False, "key": None, "log": "", "error": f"qq_get_key.ps1 not found at {ps_script}"}
+    return ps_script
 
+
+def _as_text(x) -> str:
+    if x is None:
+        return ""
+    if isinstance(x, bytes):
+        return x.decode("utf-8", errors="replace")
+    return x
+
+
+def extract_key_via_powershell(timeout: int = 240, verify_dbs: list | None = None) -> dict:
+    """Run the bundled qq_get_key.ps1, collect every key candidate it reports,
+    and return the one that passes HMAC verification against `verify_dbs`
+    (list of (tag, nt_msg.db Path)).
+
+    Returns: {ok, key, qq, variant, candidates, log, error}.
+
+    The script launches QQ under a debugger, breakpoints the
+    nt_sqlite3_key_v2-referencing function, and keeps collecting candidates
+    after the first hit (the first hits are login.db's fixed key) until a
+    settle window or its own timeout elapses, then terminates QQ.
+    """
+    def _fail(error: str, log: str = "", candidates=None) -> dict:
+        return {"ok": False, "key": None, "qq": None, "variant": None,
+                "candidates": candidates or [], "log": log[-3000:], "error": error}
+
+    if sys.platform != "win32":
+        return _fail("Windows-only")
+
+    import subprocess as _sp
+
+    ps_script = _find_ps_script()
+    if not ps_script.exists():
+        return _fail(f"qq_get_key.ps1 not found at {ps_script}")
+
+    # Leave the script headroom to terminate QQ and print its candidates before
+    # our own subprocess timeout fires.
+    script_timeout = max(30, int(timeout) - 30)
     cmd = [
         "powershell.exe", "-NoProfile", "-NonInteractive",
         "-ExecutionPolicy", "Bypass",
         "-File", str(ps_script),
+        "-TimeoutSeconds", str(script_timeout),
     ]
 
+    timed_out = False
     try:
         r = _sp.run(cmd, capture_output=True, text=True, timeout=timeout,
-                     encoding="utf-8", errors="replace")
-    except _sp.TimeoutExpired:
-        return {"ok": False, "key": None, "log": "", "error": f"timeout after {timeout}s — did the user log in?"}
+                    encoding="utf-8", errors="replace")
+        out, err = r.stdout, r.stderr
+    except _sp.TimeoutExpired as e:
+        # Candidates are printed as they are found, so partial output is still useful.
+        timed_out = True
+        out, err = e.stdout, e.stderr
     except Exception as e:
-        return {"ok": False, "key": None, "log": "", "error": f"{type(e).__name__}: {e}"}
+        return _fail(f"{type(e).__name__}: {e}")
 
-    log = (r.stdout or "") + ("\n" + r.stderr if r.stderr else "")
-    # Parse the key out of the script's output. The exact line is:
-    #   找到密钥: <16 chars>
-    # which the script also emits as part of a final result table.
-    key = None
-    for line in log.splitlines():
-        line = line.strip()
-        # Robust: match either "找到密钥" or "Key found" or the trailing 16-char field
-        if line.startswith("找到密钥:") or line.startswith("Key found:"):
-            key = line.split(":", 1)[1].strip()
-            break
-    # Fall back: scan for a 16-char ASCII passphrase token in the trailing table
-    if not key:
-        for line in log.splitlines():
-            tokens = line.strip().split()
-            if len(tokens) >= 1 and len(tokens[-1]) == 16 and all(0x20 <= ord(c) < 0x7f for c in tokens[-1]):
-                cand = tokens[-1]
-                # Sanity: it should NOT be all digits or all letters (real keys mix)
-                if any(not c.isalnum() for c in cand):
-                    key = cand
-                    break
+    out, err = _as_text(out), _as_text(err)
+    log = out + ("\n" + err if err else "")
+    return finish_extraction(log, list(verify_dbs or []), timed_out=timed_out, timeout=timeout)
 
-    if key:
-        return {"ok": True, "key": key, "log": log[-3000:], "error": None}
-    return {"ok": False, "key": None, "log": log[-3000:],
-            "error": "未捕获到密钥。请确认在 QQ 弹出窗口里完成扫码登录后再等几秒。"}
+
+def verify_dbs_for_profiles(profiles, prefer_qq: str | None = None) -> list:
+    """[(qq_number, nt_msg.db path)] for every discovered profile whose
+    nt_msg.db exists, with `prefer_qq` first so its match wins."""
+    out = []
+    for p in profiles:
+        db = Path(p.nt_db_dir) / "nt_msg.db"
+        if db.exists():
+            out.append((p.qq_number, db))
+    if prefer_qq:
+        out.sort(key=lambda t: 0 if t[0] == prefer_qq else 1)
+    return out
+
+
+def finish_extraction(log: str, verify_dbs: list, *, timed_out: bool = False,
+                      timeout: int = 0) -> dict:
+    """Parse the script output and HMAC-verify the candidates. Split out of
+    extract_key_via_powershell so it is testable off Windows."""
+    cands = parse_key_candidates(log)
+    res = select_verified_key(cands, verify_dbs)
+    if res["ok"]:
+        return {"ok": True, "key": res["key"], "qq": res["tag"], "variant": res["variant"],
+                "candidates": res["candidates"], "log": log[-3000:], "error": None}
+    error = res["error"]
+    if timed_out:
+        error = f"抓 key 超时（{timeout} 秒）。" + error
+    return {"ok": False, "key": None, "qq": None, "variant": None,
+            "candidates": res["candidates"], "log": log[-3000:], "error": error}
 
 
 if __name__ == "__main__":
@@ -297,7 +544,10 @@ if __name__ == "__main__":
     import json
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("extract-key")
+    spk = sub.add_parser("extract-key")
+    spk.add_argument("--db", type=Path, action="append", default=[],
+                     help="nt_msg.db to verify candidates against (default: all discovered profiles)")
+    spk.add_argument("--qq", default=None, help="prefer this QQ number's nt_msg.db")
     spd = sub.add_parser("decrypt")
     spd.add_argument("src_db", type=Path)
     spd.add_argument("dst_db", type=Path)
@@ -309,7 +559,12 @@ if __name__ == "__main__":
     args = p.parse_args()
 
     if args.cmd == "extract-key":
-        r = extract_key_via_powershell()
+        if args.db:
+            dbs = [(str(d), d) for d in args.db]
+        else:
+            import qq_paths as _qpaths
+            dbs = verify_dbs_for_profiles(_qpaths.discover_qq_profiles(), args.qq)
+        r = extract_key_via_powershell(verify_dbs=dbs)
         print(json.dumps(r, ensure_ascii=False, indent=2))
         sys.exit(0 if r["ok"] else 1)
     if args.cmd == "decrypt":
