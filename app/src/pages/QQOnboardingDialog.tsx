@@ -8,15 +8,58 @@
  * Flow: detect → pick-account → extract-key → decrypting → done
  *   → setActiveProfile(qq, qq_number) → reload → user lands on Home with
  *     the QQ data behind every page.
+ *
+ * macOS adds a re-sign step and runs the lldb capture in the background
+ * (the user logs in to QQ while it runs), shown as a 5-step stepper:
+ *   数据目录 → 重签 QQ → 登录 QQ → 抓 key → 解密
  */
 import { useEffect, useRef, useState } from 'react';
 import {
-  cancelQQScan, decryptQQ, extractQQKey, getQQProfiles, getQQScanStatus,
-  saveQQKey, saveQQRoot, setActiveProfile, startQQScan,
+  cancelQQMacExtract, cancelQQScan, decryptQQ, extractQQKey, getQQMacExtractStatus,
+  getQQProfiles, getQQScanStatus, openFullDiskAccess, resignQQ, saveQQKey, saveQQRoot,
+  setActiveProfile, startQQMacExtract, startQQScan,
 } from '../data/api';
-import type { QQProfile, QQProfilesResponse, QQScanState } from '../data/api';
+import type { QQMacExtractState, QQProfile, QQProfilesResponse, QQScanState } from '../data/api';
 
-type QQPhase = 'detect' | 'pick-account' | 'extract-key' | 'decrypting' | 'done' | 'no-data' | 'error';
+type QQPhase = 'detect' | 'pick-account' | 'resign' | 'extract-key' | 'decrypting' | 'done' | 'no-data' | 'error';
+
+const MAC_STEPS = ['数据目录', '重签 QQ', '登录 QQ', '抓 key', '解密'];
+
+// lldb capture stages (MURMUR_STATUS lines) → what the user should see.
+const MAC_STAGE_TEXT: Record<string, string> = {
+  starting: '准备中…',
+  quitting: '正在退出 QQ…',
+  waiting: '等待 QQ 启动…',
+  launched: 'QQ 正在启动…',
+  attached: '调试器已附加，等 QQ 加载 wrapper.node…',
+  module: '找到 wrapper.node，正在定位 nt_sqlite3_key_v2…',
+  bp_addr: '正在下断点…',
+  bp_set: '断点已就绪 —— 请在 QQ 窗口里登录',
+  ready: '断点已就绪 —— 请在 QQ 窗口里登录',
+  hit: 'QQ 正在打开数据库，收集候选 key…',
+  key_seen: '抓到候选 key，再多收集几秒…',
+  finishing: '收尾中，调试器正在从 QQ 分离…',
+  done: '正在校验 key…',
+};
+
+/** Mac account ids are an opaque nt_qq_<hash> suffix; Windows ids are QQ numbers. */
+function qqAccountLabel(id: string): string {
+  return /^\d+$/.test(id) ? `QQ ${id}` : `QQ 账号 ${id.slice(0, 8)}${id.length > 8 ? '…' : ''}`;
+}
+
+function macStepIndex(phase: QQPhase, capture: QQMacExtractState | null, errStep: number): number {
+  switch (phase) {
+    case 'detect': case 'no-data': case 'pick-account': return 0;
+    case 'resign': return 1;
+    case 'extract-key': {
+      const st = capture?.stage || '';
+      return ['hit', 'key_seen', 'finishing', 'done'].includes(st) ? 3 : 2;
+    }
+    case 'decrypting': return 4;
+    case 'done': return 5;
+    default: return errStep;
+  }
+}
 
 interface Props {
   open: boolean;
@@ -35,16 +78,30 @@ export function QQOnboardingDialog({ open, onClose, onDone }: Props) {
   const [manualPath, setManualPath] = useState('');
   const [scanState, setScanState] = useState<QQScanState | null>(null);
   const scanPollRef = useRef<number | null>(null);
+  // macOS-only state
+  const [macCapture, setMacCapture] = useState<QQMacExtractState | null>(null);
+  const [resignBusy, setResignBusy] = useState(false);
+  const [resignLog, setResignLog] = useState<string[]>([]);
+  const [errStep, setErrStep] = useState(0);
+  const capturePollRef = useRef<number | null>(null);
+  const isMac = data?.os === 'macos';
+
+  // Next phase once an account is chosen: Mac needs QQ.app re-signed first.
+  function phaseAfterPick(d: QQProfilesResponse | null): QQPhase {
+    if (d?.os === 'macos' && d.mac?.debuggable !== true) return 'resign';
+    return 'extract-key';
+  }
 
   useEffect(() => {
     if (!open) return;
     setPhase('detect'); setErrMsg(null); setActiveQQ(null);
+    setMacCapture(null); setResignLog([]);
     (async () => {
       try {
         const d = await getQQProfiles();
         setData(d);
         if (d.supported === false) {
-          setErrMsg(d.error || 'QQ 导入目前只支持 Windows。Mac 版暂时可以继续使用微信数据，QQ for Mac 适配还在开发中。');
+          setErrMsg(d.error || 'QQ 导入目前只支持 Windows 和 macOS。');
           setPhase('error');
           return;
         }
@@ -61,7 +118,7 @@ export function QQOnboardingDialog({ open, onClose, onDone }: Props) {
         }
         if (d.profiles.length === 1) {
           setActiveQQ(d.profiles[0].qq_number);
-          setPhase('extract-key');
+          setPhase(phaseAfterPick(d));
         } else {
           setPhase('pick-account');
         }
@@ -73,19 +130,27 @@ export function QQOnboardingDialog({ open, onClose, onDone }: Props) {
 
   // Stop polling on unmount or close
   useEffect(() => {
-    if (!open && scanPollRef.current) {
-      window.clearInterval(scanPollRef.current);
-      scanPollRef.current = null;
-    }
-    return () => {
+    const stopAll = () => {
       if (scanPollRef.current) {
         window.clearInterval(scanPollRef.current);
         scanPollRef.current = null;
       }
+      if (capturePollRef.current) {
+        window.clearInterval(capturePollRef.current);
+        capturePollRef.current = null;
+      }
     };
+    if (!open) stopAll();
+    return stopAll;
   }, [open]);
 
   if (!open) return null;
+
+  function fail(msg: string, step: number) {
+    setErrMsg(msg);
+    setErrStep(step);
+    setPhase('error');
+  }
 
   async function refetchProfiles(savedRoot?: string) {
     try {
@@ -94,13 +159,15 @@ export function QQOnboardingDialog({ open, onClose, onDone }: Props) {
       setSearchRoots(d.search_roots || []);
       if (d.profiles.length === 0) {
         setErrMsg(savedRoot
-          ? `已保存「${savedRoot}」但里面没找到 <QQ号>/nt_qq/nt_db/nt_msg.db。请确认你粘的是 Tencent Files 文件夹（不是 nt_db）。`
+          ? (d.os === 'macos'
+            ? `已保存「${savedRoot}」但里面没找到 nt_qq_<编号>/nt_db/nt_msg.db。请确认你粘的是 QQ 数据目录（里面有 nt_qq_ 开头的文件夹）。`
+            : `已保存「${savedRoot}」但里面没找到 <QQ号>/nt_qq/nt_db/nt_msg.db。请确认你粘的是 Tencent Files 文件夹（不是 nt_db）。`)
           : '还是没找到 QQ 数据，再选个路径试试。');
         return;
       }
       if (d.profiles.length === 1) {
         setActiveQQ(d.profiles[0].qq_number);
-        setPhase('extract-key');
+        setPhase(phaseAfterPick(d));
       } else {
         setPhase('pick-account');
       }
@@ -192,26 +259,102 @@ export function QQOnboardingDialog({ open, onClose, onDone }: Props) {
         setPhase('error');
         return;
       }
-      setKeyHex(r.key);
-      const saved = await saveQQKey(activeQQ, r.key);
-      if (!saved.ok) {
-        setErrMsg(saved.error || 'key 校验失败，未保存');
-        setPhase('error');
-        return;
-      }
-      setPhase('decrypting');
-      setProgress(`抓到 key (${r.key.slice(0, 4)}…)，正在解密 6 个数据库…`);
-      const dec = await decryptQQ(activeQQ, r.key);
-      if (!dec.ok) {
-        setErrMsg(dec.error || '解密失败');
-        setPhase('error');
-        return;
-      }
-      setPhase('done');
+      await saveAndDecrypt(activeQQ, r.key);
     } catch (e: any) {
       setErrMsg(e?.message || String(e));
       setPhase('error');
     }
+  }
+
+  // Shared tail of both platforms: persist the HMAC-verified key, decrypt.
+  async function saveAndDecrypt(qq: string, key: string) {
+    setKeyHex(key);
+    const saved = await saveQQKey(qq, key);
+    if (!saved.ok) {
+      fail(saved.error || 'key 校验失败，未保存', 3);
+      return;
+    }
+    setPhase('decrypting');
+    setProgress(`抓到 key (${key.slice(0, 4)}…)，正在解密 6 个数据库…`);
+    const dec = await decryptQQ(qq, key);
+    if (!dec.ok) {
+      fail(dec.error || '解密失败', 4);
+      return;
+    }
+    setPhase('done');
+  }
+
+  // ---- macOS ----
+
+  async function doResign() {
+    setResignBusy(true);
+    setErrMsg(null);
+    setResignLog(['正在退出 QQ 并重签名，稍后会弹出 macOS 授权窗口…']);
+    try {
+      const r = await resignQQ();
+      setResignLog(r.log || []);
+      if (!r.ok) {
+        setErrMsg([r.error || '重签名失败', r.stderr].filter(Boolean).join('\n\n'));
+        return;
+      }
+      setData(d => (d && d.mac ? { ...d, mac: { ...d.mac, debuggable: true } } : d));
+      setProgress('');
+      setPhase('extract-key');
+    } catch (e: any) {
+      setErrMsg(e?.message || String(e));
+    } finally {
+      setResignBusy(false);
+    }
+  }
+
+  function stopCapturePoll() {
+    if (capturePollRef.current) {
+      window.clearInterval(capturePollRef.current);
+      capturePollRef.current = null;
+    }
+  }
+
+  async function startMacExtract() {
+    if (!activeQQ) return;
+    const qq = activeQQ;
+    setErrMsg(null);
+    setMacCapture({ running: true, stage: 'starting', hits: 0, started_at: null, finished_at: null, result: null });
+    try {
+      const r = await startQQMacExtract(qq, 240);
+      if (!r.ok) {
+        fail(r.error || '启动抓 key 失败', 2);
+        return;
+      }
+    } catch (e: any) {
+      fail(e?.message || String(e), 2);
+      return;
+    }
+    stopCapturePoll();
+    capturePollRef.current = window.setInterval(async () => {
+      let s: QQMacExtractState;
+      try {
+        s = await getQQMacExtractStatus();
+      } catch {
+        return; // transient — keep polling
+      }
+      setMacCapture(s);
+      if (s.running || !s.result) return;
+      stopCapturePoll();
+      const res = s.result;
+      if (!res.ok || !res.key) {
+        fail(res.error || '抓 key 失败', 3);
+        return;
+      }
+      try {
+        await saveAndDecrypt(qq, res.key);
+      } catch (e: any) {
+        fail(e?.message || String(e), 4);
+      }
+    }, 1000);
+  }
+
+  async function cancelMacExtract() {
+    try { await cancelQQMacExtract(); } catch {/* ignore — poll picks up the final state */}
   }
 
   async function finish() {
@@ -239,15 +382,17 @@ export function QQOnboardingDialog({ open, onClose, onDone }: Props) {
           <div className="et-h1" style={{ color: 'var(--et-ink)', marginTop: 8, fontSize: 30 }}>
             {phase === 'detect' && '正在检测 QQ…'}
             {phase === 'pick-account' && '选择要导入的 QQ 账号'}
-            {phase === 'extract-key' && '抓 QQ 数据库密钥'}
+            {phase === 'resign' && '重签 QQ，允许调试器附加'}
+            {phase === 'extract-key' && (isMac ? '登录 QQ 并抓数据库密钥' : '抓 QQ 数据库密钥')}
             {phase === 'decrypting' && '正在解密…'}
             {phase === 'done' && '✓ QQ 数据已就绪'}
             {phase === 'no-data' && '没找到 QQ 数据'}
             {phase === 'error' && '出了点问题'}
           </div>
+          {isMac && <MacStepper active={macStepIndex(phase, macCapture, errStep)} failed={phase === 'error'} />}
         </div>
-        <div style={{ padding: '14px 32px 28px' }}>
-          {phase === 'detect' && <Spinner text="读取 Tencent Files 目录…" />}
+        <div style={{ padding: '14px 32px 28px', maxHeight: '70vh', overflow: 'auto' }}>
+          {phase === 'detect' && <Spinner text="读取 QQ 数据目录…" />}
 
           {phase === 'pick-account' && data && (
             <>
@@ -257,15 +402,20 @@ export function QQOnboardingDialog({ open, onClose, onDone }: Props) {
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {data.profiles.map(p => (
                   <button key={p.qq_number}
-                    onClick={() => { setActiveQQ(p.qq_number); setPhase('extract-key'); }}
+                    onClick={() => { setActiveQQ(p.qq_number); setPhase(phaseAfterPick(data)); }}
                     style={accountBtn}>
                     <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--et-ink)' }}>
-                      🐧 QQ {p.qq_number}
+                      🐧 {qqAccountLabel(p.qq_number)}
                     </div>
                     <div style={{ fontSize: 11, color: 'var(--et-mute)', marginTop: 2 }}>
                       {p.has_decrypted_data ? '已解密' : '未解密'}
                       {p.has_saved_key && ' · 已保存 key'}
                     </div>
+                    {isMac && (
+                      <div style={{ fontSize: 10.5, color: 'var(--et-faint)', marginTop: 2, fontFamily: 'var(--et-mono)', wordBreak: 'break-all' }}>
+                        {p.encrypted_root}
+                      </div>
+                    )}
                   </button>
                 ))}
               </div>
@@ -274,8 +424,19 @@ export function QQOnboardingDialog({ open, onClose, onDone }: Props) {
 
           {phase === 'no-data' && (
             <>
+              {isMac && data?.tcc_blocked && (
+                <div style={riskBox}>
+                  <strong>macOS 拦住了 QQ 的数据目录。</strong>QQ 的数据在
+                  <code> ~/Library/Containers/com.tencent.qq</code> 里，读它需要权限：在「系统设置 → 隐私与安全性 → 完全磁盘访问」给 Murmur 打勾，然后<strong>完全退出 Murmur 再打开</strong>。
+                  <button onClick={() => { openFullDiskAccess().catch(() => {/* ignore */}); }} style={{ ...secondaryBtn, marginTop: 10 }}>
+                    打开系统设置 → 完全磁盘访问
+                  </button>
+                </div>
+              )}
               <div className="et-serif" style={{ fontSize: 14, lineHeight: 1.7, marginBottom: 12 }}>
-                Murmur 在以下位置没找到 <code>&lt;QQ号&gt;/nt_qq/nt_db/nt_msg.db</code>：
+                {isMac
+                  ? <>Murmur 在以下位置没找到 <code>nt_qq_&lt;编号&gt;/nt_db/nt_msg.db</code>：</>
+                  : <>Murmur 在以下位置没找到 <code>&lt;QQ号&gt;/nt_qq/nt_db/nt_msg.db</code>：</>}
               </div>
               <div style={{
                 padding: '10px 12px', background: 'var(--et-paper-2)',
@@ -290,14 +451,18 @@ export function QQOnboardingDialog({ open, onClose, onDone }: Props) {
 
               <div className="et-h3" style={{ marginBottom: 6, fontSize: 14 }}>方法 A：手动粘贴路径</div>
               <div className="et-meta" style={{ marginBottom: 8 }}>
-                打开 QQ → 设置 → 通用 → 聊天记录 → 数据保存位置，把那个路径复制过来：
+                {isMac
+                  ? '在 Finder 里按 ⌘⇧G 打开 QQ 的数据目录（里面有 nt_qq_ 开头的文件夹），把路径复制过来；粘 nt_qq_xxx 或 nt_db 也行：'
+                  : '打开 QQ → 设置 → 通用 → 聊天记录 → 数据保存位置，把那个路径复制过来：'}
               </div>
               <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
                 <input
                   type="text"
                   value={manualPath}
                   onChange={e => setManualPath(e.target.value)}
-                  placeholder='例：D:\Documents\Tencent Files'
+                  placeholder={isMac
+                    ? '例：~/Library/Containers/com.tencent.qq/Data/Library/Application Support/QQ'
+                    : '例：D:\\Documents\\Tencent Files'}
                   style={{
                     flex: 1, padding: '10px 12px', fontSize: 13,
                     border: '0.5px solid var(--et-line-2)', borderRadius: 8,
@@ -314,6 +479,8 @@ export function QQOnboardingDialog({ open, onClose, onDone }: Props) {
                 </button>
               </div>
 
+              {/* Whole-disk scan walks drive letters — Windows only. */}
+              {!isMac && (<>
               <div className="et-h3" style={{ marginBottom: 6, fontSize: 14 }}>方法 B：扫描所有硬盘</div>
               <div className="et-meta" style={{ marginBottom: 8 }}>
                 自动遍历 C-Z 各盘找 Tencent Files 文件夹，约 10–60 秒。
@@ -372,6 +539,7 @@ export function QQOnboardingDialog({ open, onClose, onDone }: Props) {
                   </div>
                 </>
               )}
+              </>)}
 
               {errMsg && (
                 <div style={{ ...errBox, marginTop: 12, marginBottom: 0 }}>{errMsg}</div>
@@ -379,7 +547,19 @@ export function QQOnboardingDialog({ open, onClose, onDone }: Props) {
             </>
           )}
 
-          {phase === 'extract-key' && activeQQ && (
+          {phase === 'resign' && activeQQ && (
+            <QQMacResignStep data={data} busy={resignBusy} log={resignLog} errMsg={errMsg}
+              onResign={doResign}
+              onSkip={() => { setErrMsg(null); setPhase('extract-key'); }} />
+          )}
+
+          {phase === 'extract-key' && activeQQ && isMac && (
+            <QQMacExtractStep qq={activeQQ} data={data} capture={macCapture}
+              onStart={startMacExtract} onCancel={cancelMacExtract}
+              onResign={() => { setErrMsg(null); setPhase('resign'); }} />
+          )}
+
+          {phase === 'extract-key' && activeQQ && !isMac && (
             <QQExtractStep qq={activeQQ} progress={progress} onStart={startExtract}
               kicked={progress !== ''} />
           )}
@@ -405,9 +585,20 @@ export function QQOnboardingDialog({ open, onClose, onDone }: Props) {
           {phase === 'error' && (
             <>
               <div style={errBox}>{errMsg || '未知错误'}</div>
-              <button onClick={() => setPhase(activeQQ ? 'extract-key' : 'detect')} style={primaryBtn}>
+              <button onClick={() => {
+                setErrMsg(null);
+                setMacCapture(null);
+                setProgress('');
+                setPhase(activeQQ ? 'extract-key' : 'detect');
+              }} style={primaryBtn}>
                 再试一次
               </button>
+              {isMac && activeQQ && (
+                <button onClick={() => { setErrMsg(null); setMacCapture(null); setPhase('resign'); }}
+                  style={{ ...secondaryBtn, marginTop: 8 }}>
+                  回到「重签 QQ」（QQ 更新后需要重签）
+                </button>
+              )}
             </>
           )}
         </div>
@@ -459,6 +650,152 @@ function QQExtractStep({ qq, progress, onStart, kicked }:
   );
 }
 
+// ---- macOS steps ----
+
+function MacStepper({ active, failed }: { active: number; failed: boolean }) {
+  return (
+    <ol aria-label="QQ 导入步骤" style={{
+      listStyle: 'none', margin: '16px 0 0', padding: 0,
+      display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap',
+    }}>
+      {MAC_STEPS.map((label, i) => {
+        const done = i < active;
+        const current = i === active;
+        const color = current && failed ? 'var(--et-rose)'
+          : current ? 'var(--et-orange)'
+          : done ? 'var(--et-sage)' : 'var(--et-faint)';
+        return (
+          <li key={label} aria-current={current ? 'step' : undefined}
+            style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span style={{
+              width: 20, height: 20, borderRadius: 10, flex: '0 0 auto',
+              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: 11, fontWeight: 700,
+              color: done || current ? 'var(--et-paper)' : 'var(--et-mute)',
+              background: done || current ? color : 'transparent',
+              border: `1px solid ${done || current ? color : 'var(--et-line-2)'}`,
+            }}>
+              {done ? '✓' : i + 1}
+            </span>
+            <span style={{
+              fontSize: 12, fontWeight: current ? 600 : 400,
+              color: current ? 'var(--et-ink)' : 'var(--et-mute)',
+            }}>
+              {label}
+            </span>
+            {i < MAC_STEPS.length - 1 && (
+              <span aria-hidden style={{ width: 14, height: 1, background: 'var(--et-line-2)', margin: '0 2px' }} />
+            )}
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+function MacRiskNotice() {
+  return (
+    <div style={riskBox}>
+      ⚠️ <strong>先了解风险再继续：</strong>Murmur 会给 <code>QQ.app</code> 重新做一个本机签名（去掉 hardened runtime、加上允许调试的 <code>get-task-allow</code>），
+      再用系统自带的 lldb 调试器在 QQ 打开数据库的一瞬间读出密钥。改签名和调试 QQ 进程<strong>有被腾讯安全机制检测到的可能</strong>（理论上存在账号风控风险），
+      QQ 也可能提示「已被修改」。<strong>只用来处理这台 Mac 上、你本人的 QQ 数据。</strong>
+      想恢复原签名：从 QQ 官网重新安装 QQ 即可。
+    </div>
+  );
+}
+
+function QQMacResignStep({ data, busy, log, errMsg, onResign, onSkip }: {
+  data: QQProfilesResponse | null; busy: boolean; log: string[]; errMsg: string | null;
+  onResign: () => void; onSkip: () => void;
+}) {
+  const mac = data?.mac;
+  const noApp = !mac?.qq_app;
+  return (
+    <>
+      <MacRiskNotice />
+      <div style={stepBox}>
+        <ol style={{ margin: 0, paddingLeft: 20 }}>
+          <li>Murmur <strong>先退出 QQ</strong>（正在聊天的话先收个尾）</li>
+          <li>只重签 QQ 的主程序 <code>QQ.app/Contents/MacOS/QQ</code>，不需要关闭 SIP</li>
+          <li>macOS 会弹出授权窗口，输入<strong>这台 Mac 的开机密码</strong>（不是 Apple ID）</li>
+          <li>QQ 更新后签名会被覆盖，到时候回来再点一次就行</li>
+        </ol>
+      </div>
+      {noApp && (
+        <div style={errBox}>没找到 QQ.app。请先从 QQ 官网安装 macOS 版 QQ（装在「应用程序」里），然后关掉这个窗口重新打开。</div>
+      )}
+      {mac?.lldb_error && (
+        <div style={hintBox}>💡 {mac.lldb_error}（重签名可以先做，抓 key 时需要它。）</div>
+      )}
+      {log.length > 0 && (
+        <div style={logBox}>{log.map((l, i) => <div key={i}>{l}</div>)}</div>
+      )}
+      {errMsg && <div style={errBox}>{errMsg}</div>}
+      <button onClick={onResign} disabled={busy || noApp} style={{
+        ...primaryBtn, opacity: busy || noApp ? 0.6 : 1, cursor: busy ? 'wait' : noApp ? 'not-allowed' : 'pointer',
+      }}>
+        {busy ? '正在重签名，请留意系统授权窗口…' : '我了解风险，退出 QQ 并重签（需要开机密码）'}
+      </button>
+      {mac?.debuggable == null && !noApp && (
+        <button onClick={onSkip} disabled={busy} style={{ ...secondaryBtn, marginTop: 8 }}>
+          我已经重签过了，直接去抓 key
+        </button>
+      )}
+    </>
+  );
+}
+
+function QQMacExtractStep({ qq, data, capture, onStart, onCancel, onResign }: {
+  qq: string; data: QQProfilesResponse | null; capture: QQMacExtractState | null;
+  onStart: () => void; onCancel: () => void; onResign: () => void;
+}) {
+  const running = !!capture?.running;
+  const stage = capture?.stage || '';
+  const waitingLogin = stage === 'bp_set' || stage === 'ready';
+  const lldbErr = data?.mac?.lldb_error;
+  return (
+    <>
+      <div className="et-serif" style={{ fontSize: 14, lineHeight: 1.7, marginBottom: 12 }}>
+        {qqAccountLabel(qq)}。点下面按钮后：
+      </div>
+      <div style={stepBox}>
+        <ol style={{ margin: 0, paddingLeft: 20 }}>
+          <li>Murmur 退出 QQ，再用 lldb 调试器重新打开它（可能会弹「开发者工具」授权窗口，输入开机密码）</li>
+          <li>QQ 窗口出来后<strong>正常登录你要导入的这个账号</strong>；自动登录的话什么都不用做</li>
+          <li>QQ 打开数据库的瞬间 Murmur 记下候选 key，并用 nt_msg.db 校验，只保留对的那个</li>
+          <li>调试器自动从 QQ 分离，QQ 继续正常运行，然后解密 6 个数据库</li>
+        </ol>
+      </div>
+      <div style={hintBox}>
+        💡 如果 QQ 自动登录了却一直没抓到：在 QQ 里点头像 →「退出账号」再重新登录。不要用菜单栏的「切换账号」，它会重启 QQ 进程。
+      </div>
+      {lldbErr && <div style={errBox}>{lldbErr}</div>}
+      {running ? (
+        <div style={{ ...stepBox, borderColor: waitingLogin ? 'var(--et-orange)' : 'var(--et-line-2)' }} role="status">
+          <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--et-ink)' }}>
+            {MAC_STAGE_TEXT[stage] || '正在抓 key…'}
+          </div>
+          <div className="et-meta" style={{ marginTop: 4, color: 'var(--et-mute)' }}>
+            断点命中 {capture?.hits ?? 0} 次 · 最长等 4 分钟
+          </div>
+          <button onClick={onCancel} style={{ ...secondaryBtn, marginTop: 10 }}>取消</button>
+        </div>
+      ) : (
+        <>
+          <button onClick={onStart} disabled={!!lldbErr} style={{
+            ...primaryBtn, opacity: lldbErr ? 0.6 : 1, cursor: lldbErr ? 'not-allowed' : 'pointer',
+          }}>
+            开始抓 QQ key
+          </button>
+          <button onClick={onResign} style={{ ...secondaryBtn, marginTop: 8 }}>
+            回到「重签 QQ」
+          </button>
+        </>
+      )}
+    </>
+  );
+}
+
 // ---- styles ----
 
 const overlay: React.CSSProperties = {
@@ -502,10 +839,33 @@ const errBox: React.CSSProperties = {
   fontSize: 12.5, color: 'var(--et-rose)', marginBottom: 14,
   whiteSpace: 'pre-wrap',
 };
+const riskBox: React.CSSProperties = {
+  padding: '10px 14px', marginBottom: 12, lineHeight: 1.65, fontSize: 12.5,
+  background: 'color-mix(in srgb, var(--et-rose) 10%, transparent)',
+  border: '0.5px solid color-mix(in srgb, var(--et-rose) 40%, transparent)',
+  borderRadius: 8, color: 'var(--et-ink)',
+};
+const stepBox: React.CSSProperties = {
+  padding: '12px 14px', background: 'var(--et-paper-2)',
+  border: '0.5px solid var(--et-line-2)', borderRadius: 8,
+  fontSize: 13, lineHeight: 1.85, color: 'var(--et-ink)', marginBottom: 12,
+};
+const logBox: React.CSSProperties = {
+  padding: '8px 12px', background: 'var(--et-paper-2)',
+  border: '0.5px solid var(--et-line-2)', borderRadius: 8, marginBottom: 12,
+  fontFamily: 'var(--et-mono)', fontSize: 11, lineHeight: 1.6, color: 'var(--et-mute)',
+};
+const secondaryBtn: React.CSSProperties = {
+  all: 'unset', cursor: 'pointer', display: 'block', width: '100%', boxSizing: 'border-box',
+  textAlign: 'center', padding: '9px 0', fontSize: 13,
+  background: 'var(--et-paper-2)', color: 'var(--et-ink)',
+  border: '0.5px solid var(--et-line-2)', borderRadius: 'var(--et-r)',
+};
 const hintBox: React.CSSProperties = {
-  padding: '10px 14px', background: 'rgba(232,181,122,0.18)',
-  border: '0.5px solid rgba(138,90,28,0.3)', borderRadius: 8,
-  fontSize: 11.5, color: '#8a5a1c', lineHeight: 1.6, marginBottom: 14,
+  padding: '10px 14px',
+  background: 'color-mix(in srgb, var(--et-amber) 18%, transparent)',
+  border: '0.5px solid color-mix(in srgb, var(--et-amber) 45%, transparent)', borderRadius: 8,
+  fontSize: 11.5, color: 'var(--et-ink-soft)', lineHeight: 1.6, marginBottom: 14,
 };
 
 function Spinner({ text }: { text: string }) {

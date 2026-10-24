@@ -287,7 +287,10 @@ class QQKeyEndpointsTest(unittest.TestCase):
         def fake_extract(timeout=240, verify_dbs=None):
             captured["dbs"] = verify_dbs
             return {"ok": False, "key": None, "error": "x"}
-        with mock.patch.object(qq_decrypt, "extract_key_via_powershell", side_effect=fake_extract):
+        # The Windows path; on macOS the endpoint routes to qq_mac_key instead
+        # (covered in test_qq_mac.py).
+        with mock.patch.object(qq_decrypt, "extract_key_via_powershell", side_effect=fake_extract), \
+                mock.patch("qq_paths.IS_MAC", False):
             self._post("/api/qq/extract-key", {"timeout": 60, "qq": "12345"})
         self.assertEqual([t[0] for t in captured["dbs"]], ["12345", "999"])
         self.assertEqual(captured["dbs"][0][1], self.db_dir / "nt_msg.db")

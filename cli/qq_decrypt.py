@@ -20,6 +20,12 @@ The 16-character ASCII passphrase is captured by `qq_get_key.ps1` (see
 `cli/native/qq_get_key.ps1`, which dynamically resolves the
 `sqlite3_key_v2` function via PE string-reference parsing — version-
 independent on the QQNT 9.9.x family).
+
+macOS QQ NT uses the same SQLCipher parameters (1024-byte header, kdf_iter
+4000, PBKDF2-HMAC-SHA512 KDF, HMAC-SHA1, 4096-byte pages per the QQBackup
+docs), so this module decrypts Mac databases unchanged; only key capture
+differs (qq_mac_key.py + native/qq_lldb_capture.py, which emit the same
+MURMUR_KEY_CANDIDATE lines that finish_extraction() verifies here).
 """
 from __future__ import annotations
 
@@ -564,7 +570,11 @@ if __name__ == "__main__":
         else:
             import qq_paths as _qpaths
             dbs = verify_dbs_for_profiles(_qpaths.discover_qq_profiles(), args.qq)
-        r = extract_key_via_powershell(verify_dbs=dbs)
+        if sys.platform == "darwin":
+            import qq_mac_key as _qmac
+            r = _qmac.run_capture(dbs, on_status=lambda st: print(st, file=sys.stderr))
+        else:
+            r = extract_key_via_powershell(verify_dbs=dbs)
         print(json.dumps(r, ensure_ascii=False, indent=2))
         sys.exit(0 if r["ok"] else 1)
     if args.cmd == "decrypt":
