@@ -221,15 +221,40 @@ def load_keys(path: Optional[Path] = None) -> dict:
         return {}
 
 
-def split_pending(salt_map: dict, existing: dict) -> tuple[dict, dict]:
+def passphrase_for(existing: dict, wxid: Optional[str] = None) -> Optional[dict]:
+    """The saved account passphrase for `wxid`, or None.
+
+    Passphrases are stored per account under "passphrases" ({wxid: pp}), so
+    after switching WeChat accounts the old account's passphrase is never
+    tried (each try is a full PBKDF2 per pending DB, on every poll). The
+    legacy top-level "passphrase" (written before per-account storage) only
+    counts when the file's "wxid" matches or is unknown. Without a `wxid`
+    the legacy value or a single stored entry is used."""
+    by_wxid = existing.get("passphrases")
+    by_wxid = by_wxid if isinstance(by_wxid, dict) else {}
+    legacy = existing.get("passphrase") or None
+    if wxid:
+        if by_wxid.get(wxid):
+            return by_wxid[wxid]
+        owner = existing.get("wxid")
+        return legacy if legacy and (not owner or owner == wxid) else None
+    if legacy:
+        return legacy
+    vals = [v for v in by_wxid.values() if v]
+    return vals[0] if len(vals) == 1 else None
+
+
+def split_pending(salt_map: dict, existing: dict,
+                  wxid: Optional[str] = None) -> tuple[dict, dict]:
     """Split collect_db_salts() output into (pending pages, known keys).
 
     salt_map: {salt_hex: {"name": rel, "page1": bytes}}. A DB counts as known
     only if a stored key still verifies against its current page 1 (WeChat
-    re-keys DBs after a reinstall / account switch)."""
+    re-keys DBs after a reinstall / account switch). `wxid` selects which
+    saved passphrase may derive keys for the rest (see passphrase_for)."""
     by_db = existing.get("keys_by_db") or {}
     by_salt = existing.get("keys_by_salt") or {}
-    pp = existing.get("passphrase") or None
+    pp = passphrase_for(existing, wxid)
     pending: dict[str, bytes] = {}
     known: dict[str, str] = {}
     for salt_hex, meta in salt_map.items():
@@ -278,15 +303,29 @@ def _merge_keys_locked(new_keys: dict, salt_by_rel: dict, wxid: Optional[str],
         salt = salt_by_rel.get(rel)
         if salt:
             by_salt[salt] = key_hex
+    owner = wxid or cur.get("wxid")
     payload = {
-        "wxid": wxid or cur.get("wxid"),
+        "wxid": owner,
         "extracted_at": int(time.time()),
         "keys_by_db": by_db,
         "keys_by_salt": by_salt,
     }
-    pp = passphrase or cur.get("passphrase")
-    if pp:
-        payload["passphrase"] = pp
+    # Passphrases are kept per account. A legacy top-level one belongs to the
+    # account the file was written for (cur["wxid"]); migrate it there.
+    by_wxid = dict(cur.get("passphrases") or {})
+    legacy = cur.get("passphrase") or None
+    if legacy and cur.get("wxid"):
+        by_wxid.setdefault(cur["wxid"], legacy)
+        legacy = None
+    if passphrase:
+        if owner:
+            by_wxid[owner] = passphrase
+        else:
+            legacy = passphrase
+    if by_wxid:
+        payload["passphrases"] = by_wxid
+    if legacy:
+        payload["passphrase"] = legacy
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + f".tmp-{os.getpid()}-{os.urandom(4).hex()}")
     fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -384,7 +423,8 @@ class LiveKeyJob:
         if not profiles:
             return {"total": 0, "known": 0, "pending": []}
         salt_map = self._salts(profiles[0])
-        pending, known = split_pending(salt_map, load_keys(self._kpath()))
+        pending, known = split_pending(salt_map, load_keys(self._kpath()),
+                                       getattr(profiles[0], "wxid", None))
         return {"total": len(salt_map), "known": len(known), "pending": sorted(pending)}
 
     def status(self) -> dict:
@@ -411,7 +451,8 @@ class LiveKeyJob:
             salt_map = self._salts(prof)
             if not salt_map:
                 raise _StartError("没找到加密数据库 — 让微信完成首次同步后再试")
-            pending, known = split_pending(salt_map, load_keys(self._kpath()))
+            pending, known = split_pending(salt_map, load_keys(self._kpath()),
+                                           getattr(prof, "wxid", None))
         except Exception as e:
             msg = str(e) if isinstance(e, _StartError) else f"{type(e).__name__}: {e}"
             with self._lock:

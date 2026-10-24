@@ -224,7 +224,8 @@ def _load_per_db_keys() -> dict | None:
         return None
     try:
         d = __import__("json").loads(p.read_text(encoding="utf-8"))
-        if isinstance(d, dict) and (d.get("keys_by_db") or d.get("keys_by_salt") or d.get("passphrase")):
+        if isinstance(d, dict) and (d.get("keys_by_db") or d.get("keys_by_salt")
+                                    or d.get("passphrase") or d.get("passphrases")):
             return d
     except Exception:
         pass
@@ -323,8 +324,11 @@ def key_tag(key_hex: str) -> str:
     return hashlib.sha256(key_hex.encode("utf-8")).hexdigest()[:16]
 
 
-def key_for_db(src: Path, encrypted_root: Path, per_db: dict) -> Optional[str]:
-    """macOS per-DB key lookup: by db_storage-relative path, then by page-1 salt."""
+def key_for_db(src: Path, encrypted_root: Path, per_db: dict,
+               wxid: Optional[str] = None) -> Optional[str]:
+    """macOS per-DB key lookup: by db_storage-relative path, then by page-1
+    salt, then derived from `wxid`'s saved passphrase (live_key.passphrase_for:
+    another account's passphrase is never tried)."""
     keys_by_name = per_db.get("keys_by_db") or {}
     keys_by_salt = per_db.get("keys_by_salt") or {}
     try:
@@ -340,13 +344,16 @@ def key_for_db(src: Path, encrypted_root: Path, per_db: dict) -> Optional[str]:
     except OSError:
         return None
     key_hex = keys_by_salt.get(page1[:16].hex())
-    if key_hex or not per_db.get("passphrase"):
+    if key_hex:
         return key_hex
+    from live_key import passphrase_for  # noqa: E402
+    pp = passphrase_for(per_db, wxid)
+    if not pp:
+        return None
     # Live capture saved the account passphrase: derive keys for DBs that
     # appeared after the capture (new message shards etc.). PBKDF2 is 256k
     # rounds, so memoize per (passphrase, salt) — live sync asks every tick.
     import hashlib
-    pp = per_db["passphrase"]
     memo_key = (hashlib.sha256(json.dumps(pp, sort_keys=True).encode("utf-8")).hexdigest(), page1[:16])
     if memo_key not in _PASSPHRASE_KEYS:
         from live_key import derive_from_passphrase  # noqa: E402
@@ -503,7 +510,7 @@ def _decrypt_per_db(profile: WeChatProfile, per_db: dict, *, force: bool = False
         for i, src in enumerate(src_dbs, 1):
             size_mb = src.stat().st_size / 1e6
             rel = str(src.relative_to(profile.encrypted_root)).replace("\\", "/")
-            key_hex = key_for_db(src, profile.encrypted_root, per_db)
+            key_hex = key_for_db(src, profile.encrypted_root, per_db, getattr(profile, "wxid", None))
             if key_hex and not force and cache.is_fresh(src, key_tag(key_hex)):
                 print(f"  [{i:2d}/{len(src_dbs)}] CACHE ({size_mb:6.1f} MB) {src.name}")
                 skipped_cached += 1

@@ -196,6 +196,44 @@ class HmacSelectionTest(unittest.TestCase):
         self.assertFalse(r["ok"])
         self.assertTrue(r["error"].startswith("抓 key 超时（240 秒）"))
 
+    def test_returned_log_has_no_candidate_values(self):
+        db = self.tmp / "nt_msg.db"
+        make_fake_nt_msg_db(db, REAL_KEY)
+        other = "wrongwrongwrong1"
+        log = "\n".join([
+            "wrapper.node 已加载到: 0x7FF000000000",
+            marker("R8", other),
+            marker("R9", REAL_KEY),
+            "找到密钥: legacyLegacy0001",
+            "MURMUR_KEY_SUMMARY hits=12 candidates=3",
+        ])
+        for dbs in ([("1", db)], [("1", self.tmp / "missing.db")]):
+            r = qq_decrypt.finish_extraction(log, dbs)
+            out = r["log"]
+            for value in (REAL_KEY, other, "legacyLegacy0001"):
+                self.assertNotIn(value, out)
+                self.assertNotIn(value.encode("ascii").hex().upper(), out)
+            self.assertIn("MURMUR_KEY_CANDIDATE source=R9 len=16 hex=<redacted:16B>", out)
+            self.assertIn("找到密钥: <redacted:16B>", out)
+            self.assertIn("MURMUR_KEY_SUMMARY hits=12", out)
+            self.assertNotIn(REAL_KEY, json.dumps(r["candidates"]))
+
+    def test_redact_log_survives_truncation(self):
+        # Redaction happens before the 3000-char tail cut, so a cut can't
+        # leave a bare hex tail behind.
+        log = "x" * 5000 + "\n" + marker("R8", REAL_KEY)
+        out = qq_decrypt.finish_extraction(log, [])["log"]
+        self.assertLessEqual(len(out), 3000)
+        self.assertNotIn(REAL_KEY.encode("ascii").hex().upper(), out)
+
+    def test_extract_fails_fast_without_nt_msg_db(self):
+        with mock.patch.object(qq_decrypt.sys, "platform", "win32"), \
+                mock.patch("subprocess.run") as run:
+            r = qq_decrypt.extract_key_via_powershell(timeout=60, verify_dbs=[])
+        run.assert_not_called()
+        self.assertFalse(r["ok"])
+        self.assertIn("没有找到可读的 nt_msg.db", r["error"])
+
     def test_verify_key_for_db(self):
         db = self.tmp / "nt_msg.db"
         make_fake_nt_msg_db(db, REAL_KEY)
