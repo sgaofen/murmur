@@ -26,6 +26,10 @@ xwechat_files/ → decrypt_py.py / go_decrypt.dll → 你电脑上的 SQLite
 
 本地后端只给 Murmur 开发前端 `127.0.0.1:5173` / `localhost:5173` 和 Tauri 应用来源开放 CORS。普通网页、外网网页、以及其他 localhost 端口都不能跨域读取 Murmur 的本地 API。
 
+本地后端还检查每个请求的 `Host` 头：只接受 `127.0.0.1`、`localhost`、`[::1]` 加上它实际监听的端口（v0.5.0 起）。这样即使有网页把自己的域名解析到 127.0.0.1（DNS 重绑定）绕开 CORS，请求也会被拒绝（`403 HOST_NOT_ALLOWED`）。
+
+开启应用锁后，锁定期间后端对所有数据接口返回 `423 APP_LOCKED`，见 [app-lock.md](app-lock.md)。应用锁不加密磁盘上的已解密数据库。
+
 ### 2. AI 分析（可选 / 你主动触发）
 
 如果你点了「🤖 让 claude/codex 分析」按钮：

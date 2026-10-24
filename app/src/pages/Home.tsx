@@ -19,6 +19,7 @@ import { Button, EmptyState, ErrorState, SegmentedControl, Skeleton, SkeletonTex
 import { IconClose, IconInbox, IconKey, IconRefresh, IconSearch } from '../ui/icons';
 import { PageHeader } from '../shell/PageHeader';
 import './Home.css';
+import { homeHasNoData } from '../utils/pageStates';
 
 interface Props {
   onOpenFriend: (id: string) => void;
@@ -446,8 +447,11 @@ export function HomePage({ onOpenFriend, onOpenOnboarding }: Props) {
 
   // Connected, but the decrypted data has no chats yet (fresh account, wrong
   // account picked, or a decrypt that is still filling in).
-  const noData = summary.totalContacts === 0 && summary.topFriends.length === 0
-    && friendsLoaded && allFriends.length === 0 && !searchDebounced && tab === 'private';
+  // A failed friend list is not "no data": it keeps its own ErrorState below.
+  const noData = homeHasNoData({
+    totalContacts: summary.totalContacts, topFriends: summary.topFriends.length,
+    friendsLoaded, friendsCount: allFriends.length, friendsError, search: searchDebounced, tab,
+  });
 
   let list: ReactNode;
   if (!friendsLoaded) {

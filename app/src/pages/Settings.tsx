@@ -10,6 +10,7 @@ import {
 import { IconCheck, IconCopy, IconFolder } from '../ui/icons';
 import { PageHeader } from '../shell/PageHeader';
 import { AppLockSettings } from '../components/AppLockSettings';
+import { DiagBundleButton } from '../components/DiagBundleButton';
 import { maskText, setPrivacyMode } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
 import { AGENT_CLI_LIST } from '../utils/agents';
@@ -262,6 +263,8 @@ function AboutSection({ info, diag, loading }: { info: Info | null; diag: Diagno
           {platform && (<><dt>系统</dt><dd>{platform}{diag?.wechat_version ? ` · 微信 ${diag.wechat_version}` : ''}</dd></>)}
           <dt>源代码 / 反馈</dt>
           <dd><code>github.com/sgaofen/murmur</code></dd>
+          <dt>诊断信息</dt>
+          <dd><DiagBundleButton /></dd>
         </dl>
       </div>
     </Card>

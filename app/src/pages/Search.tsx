@@ -26,6 +26,8 @@ import { PageHeader } from '../shell/PageHeader';
 import { displayName, maskText } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
 import { searchQuery } from '../utils/searchLinks';
+import { rerunOnLanding, rerunWhenReady } from '../utils/searchRerun';
+import type { ShownSearch } from '../utils/searchRerun';
 import { TypeIcon, clockOf, dayOf, isStub, normType, typeLabel } from '../components/chatBits';
 import './Chat.css';
 import './Search.css';
@@ -121,8 +123,9 @@ export function SearchPage({ query, navigate }: SearchPageProps) {
   const reqRef = useRef(0);
   const inputRef = useRef<HTMLInputElement>(null);
   // The search on screen, and whether it ran against a half-built index —
-  // when the build finishes it is run again so the results are complete.
-  const lastRef = useRef<{ q: string; mode: Mode; dates: Range; partial: boolean } | null>(null);
+  // when the build finishes it is run again so the results are complete
+  // (unless a newer search is already in flight: see utils/searchRerun.ts).
+  const lastRef = useRef<ShownSearch<Mode> | null>(null);
   const indexStateRef = useRef<SearchIndexStatus['state'] | null>(null);
   const rerunRef = useRef<() => void>(() => {});
 
@@ -161,10 +164,13 @@ export function SearchPage({ query, navigate }: SearchPageProps) {
   const semanticUsable = !!semantic?.usable;
   const effectiveMode: Mode = mode === 'semantic' && semanticUsable ? 'semantic' : 'keyword';
 
-  const run = useCallback(async (q: string, m: Mode, offset: number, prev: Results | null, dates?: Range) => {
+  const run = useCallback(async (q: string, m: Mode, offset: number, prev: Results | null, dates?: Range,
+    isRerun = false) => {
     const trimmed = q.trim();
     if (!trimmed) return;
     const req = ++reqRef.current;
+    // 「加载更多」 continues the search on screen, so it stays the one to re-run.
+    if (offset > 0 && lastRef.current) lastRef.current = { ...lastRef.current, req };
     setBusy(offset ? 'more' : 'search');
     setSearchError(null);
     const d = dates ?? { from, to };
@@ -189,7 +195,9 @@ export function SearchPage({ query, navigate }: SearchPageProps) {
       setResults(append && prev ? { ...next, hits: [...prev.hits, ...next.hits] } : next);
       if (!append) {
         const building = (out.index?.state ?? indexStateRef.current) === 'building';
-        lastRef.current = { q: trimmed, mode: next.mode, dates: d, partial: building };
+        const shown: ShownSearch<Mode> = { req, q: trimmed, mode: next.mode, dates: d, partial: building };
+        lastRef.current = shown;
+        if (rerunOnLanding(shown, indexStateRef.current, isRerun)) rerunRef.current();
       }
     } catch (e) {
       if (req !== reqRef.current) return;
@@ -201,10 +209,10 @@ export function SearchPage({ query, navigate }: SearchPageProps) {
   // The index finished building under a search that ran against part of it:
   // run that search again (same words, mode and dates) so nothing is missing.
   rerunRef.current = () => {
-    const last = lastRef.current;
-    if (!last?.partial) return;
+    const last = rerunWhenReady(lastRef.current, reqRef.current);
+    if (!last) return;
     lastRef.current = { ...last, partial: false };
-    void run(last.q, last.mode, 0, null, last.dates);
+    void run(last.q, last.mode, 0, null, last.dates, true);
   };
 
   // Keep the query in the URL (no history entry) so 「返回」 from a chat restores it.
