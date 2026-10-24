@@ -578,22 +578,47 @@ export async function getAvailableReportYears(): Promise<{
   return j('/api/annual-report/years');
 }
 
-export type ExportFormat = 'json' | 'html' | 'txt';
+export type ExportFormat = 'json' | 'html' | 'txt' | 'csv' | 'md' | 'chatlab';
+/** Pair export supports a subset: the relationship pack as md/json/html, and
+ *  the evidence edges as csv. 'txt' is kept as a legacy alias of 'md'. */
+export type PairExportFormat = 'json' | 'html' | 'md' | 'csv' | 'txt';
+/** none = text only; originals = only decrypted full-size images / videos;
+ *  best = originals, falling back to thumbnails. */
+export type MediaPolicy = 'none' | 'originals' | 'best';
 
-/** Trigger a download of the chat with `wxid` in the requested format.
- *  Drives the export buttons in Friend.tsx — no JSON parsing here, this is
- *  a binary file the browser saves directly via the Content-Disposition header. */
-export async function exportFriendChat(wxid: string, format: ExportFormat): Promise<void> {
-  const url = `${API_BASE}/api/export?wxid=${encodeURIComponent(wxid)}&format=${format}`;
-  const res = await fetch(url);
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`导出失败：${res.status} ${text.slice(0, 200)}`);
-  }
+export interface ExportMediaSummary {
+  policy: MediaPolicy;
+  media_messages: number;
+  exported_original: number;
+  exported_thumbnail: number;
+  exported_total: number;
+  missing_total: number;
+  missing_by_kind: Record<string, number>;
+  missing_reasons: Record<string, number>;
+  missing_reason_labels: Record<string, string>;
+  thumbnail_skipped: number;
+}
+
+/** Returned when exporting with attachments (media !== 'none'): the backend
+ *  writes a folder (chat file + media/ + 导出报告.md) instead of a download. */
+export interface ExportReport {
+  ok: boolean;
+  chat_id: string;
+  name: string;
+  format: ExportFormat;
+  messages: number;
+  exported_at: string;
+  dir: string;
+  file: string;
+  report_file: string;
+  media: ExportMediaSummary;
+}
+
+async function downloadResponse(res: Response, fallbackName: string): Promise<void> {
   const blob = await res.blob();
   const dispo = res.headers.get('Content-Disposition') || '';
   const m = /filename="([^"]+)"/.exec(dispo);
-  const filename = m ? m[1] : `murmur_${wxid}.${format}`;
+  const filename = m ? m[1] : fallbackName;
   const link = document.createElement('a');
   link.href = URL.createObjectURL(blob);
   link.download = filename;
@@ -601,6 +626,28 @@ export async function exportFriendChat(wxid: string, format: ExportFormat): Prom
   link.click();
   document.body.removeChild(link);
   setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+}
+
+/** Export the chat with `wxid`.
+ *  media === 'none' → the browser downloads one file (Content-Disposition), returns null.
+ *  otherwise        → the backend writes a folder next to the other exports and
+ *                     returns its report (counts + missing-attachment reasons). */
+export async function exportFriendChat(
+  wxid: string,
+  format: ExportFormat,
+  media: MediaPolicy = 'none',
+): Promise<ExportReport | null> {
+  const url = `${API_BASE}/api/export?wxid=${encodeURIComponent(wxid)}&format=${format}&media=${media}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`导出失败：${res.status} ${text.slice(0, 200)}`);
+  }
+  if (media !== 'none') {
+    return (await res.json()) as ExportReport;
+  }
+  await downloadResponse(res, `murmur_${wxid}.${format === 'chatlab' ? 'chatlab.json' : format}`);
+  return null;
 }
 
 export interface VoiceItem {
@@ -617,25 +664,16 @@ export async function getFriendVoices(wxid: string): Promise<VoiceItem[]> {
 /** Murmur's signature feature (issue #10): export how friend A and friend B
  *  know each other from your vantage point. Bundles direct evidence (mentions
  *  / mutual replies / sns cross-likes) + group co-presence + chat samples.
- *  txt yields markdown the user can paste straight into ChatGPT/Claude. */
-export async function exportPairChat(a: string, b: string, format: ExportFormat): Promise<void> {
+ *  md yields markdown the user can paste straight into ChatGPT/Claude; csv
+ *  lists the evidence edges for spreadsheets. */
+export async function exportPairChat(a: string, b: string, format: PairExportFormat): Promise<void> {
   const url = `${API_BASE}/api/pair-export?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}&format=${format}`;
   const res = await fetch(url);
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     throw new Error(`双人导出失败：${res.status} ${text.slice(0, 200)}`);
   }
-  const blob = await res.blob();
-  const dispo = res.headers.get('Content-Disposition') || '';
-  const m = /filename="([^"]+)"/.exec(dispo);
-  const filename = m ? m[1] : `murmur_pair_${a}__${b}.${format}`;
-  const link = document.createElement('a');
-  link.href = URL.createObjectURL(blob);
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+  await downloadResponse(res, `murmur_pair_${a}__${b}.${format === 'txt' ? 'md' : format}`);
 }
 
 export interface BatchStartReq {
