@@ -181,7 +181,13 @@ class EndpointCodeTest(unittest.TestCase):
         self.assertEqual(body["code"], ec.KEY_FORMAT_INVALID)
 
     def test_qq_endpoint_uses_qq_scope(self) -> None:
-        status, body = self._req("POST", "/api/qq/decrypt", {"qq": "12345"})
+        # qq_decrypt raises SystemExit at import without `cryptography`
+        # (CI installs no deps); this branch never touches it, so stub it.
+        import types
+        stub = types.ModuleType("qq_decrypt")
+        stub.WrongKeyError = type("WrongKeyError", (Exception,), {})
+        with mock.patch.dict(sys.modules, {"qq_decrypt": stub}):
+            status, body = self._req("POST", "/api/qq/decrypt", {"qq": "12345"})
         self.assertEqual(status, 400)
         self.assertEqual(body["code"], ec.QQ_KEY_NOT_FOUND)
 
