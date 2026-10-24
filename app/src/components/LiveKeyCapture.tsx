@@ -9,9 +9,11 @@
 // and a live matched-DB counter, offer another round, then hand off to the
 // existing decrypt flow.
 import { useCallback, useEffect, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import { cancelLiveKey, getLiveKeyStatus, installFrida, startLiveKey } from '../data/api';
 import type { LiveKeyStatus } from '../data/api';
 import { Button, Callout, Card, SegmentedControl } from '../ui';
+import { PrivateCopyCapture } from './PrivateCopyCapture';
 import { lookupError } from '../data/errorCatalog';
 import { ErrorExplain } from './ErrorExplain';
 
@@ -47,6 +49,9 @@ export function LiveKeyCapture({ onDecrypt, reason = 'manual', wechatVersion, on
   // Stable backend code for `err` (data/errorCatalog.ts); only shown while err is set.
   const [errCode, setErrCode] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Entry point: let the user pick the Frida flow (below) or the Frida-free
+  // "private copy" flow (PrivateCopyCapture). null = chooser not answered yet.
+  const [method, setMethod] = useState<'frida' | 'private-copy' | null>(null);
   const pollRef = useRef<number | null>(null);
 
   const refresh = useCallback(async (coverage = false) => {
@@ -106,6 +111,14 @@ export function LiveKeyCapture({ onDecrypt, reason = 'manual', wechatVersion, on
     } catch (e: any) {
       setErr(e?.message || String(e));
     }
+  }
+
+  if (method === 'private-copy') {
+    return <PrivateCopyCapture onDecrypt={onDecrypt} onBack={() => setMethod(null)} />;
+  }
+  if (method === null) {
+    return <MethodChooser reason={reason} wechatVersion={wechatVersion}
+      onPick={setMethod} onPaste={onPaste} />;
   }
 
   if (!st) {
@@ -188,6 +201,36 @@ export function LiveKeyCapture({ onDecrypt, reason = 'manual', wechatVersion, on
       {err && <Callout tone="danger" compact className="ui-mt-3">{err}</Callout>}
 
       {onPaste && !job.running && (
+        <Button variant="ghost" block className="ui-mt-2" onClick={onPaste}>或者：手动粘贴密钥</Button>
+      )}
+    </>
+  );
+}
+
+function MethodChooser({ reason, wechatVersion, onPick, onPaste }: {
+  reason: Props['reason']; wechatVersion?: string | null;
+  onPick: (m: 'frida' | 'private-copy') => void; onPaste?: () => void;
+}) {
+  const card = (m: 'frida' | 'private-copy', title: ReactNode, desc: string) => (
+    <Card variant="sunken" padding="sm" interactive role="button" tabIndex={0}
+      onClick={() => onPick(m)}
+      onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onPick(m); } }}>
+      <div style={{ fontWeight: 600, fontSize: 14 }}>{title}</div>
+      <div className="et-meta" style={{ marginTop: 4, lineHeight: 1.6 }}>{desc}</div>
+    </Card>
+  );
+  return (
+    <>
+      <Intro reason={reason} wechatVersion={wechatVersion} />
+      <div className="ui-stack">
+        <div className="et-meta">选一种抓取方式：</div>
+        {card('frida', 'Frida 实时抓取',
+          '挂钩正在运行的微信。需要装一次 Frida，并会弹一次系统密码窗（管理员权限）。不改动微信本体。')}
+        {card('private-copy',
+          <>免 Frida 方式 <span style={{ color: 'var(--accent-text)', fontSize: 12, fontWeight: 500 }}>推荐给不想装 Frida / 不想输管理员密码的人</span></>,
+          '把微信复制一份到 Murmur 自己的目录、重签名后打开这份副本来抓。不装 Frida、不用管理员密码，不动 /Applications/WeChat.app。')}
+      </div>
+      {onPaste && (
         <Button variant="ghost" block className="ui-mt-2" onClick={onPaste}>或者：手动粘贴密钥</Button>
       )}
     </>
