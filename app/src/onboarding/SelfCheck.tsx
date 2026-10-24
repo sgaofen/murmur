@@ -73,14 +73,14 @@ export function SelfCheck({ diag, checking, route, onContinue, onRecheck, onGoto
 
   const rows = diag ? buildChecks(diag) : [];
   const blocking = blockingCount(rows);
+  const warns = rows.filter(r => r.status === 'warn').length;
   const next = route ? routeStep(route) : null;
   const ready = route?.kind === 'view' && route.view === 'done';
 
   return (
     <>
       <Lead>
-        先看一眼这台电脑的情况。标红的项目可以直接点右边的按钮处理，处理完点「重新检测」；
-        也可以先继续，下一步会告诉你具体怎么做。
+        先看一眼这台电脑的情况。有问题的项目可以直接点旁边的按钮处理，处理完点「重新检测」；也可以先继续，下一步会告诉你具体怎么做。
       </Lead>
 
       {diag && !checking ? <CheckList rows={rows} onAction={act} busy={busy} /> : <CheckListSkeleton rows={6} />}
@@ -94,7 +94,9 @@ export function SelfCheck({ diag, checking, route, onContinue, onRecheck, onGoto
 
       {diag && !checking && next && (
         <Callout className="ob-summary" tone={blocking > 0 ? 'warning' : 'success'}
-          title={blocking > 0 ? `${blocking} 项需要处理` : ready ? '已经有解密好的数据' : '环境没问题'}>
+          title={blocking > 0 ? `${blocking} 项需要处理`
+            : ready ? '已经有解密好的数据'
+            : warns > 0 ? `可以继续，有 ${warns} 项留意一下` : '环境没问题'}>
           {ready ? '可以直接进入 Murmur；想重新抓密钥或重新解密，点左边对应的步骤。'
             : `下一步：${STEP_LABEL[next]}。`}
         </Callout>

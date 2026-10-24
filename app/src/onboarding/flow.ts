@@ -200,7 +200,7 @@ export function buildChecks(d: Diagnose): CheckRow[] {
         value: frida.version ? `已安装 ${frida.version}` : '已安装' });
     } else if (frida.installable) {
       rows.push({ id: 'frida', label: 'Frida', status: liveRecommended(d) ? 'warn' : 'off', value: '未安装',
-        hint: '实时抓取的 Frida 方式需要它（约 45 MB）；免 Frida 方式不需要。',
+        hint: '实时抓取的 Frida 方式需要它（约 45\u00a0MB）；免 Frida 方式不需要。',
         action: { kind: 'install-frida', label: '一键安装' } });
     } else {
       rows.push({ id: 'frida', label: 'Frida', status: 'off', value: '这个版本没带',

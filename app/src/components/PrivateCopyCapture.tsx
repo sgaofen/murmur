@@ -14,6 +14,7 @@ import {
 } from '../data/api';
 import type { PrivateCopyStatus } from '../data/api';
 import { Button, Callout, Card, SegmentedControl } from '../ui';
+import { InlineError } from '../onboarding/parts';
 
 interface Props {
   /** Keys are saved — run the existing decrypt flow. */
@@ -36,6 +37,8 @@ export function PrivateCopyCapture({ onDecrypt, onBack }: Props) {
   const [st, setSt] = useState<PrivateCopyStatus | null>(null);
   const [seconds, setSeconds] = useState(180);
   const [err, setErr] = useState<string | null>(null);
+  // Backend code for `err` when it has a catalog entry (data/errorCatalog.ts).
+  const [errCode, setErrCode] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const pollRef = useRef<number | null>(null);
 
@@ -69,10 +72,11 @@ export function PrivateCopyCapture({ onDecrypt, onBack }: Props) {
 
   async function start() {
     setErr(null);
+    setErrCode(null);
     setBusy(true);
     try {
       const r = await startPrivateCopy(seconds);
-      if (!r.ok) setErr(r.error || '启动失败');
+      if (!r.ok) { setErr(r.error || '启动失败'); setErrCode(r.code ?? null); }
       await refresh(!!r.complete);
     } catch (e: any) {
       setErr(e?.message || String(e));
@@ -96,7 +100,7 @@ export function PrivateCopyCapture({ onDecrypt, onBack }: Props) {
   }
 
   if (!st) {
-    return <div className="et-meta" style={{ padding: '24px 0', textAlign: 'center' }}>正在检查免 Frida 抓取环境…</div>;
+    return <div className="ob-working__sub" role="status">正在检查免 Frida 抓取环境…</div>;
   }
 
   const job = st.job;
@@ -112,8 +116,7 @@ export function PrivateCopyCapture({ onDecrypt, onBack }: Props) {
       <>
         <Intro />
         <Callout tone="warning" title="这个版本的 App 没带上捕获组件">
-          免 Frida 方式需要一个随 App 编译的小组件（murmur_keycap.dylib），当前这份没有打包进来。
-          可以改用上一步的 Frida 实时抓取，或等带有该组件的版本。
+          免 Frida 方式需要一个随 App 编译的小组件（murmur_keycap.dylib），当前这份没有打包进来。可以改用上一步的 Frida 实时抓取，或等带有该组件的版本。
         </Callout>
         {onBack && <Button variant="secondary" size="lg" block className="ui-mt-3" onClick={onBack}>← 换回 Frida 方式</Button>}
       </>
@@ -144,10 +147,8 @@ export function PrivateCopyCapture({ onDecrypt, onBack }: Props) {
               options={DURATIONS.map(d => ({ value: String(d), label: `${d} 秒` }))} />
           </div>
           <Callout tone="warning" compact>
-            点开始后 Murmur 会把微信复制一份到自己的目录、重签名后打开这份<strong>副本</strong>，
-            不会动你的 <code>/Applications/WeChat.app</code>。副本打开后请在里面登录并随便用一下，密钥到手就行。<br/>
-            风控提示：复制并重签名、注入微信进程这类操作有被腾讯检测到的可能，极端情况下可能触发账号安全提醒或限制。
-            开始前<strong>必须先完全退出原版微信</strong>（副本和原版共用同一份聊天数据，不能同时运行），每轮结束时 Murmur 会自动关掉副本。Murmur 只处理本机、你本人的数据，不上传任何内容；介意的话请不要继续。
+            点开始后 Murmur 会把微信复制一份到自己的目录、重签名后打开这份<strong>副本</strong>，不会动你的 <code>/Applications/WeChat.app</code>。副本打开后请在里面登录并随便用一下，密钥到手就行。<br/>
+            风控提示：复制并重签名、注入微信进程这类操作有被腾讯检测到的可能，极端情况下可能触发账号安全提醒或限制。开始前<strong>必须先完全退出原版微信</strong>（副本和原版共用同一份聊天数据，不能同时运行），每轮结束时 Murmur 会自动关掉副本。Murmur 只处理本机、你本人的数据，不上传任何内容；介意的话请不要继续。
           </Callout>
           <div className="ui-stack">
             {finished && matched > 0 ? (
@@ -187,27 +188,26 @@ export function PrivateCopyCapture({ onDecrypt, onBack }: Props) {
         }} />
       )}
 
-      {err && <Callout tone="danger" compact className="ui-mt-3">{err}</Callout>}
+      {err && <InlineError code={errCode} raw={err} className="ui-mt-3" />}
     </>
   );
 }
 
 function Intro() {
   return (
-    <div className="et-serif" style={{ fontSize: 15, lineHeight: 1.7, color: 'var(--text-secondary)', marginBottom: 12 }}>
-      <strong>免 Frida 方式</strong>：不装 Frida、不用管理员密码。Murmur 复制一份微信到自己目录、重签名后打开这份副本，
-      在副本<strong>用到</strong>密钥的那一刻把它截下来。所以请在副本里登录并操作一下微信。
-    </div>
+    <p className="ob-lead">
+      <strong>免 Frida 方式</strong>：不装 Frida、不用管理员密码。Murmur 复制一份微信到自己目录、重签名后打开这份副本，在副本<strong>用到</strong>密钥的那一刻把它截下来。所以请在副本里登录并操作一下微信。
+    </p>
   );
 }
 
 function TodoList() {
   return (
     <Card variant="sunken" padding="sm">
-      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>副本打开后，在它里面做这些：</div>
-      <ol style={{ margin: 0, paddingLeft: 20, fontSize: 13, lineHeight: 1.8 }}>
+      <div className="ob-section-title">副本打开后，在它里面做这些：</div>
+      <ol className="ob-list">
         {TODO.map(([what, why]) => (
-          <li key={what}>{what} <span className="et-meta" style={{ fontSize: 11 }}>· {why}</span></li>
+          <li key={what}>{what}<span className="ob-list__why">· {why}</span></li>
         ))}
       </ol>
     </Card>

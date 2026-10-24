@@ -12,10 +12,12 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { cancelLiveKey, getLiveKeyStatus, installFrida, startLiveKey } from '../data/api';
 import type { LiveKeyStatus } from '../data/api';
-import { Button, Callout, Card, SegmentedControl } from '../ui';
+import { Button, Callout, Card, Chip, SegmentedControl } from '../ui';
+import { IconCheck, IconFolder, IconKey } from '../ui/icons';
 import { PrivateCopyCapture } from './PrivateCopyCapture';
 import { lookupError } from '../data/errorCatalog';
-import { ErrorExplain } from './ErrorExplain';
+import { maskText } from '../utils/privacy';
+import { InlineError } from '../onboarding/parts';
 
 interface Props {
   /** Keys are saved — run the existing decrypt flow. */
@@ -25,6 +27,9 @@ interface Props {
   wechatVersion?: string | null;
   /** Optional secondary action (e.g. back to paste-key). */
   onPaste?: () => void;
+  /** From /api/diagnose `private_copy.available`: is the 免 Frida capture dylib
+   * bundled? Shown on the method chooser; undefined = not known. */
+  keycapAvailable?: boolean | null;
 }
 
 const DURATIONS = [60, 90, 180];
@@ -42,7 +47,7 @@ const TODO: Array<[string, string]> = [
   ['打开收藏、表情面板，发一张图片', '收藏 / 表情 / 媒体库'],
 ];
 
-export function LiveKeyCapture({ onDecrypt, reason = 'manual', wechatVersion, onPaste }: Props) {
+export function LiveKeyCapture({ onDecrypt, reason = 'manual', wechatVersion, onPaste, keycapAvailable }: Props) {
   const [st, setSt] = useState<LiveKeyStatus | null>(null);
   const [seconds, setSeconds] = useState(90);
   const [err, setErr] = useState<string | null>(null);
@@ -117,12 +122,12 @@ export function LiveKeyCapture({ onDecrypt, reason = 'manual', wechatVersion, on
     return <PrivateCopyCapture onDecrypt={onDecrypt} onBack={() => setMethod(null)} />;
   }
   if (method === null) {
-    return <MethodChooser reason={reason} wechatVersion={wechatVersion}
-      onPick={setMethod} onPaste={onPaste} />;
+    return <MethodChooser reason={reason} wechatVersion={wechatVersion} frida={st?.frida}
+      keycapAvailable={keycapAvailable} onPick={setMethod} onPaste={onPaste} />;
   }
 
   if (!st) {
-    return <div className="et-meta" style={{ padding: '24px 0', textAlign: 'center' }}>正在检查实时抓取环境…</div>;
+    return <div className="ob-working__sub" role="status">正在检查实时抓取环境…</div>;
   }
 
   const job = st.job;
@@ -161,8 +166,7 @@ export function LiveKeyCapture({ onDecrypt, reason = 'manual', wechatVersion, on
               options={DURATIONS.map(d => ({ value: String(d), label: `${d} 秒` }))} />
           </div>
           <Callout tone="warning" compact>
-            点开始后多半会弹 macOS 密码窗口（挂钩微信需要管理员权限），输完开机密码倒计时才开始。
-            倒计时期间<strong>切到微信去操作</strong>，Murmur 这边不用看着。<br/>
+            点开始后多半会弹 macOS 密码窗口（挂钩微信需要管理员权限），输完开机密码倒计时才开始。倒计时期间<strong>切到微信去操作</strong>，Murmur 这边不用看着。<br/>
             风控提示：挂钩微信进程有被腾讯检测到的可能。Murmur 只处理本机、你本人的数据，不上传任何内容。
           </Callout>
           <div className="ui-stack">
@@ -197,8 +201,7 @@ export function LiveKeyCapture({ onDecrypt, reason = 'manual', wechatVersion, on
         }} />
       )}
 
-      {err && <ErrorExplain code={errCode} style={{ marginTop: 10, marginBottom: 0 }} />}
-      {err && <Callout tone="danger" compact className="ui-mt-3">{err}</Callout>}
+      {err && <InlineError code={errCode} raw={err} className="ui-mt-3" />}
 
       {onPaste && !job.running && (
         <Button variant="ghost" block className="ui-mt-2" onClick={onPaste}>或者：手动粘贴密钥</Button>
@@ -207,31 +210,47 @@ export function LiveKeyCapture({ onDecrypt, reason = 'manual', wechatVersion, on
   );
 }
 
-function MethodChooser({ reason, wechatVersion, onPick, onPaste }: {
+function MethodChooser({ reason, wechatVersion, frida, keycapAvailable, onPick, onPaste }: {
   reason: Props['reason']; wechatVersion?: string | null;
+  frida?: LiveKeyStatus['frida']; keycapAvailable?: boolean | null;
   onPick: (m: 'frida' | 'private-copy') => void; onPaste?: () => void;
 }) {
-  const card = (m: 'frida' | 'private-copy', title: ReactNode, desc: string) => (
+  const card = (m: 'frida' | 'private-copy', icon: ReactNode, title: ReactNode, desc: string, chips: ReactNode) => (
     <Card variant="sunken" padding="sm" interactive role="button" tabIndex={0}
       onClick={() => onPick(m)}
       onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onPick(m); } }}>
-      <div style={{ fontWeight: 600, fontSize: 14 }}>{title}</div>
-      <div className="et-meta" style={{ marginTop: 4, lineHeight: 1.6 }}>{desc}</div>
+      <div className="ob-option">
+        <span className="ob-option__icon">{icon}</span>
+        <div className="ob-option__body">
+          <div className="ob-option__title">{title}</div>
+          <div className="ob-option__desc">{desc}</div>
+          {chips && <div className="ob-option__chips">{chips}</div>}
+        </div>
+      </div>
     </Card>
   );
   return (
     <>
       <Intro reason={reason} wechatVersion={wechatVersion} />
-      <div className="ui-stack">
-        <div className="et-meta">选一种抓取方式：</div>
-        {card('frida', 'Frida 实时抓取',
-          '挂钩正在运行的微信。需要装一次 Frida，并会弹一次系统密码窗（管理员权限）。不改动微信本体。')}
-        {card('private-copy',
-          <>免 Frida 方式 <span style={{ color: 'var(--accent-text)', fontSize: 12, fontWeight: 500 }}>推荐给不想装 Frida / 不想输管理员密码的人</span></>,
-          '把微信复制一份到 Murmur 自己的目录、重签名后打开这份副本来抓。不装 Frida、不用管理员密码，不动 /Applications/WeChat.app。')}
+      <div className="ob-section-title">选一种抓取方式：</div>
+      <div className="ob-options">
+        {card('frida', <IconKey size={16} />, 'Frida 实时抓取',
+          '挂钩正在运行的微信。需要装一次 Frida，并会弹一次系统密码窗（管理员权限）。不改动微信本体，但微信要先重签名。',
+          <>
+            {frida && (frida.installed
+              ? <Chip size="sm" tone="success" icon={<IconCheck size={11} />}>Frida 已安装</Chip>
+              : <Chip size="sm" tone="warning">{frida.installable ? '需要先装 Frida（约 45 MB）' : '这个版本没带 Frida'}</Chip>)}
+            <Chip size="sm">要管理员密码</Chip>
+          </>)}
+        {card('private-copy', <IconFolder size={16} />,
+          <>免 Frida 方式 <Chip size="sm" tone="accent">不用装 Frida · 不用管理员密码</Chip></>,
+          '把微信复制一份到 Murmur 自己的目录、重签名后打开这份副本来抓。不动 /Applications/WeChat.app；开始前要先完全退出原版微信。',
+          keycapAvailable == null ? null : keycapAvailable
+            ? <Chip size="sm" tone="success" icon={<IconCheck size={11} />}>捕获组件已就绪</Chip>
+            : <Chip size="sm" tone="warning">这个版本没带捕获组件</Chip>)}
       </div>
       {onPaste && (
-        <Button variant="ghost" block className="ui-mt-2" onClick={onPaste}>或者：手动粘贴密钥</Button>
+        <Button variant="ghost" block className="ui-mt-3" onClick={onPaste}>或者：手动粘贴密钥</Button>
       )}
     </>
   );
@@ -239,21 +258,21 @@ function MethodChooser({ reason, wechatVersion, onPick, onPaste }: {
 
 function Intro({ reason, wechatVersion }: { reason: Props['reason']; wechatVersion?: string | null }) {
   return (
-    <div className="et-serif" style={{ fontSize: 15, lineHeight: 1.7, color: 'var(--text-secondary)', marginBottom: 12 }}>
+    <p className="ob-lead">
       {reason === 'scan-empty' && <>内存扫描这次一个密钥都没找到 —— 微信 4.1.9 之后很常见，不是你操作的问题。<br/></>}
       {reason === 'version' && wechatVersion && <>检测到你的微信是 <strong>{wechatVersion}</strong>，这个版本密钥不再常驻内存。<br/></>}
       换个办法：我在微信<strong>用到</strong>密钥的那一刻把它截下来。所以抓取期间需要你<strong>主动去用微信</strong>，光放着是抓不到的。
-    </div>
+    </p>
   );
 }
 
 function TodoList() {
   return (
     <Card variant="sunken" padding="sm">
-      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>倒计时开始后，去微信里做这些：</div>
-      <ol style={{ margin: 0, paddingLeft: 20, fontSize: 13, lineHeight: 1.8 }}>
+      <div className="ob-section-title">倒计时开始后，去微信里做这些：</div>
+      <ol className="ob-list">
         {TODO.map(([what, why]) => (
-          <li key={what}>{what} <span className="et-meta" style={{ fontSize: 11 }}>· {why}</span></li>
+          <li key={what}>{what}<span className="ob-list__why">· {why}</span></li>
         ))}
       </ol>
     </Card>
@@ -334,16 +353,17 @@ function JobError({ error, code, log }: { error: string | null; code?: string | 
     error === 'wechat-not-running' ? '微信没在运行，请先打开并登录微信。' :
     error === 'no-dbs' ? '没找到微信的加密数据库，请确认微信已经登录并完成首次同步。' :
     `抓取失败：${error || '未知错误'}`;
+  // Known code → catalog explanation; otherwise the hand-mapped tag text.
   return (
-    <Callout tone="danger" title={known ? undefined : msg}>
-      {known && <ErrorExplain code={code} style={{ marginBottom: 0 }} />}
+    <div>
+      <InlineError code={code} raw={known ? null : msg} />
       {log && (
-        <details>
+        <details className="ob-more">
           <summary>查看日志</summary>
-          <pre>{log.slice(-1500)}</pre>
+          <div className="ob-well">{maskText(log.slice(-1500))}</div>
         </details>
       )}
-    </Callout>
+    </div>
   );
 }
 
@@ -352,7 +372,7 @@ function FridaMissing({ status, onInstall }: { status: LiveKeyStatus; onInstall:
   if (status.frida.installable) {
     return (
       <Card variant="sunken" padding="sm" className="ui-mb-3">
-        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>需要先装一个组件：Frida</div>
+        <div className="ob-section-title">需要先装一个组件：Frida</div>
         <div className="et-meta">实时抓取靠 Frida 挂钩微信的加密调用，只装一次（下载约 45 MB，装在当前 Python 的用户目录）。</div>
         {inst.ok === false && (
           <Callout tone="danger" compact className="ui-mt-2" title="安装失败">
@@ -371,7 +391,7 @@ function FridaMissing({ status, onInstall }: { status: LiveKeyStatus; onInstall:
   }
   return (
     <Card variant="sunken" padding="sm" className="ui-mb-3">
-      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>这个版本的 App 没带上 Frida，先用终端抓一次</div>
+      <div className="ob-section-title">这个版本的 App 没带上 Frida，先用终端抓一次</div>
       <div className="et-meta" style={{ marginBottom: 6 }}>下载源码后在仓库目录里运行（抓的时候按下面的清单去用微信）：</div>
       <pre style={{ background: 'var(--surface-card)', color: 'var(--text-secondary)', padding: '8px 10px', borderRadius: 6, fontSize: 11, fontFamily: 'var(--font-mono)', whiteSpace: 'pre-wrap', margin: 0 }}>
 {`python3.12 -m pip install -r requirements-mac-keyextract.txt

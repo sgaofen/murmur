@@ -103,6 +103,12 @@
 }
 .app-account__meta { font-size: 11px; font-weight: 500; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; }
 .app-account__caret { color: var(--text-faint); }
+/* account menu (portaled to <body>): its items use inline `all: unset`, which
+   also wipes the focus ring — put a visible one back for keyboard users. */
+.app-account-menu [role="menuitem"]:focus-visible {
+  outline: 2px solid var(--focus-ring) !important;
+  outline-offset: -2px !important;
+}
 
 /* privacy row — stays tinted while on */
 .app-privacy.is-on { background: var(--accent-soft); color: var(--accent-text); }

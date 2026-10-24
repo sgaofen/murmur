@@ -28,8 +28,8 @@ export function logTail(log: string | null | undefined, n = 12): string {
   return (log || '').split('\n').slice(-n).join('\n').trim();
 }
 
-export function Lead({ children }: { children: ReactNode }) {
-  return <p className="ob-lead">{children}</p>;
+export function Lead({ children, className }: { children: ReactNode; className?: string }) {
+  return <p className={className ? `ob-lead ${className}` : 'ob-lead'}>{children}</p>;
 }
 
 export function Working({ title, sub }: { title: ReactNode; sub?: ReactNode }) {
@@ -180,22 +180,30 @@ export function StepError({ code, raw, log, onRetry, retryLabel = '重试这一�
   const fallback = lookupError('INTERNAL_ERROR');
   const rawText = (raw || '').trim();
   const logText = (log || '').trim();
-  const showRaw = !!rawText && !!entry;
+  // Generic entries (DECRYPT_FAILED, INTERNAL_ERROR…) say 「见下方原始报错」:
+  // show the raw text right there. Specific ones keep it under 技术细节.
+  const rawInline = !!rawText && (!entry || entry.reason.includes('原始报错'));
+  const rawInDetails = !!rawText && !rawInline;
   return (
     <div className="ob-error">
       <ErrorState
         tone={!entry || entry.level === 'blocking' ? 'danger' : 'warning'}
         code={code || undefined}
         title={title ?? entry?.title ?? '出了点问题'}
-        reason={entry ? entry.reason : rawText ? <span className="ob-prewrap">{maskText(rawText)}</span> : undefined}
+        reason={entry ? (
+          <>
+            {entry.reason}
+            {rawInline && <pre className="ob-error-pre">{maskText(rawText)}</pre>}
+          </>
+        ) : rawText ? <span className="ob-prewrap">{maskText(rawText)}</span> : undefined}
         fixes={[entry?.fix ?? fallback?.fix].filter(Boolean)}
         onRetry={onRetry}
         retryLabel={retryLabel}
         diagnostics={() => diagnosticsText(code ?? null, [rawText, logText].filter(Boolean).join('\n\n'))}
         actions={actions}
-        details={(showRaw || logText) ? (
+        details={(rawInDetails || logText) ? (
           <>
-            {showRaw && <><div>原始报错</div><pre>{maskText(rawText)}</pre></>}
+            {rawInDetails && <><div>原始报错</div><pre>{maskText(rawText)}</pre></>}
             {logText && <><div>日志</div><pre>{maskText(logText)}</pre></>}
           </>
         ) : undefined}
