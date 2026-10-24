@@ -67,8 +67,12 @@ a = Analysis(
         "thumb_index",
         "transcribe_voice",
         "decrypt_py",
+        "decrypt_cache",
+        "wal_frames",
+        "live_sync",
         "decrypted_media_index",
         "batch_analyze",
+        "mcp_server",
         "live_key",
         "hook_cc_key_frida",
         # macOS live key capture (WeChat 4.1.9+). frida is optional: bundled
