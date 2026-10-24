@@ -646,6 +646,54 @@ class QQStore:
             yield m
 
 
+    def iter_table_rows(self, table: str, after_rowid: int = 0) -> Iterator[dict]:
+        """Yield rows of c2c_msg_table / group_msg_table newer than `after_rowid`.
+
+        Used by the search indexer (cli/search_index.py). Rows come in rowid
+        order with their location info (rowid + QQNT msg id "40001") so a
+        hit can be located later. `chat` is the EchoStore-shape username
+        (peer uid, or "<group>@chatroom"); `sender` is "self" or the uid.
+        """
+        if table not in ("c2c_msg_table", "group_msg_table"):
+            raise ValueError(f"unexpected QQ table {table}")
+        is_group = table == "group_msg_table"
+        self_uid = self._resolve_self_uid()
+        sql = (f'SELECT rowid, "40001", CAST("40021" AS BLOB), CAST("40020" AS BLOB), "40050", '
+               f'"40005", "40800", CAST("40090" AS BLOB) FROM {table} '
+               f'WHERE rowid > ? ORDER BY rowid ASC')
+
+        def _s(v) -> str:
+            if isinstance(v, bytes):
+                return v.decode("utf-8", errors="replace")
+            return "" if v is None else str(v)
+
+        c = self._conn("nt_msg.db")
+        try:
+            for rowid, msg_id, peer, sender_uid, ts, type_tag, blob, group_disp in c.execute(
+                    sql, (int(after_rowid),)):
+                peer_s = _s(peer)
+                if not peer_s or ts is None:
+                    continue
+                try:
+                    text, wx_type, label = _render_content(type_tag or 0, blob)
+                except Exception:
+                    text, wx_type, label = "", 1, "text"
+                sender_s = _s(sender_uid)
+                yield {
+                    "rowid": int(rowid),
+                    "msg_id": msg_id,
+                    "chat": f"{peer_s}{GROUP_SUFFIX}" if is_group else peer_s,
+                    "is_group": is_group,
+                    "sender": "self" if (sender_s and sender_s == self_uid) else sender_s,
+                    "group_disp": _s(group_disp) if is_group else "",
+                    "ts": int(ts),
+                    "type": wx_type,
+                    "type_label": label,
+                    "text": text,
+                }
+        finally:
+            c.close()
+
     # --- aggregations (mirror cli/etcli.py:build_msg_index/heat_monthly_via_sql/earliest_ts) ---
 
     def build_index(self) -> tuple[dict[str, int], dict[str, int]]:

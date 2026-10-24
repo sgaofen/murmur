@@ -1,9 +1,12 @@
 import { useEffect, useState } from 'react';
-import { extractKey, getDiagnose, openFullDiskAccess, refreshData, resignWechat, saveKey, saveWeChatRoot, startDiskScan, getDiskScanStatus, cancelDiskScan } from '../data/api';
+import { errorCode, extractKey, getDiagnose, openFullDiskAccess, refreshData, resignWechat, saveKey, saveWeChatRoot, startDiskScan, getDiskScanStatus, cancelDiskScan } from '../data/api';
 import type { Diagnose, ScanState, ScanFound } from '../data/api';
 import { maskText } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
 import { DiagBundleButton } from '../components/DiagBundleButton';
+import { ErrorExplain } from '../components/ErrorExplain';
+import { lookupError } from '../data/errorCatalog';
+import { LiveKeyCapture } from '../components/LiveKeyCapture';
 
 interface Props {
   open: boolean;
@@ -17,19 +20,23 @@ interface Props {
   initError?: string | null;
 }
 
-type Phase = 'welcome' | 'diagnose' | 'mac-no-data' | 'mac-paste-key' | 'mac-auto-extract' | 'mac-resign-prompt' | 'mac-resigning' | 'mac-wait-login' | 'mac-fda-needed' | 'win-no-data' | 'win-need-key' | 'win-decrypt' | 'extract-key' | 'done' | 'error';
+type Phase = 'welcome' | 'diagnose' | 'mac-no-data' | 'mac-paste-key' | 'mac-auto-extract' | 'mac-resign-prompt' | 'mac-resigning' | 'mac-wait-login' | 'mac-fda-needed' | 'win-no-data' | 'win-need-key' | 'win-decrypt' | 'extract-key' | 'mac-live-capture' | 'done' | 'error';
 
 export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }: Props) {
   void usePrivacy();
   const [phase, setPhase] = useState<Phase>('welcome');
   const [diag, setDiag] = useState<Diagnose | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Stable backend error code for `error` (data/errorCatalog.ts); null → raw text only.
+  const [errCode, setErrCode] = useState<string | null>(null);
   const [progress, setProgress] = useState<string>('');
+  const [liveReason, setLiveReason] = useState<'scan-empty' | 'version' | 'manual'>('manual');
 
   useEffect(() => {
     if (!open) return;
     setPhase('welcome');
     setError(null);
+    setErrCode(null);
   }, [open]);
 
   useEffect(() => {
@@ -62,6 +69,7 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
 
   async function startDiagnose() {
     setPhase('diagnose');
+    setErrCode(null);
     try {
       const d = await getDiagnose();
       setDiag(d);
@@ -96,10 +104,12 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
         setPhase('win-no-data');
       } else {
         setError('看起来你还没在这台电脑上登录过微信，请先用微信登录一次。');
+        setErrCode('WECHAT_DATA_NOT_FOUND');
         setPhase('error');
       }
     } catch (e: any) {
       setError(e?.message || String(e));
+      setErrCode(errorCode(e));
       setPhase('error');
     }
   }
@@ -107,10 +117,12 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
   async function runDecrypt() {
     setProgress('正在解密所有微信数据库…');
     setPhase('win-decrypt');
+    setErrCode(null);
     try {
       const r = await refreshData();
       if (!r.ok) {
         setError(r.details || '解密失败');
+        setErrCode(r.code ?? 'DECRYPT_FAILED');
         setPhase('error');
         return;
       }
@@ -122,20 +134,24 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
         setError(`解密完成但后端无法加载这份数据：${r.init_error}\n\n` +
                  `常见原因：session.db 损坏 / 表名不匹配 / 解密目录里有上次失败的残留文件。\n` +
                  `建议：完全退出 Murmur，删除 ~/Documents/Murmur/decrypted/ 整个目录，重新走引导（抓 key 前先在微信里点开聊天列表 + 几个对话 + 朋友圈让 WCDB 派发完整 key）。`);
+        setErrCode(r.code ?? 'STORE_INIT_FAILED');
         setPhase('error');
         return;
       }
       setPhase('done');
     } catch (e: any) {
       setError(e?.message || String(e));
+      setErrCode(errorCode(e));
       setPhase('error');
     }
   }
 
   async function submitMacKey(key: string) {
     const cleaned = key.trim().toLowerCase();
+    setErrCode(null);
     if (cleaned.length !== 64 || !/^[0-9a-f]+$/.test(cleaned)) {
       setError('密钥格式不对：必须是 64 位十六进制字符（0-9a-f）');
+      setErrCode('KEY_FORMAT_INVALID');
       setPhase('error');
       return;
     }
@@ -143,23 +159,27 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
       const sr = await saveKey(cleaned);
       if (!sr.ok) {
         setError(sr.error || '保存密钥失败');
+        setErrCode(sr.code ?? null);
         setPhase('error');
         return;
       }
       await runDecrypt();
     } catch (e: any) {
       setError(e?.message || String(e));
+      setErrCode(errorCode(e));
       setPhase('error');
     }
   }
 
   async function startKeyExtract() {
+    setErrCode(null);
     try {
       if (diag?.platform === 'windows') {
         const latest = await getDiagnose();
         setDiag(latest);
         if (latest.capabilities.weixin_running === false) {
           setError('没有检测到正在运行的 Weixin.exe / WeChat.exe。请先打开微信，让它停在登录页但不要关闭程序；然后回到 Murmur 点「再次检测微信」。');
+          setErrCode('WECHAT_NOT_RUNNING');
           setPhase('error');
           return;
         }
@@ -177,11 +197,19 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
       // On Mac, extract_key_mac.py writes ~/.murmur/decrypted_keys.json directly.
       // r.ok=true with no r.key means the per-DB JSON was written.
       // On Win, r.key holds the password we still need to save.
+      if (!r.ok && diag?.platform === 'macos' && r.suggest_live === true) {
+        // WeChat 4.1.9+: the memory scan legitimately finds nothing. Don't
+        // dead-end on an error page — go straight to live capture (Frida).
+        setLiveReason('scan-empty');
+        setPhase('mac-live-capture');
+        return;
+      }
       if (!r.ok) {
         const fallback = diag?.platform === 'windows'
           ? '没读到密钥 — 请确认微信程序没有关闭：先让微信停在登录页，再点 Murmur 的开始抓密钥，然后在 90 秒内回微信完成登录。'
           : '没读到密钥 — 请确保已登录微信并点开几个对话';
         setError(r.log?.split('\n').slice(-12).join('\n') || fallback);
+        setErrCode(r.code ?? 'KEY_NOT_FOUND');
         setPhase('error');
         return;
       }
@@ -194,6 +222,7 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
       const r2 = await refreshData();
       if (!r2.ok) {
         setError(r2.details || '解密失败');
+        setErrCode(r2.code ?? 'DECRYPT_FAILED');
         setPhase('error');
         return;
       }
@@ -204,29 +233,39 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
         setError(`解密完成但后端无法加载这份数据：${r2.init_error}\n\n` +
                  `常见原因：session.db 损坏 / 表名不匹配 / 解密目录里有上次失败的残留文件。\n` +
                  `建议：完全退出 Murmur，删除 ~/Documents/Murmur/decrypted/ 整个目录，重新走引导。`);
+        setErrCode(r2.code ?? 'STORE_INIT_FAILED');
         setPhase('error');
         return;
       }
       setPhase('done');
     } catch (e: any) {
       setError(e?.message || String(e));
+      setErrCode(errorCode(e));
       setPhase('error');
     }
+  }
+
+  function openLive(d: Diagnose | null) {
+    setLiveReason(d?.live_key?.recommended ? 'version' : 'manual');
+    setPhase('mac-live-capture');
   }
 
   async function startResign() {
     setPhase('mac-resigning');
     setProgress('检查 WeChat 是否已退出，然后重签名…（系统会弹窗要开机密码）');
+    setErrCode(null);
     try {
       const r = await resignWechat({ relaunch: true });
       if (!r.ok) {
         setError([r.error, r.stderr].filter(Boolean).join('\n') || '重签名失败：请确认系统密码窗口没有被取消。');
+        setErrCode(r.code ?? 'RESIGN_FAILED');
         setPhase('error');
         return;
       }
       setPhase('mac-wait-login');
     } catch (e: any) {
       setError(e?.message || String(e));
+      setErrCode(errorCode(e));
       setPhase('error');
     }
   }
@@ -250,11 +289,14 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
     }}>
       <div style={{
         width: 640, maxWidth: '94%',
+        // The Mac key steps (checklists + capability table) can outgrow small
+        // windows; scroll inside the card instead of clipping the header.
+        maxHeight: 'calc(100vh - 48px)', overflowY: 'auto',
         background: 'var(--et-paper)',
         borderRadius: 'var(--et-r-lg)',
         boxShadow: 'var(--et-shadow-3)',
         border: '0.5px solid var(--et-line-2)',
-        overflow: 'hidden', position: 'relative',
+        position: 'relative',
       }}>
         <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 6, background: 'var(--et-orange)' }} />
         <button onClick={onClose} title="跳过引导（不推荐）" style={{
@@ -280,6 +322,7 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
             {phase === 'win-no-data' && '没找到微信数据目录'}
             {phase === 'win-need-key' && '只需要 30 秒，读取一次密钥'}
             {phase === 'extract-key' && '正在读取密钥…'}
+            {phase === 'mac-live-capture' && '实时抓取密钥（微信 4.1.9+）'}
             {phase === 'win-decrypt' && '正在解密最新数据…'}
             {phase === 'done' && '✓ 一切就绪'}
             {phase === 'error' && '出了点小问题'}
@@ -295,17 +338,21 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
           {phase === 'diagnose' && <Diagnosing />}
           {phase === 'mac-no-data' && diag && <MacNoData diag={diag} onSaved={startDiagnose} onRetry={startDiagnose} onOpenSettings={openFDAAndWait} />}
           {phase === 'mac-paste-key' && diag && <MacPasteKey diag={diag} onSubmit={submitMacKey} />}
-          {phase === 'mac-auto-extract' && diag && <MacAutoExtract diag={diag} onStart={startKeyExtract} onPaste={() => setPhase('mac-paste-key')} />}
+          {phase === 'mac-auto-extract' && diag && <MacAutoExtract diag={diag} onStart={startKeyExtract} onLive={() => openLive(diag)} onPaste={() => setPhase('mac-paste-key')} />}
           {phase === 'mac-resign-prompt' && diag && <MacResignPrompt diag={diag} onConsent={startResign} onPaste={() => setPhase('mac-paste-key')} />}
           {phase === 'mac-resigning' && <Working text={progress || '正在重签名…'} />}
-          {phase === 'mac-wait-login' && <MacWaitLogin onContinue={startKeyExtract} />}
+          {phase === 'mac-wait-login' && <MacWaitLogin diag={diag} onContinue={startKeyExtract} onLive={() => openLive(diag)} />}
+          {phase === 'mac-live-capture' && (
+            <LiveKeyCapture reason={liveReason} wechatVersion={diag?.wechat_version}
+              onDecrypt={() => void runDecrypt()} onPaste={() => setPhase('mac-paste-key')} />
+          )}
           {phase === 'mac-fda-needed' && <MacFDANeeded onOpenSettings={openFDAAndWait} onRetry={startDiagnose} />}
           {phase === 'win-no-data' && diag && <WinNoData diag={diag} onSaved={startDiagnose} />}
           {phase === 'win-need-key' && diag && <WinNeedKey diag={diag} onStart={startKeyExtract} onRetry={startDiagnose} />}
           {phase === 'extract-key' && <Working text={progress} />}
           {phase === 'win-decrypt' && <Working text={progress || "正在解密所有微信数据库…"} />}
           {phase === 'done' && <Done onDone={() => { onClose(); onDone?.(); }} />}
-          {phase === 'error' && <ErrorView error={error || ''} diag={diag} onRetry={startDiagnose} />}
+          {phase === 'error' && <ErrorView error={error || ''} code={errCode} diag={diag} onRetry={startDiagnose} />}
         </div>
       </div>
     </div>
@@ -999,8 +1046,10 @@ function MacResignPrompt({ diag, onConsent, onPaste }: { diag: Diagnose; onConse
         border: '0.5px solid rgba(138,90,28,0.3)', borderRadius: 8,
         fontSize: 11.5, color: '#8a5a1c', lineHeight: 1.6, marginBottom: 14,
       }}>
-        ⚠ 重签名是合法但属于「修改 App」操作。WeChat 自己升级时会把签名重置回原样，不影响后续使用。
-        如果不想动 WeChat，下面有「手动粘贴密钥」的备选路径。
+        ⚠ 重签名属于「修改 App」操作。WeChat 自己升级时会把签名重置回原样，不影响后续使用。
+        如果不想动 WeChat，下面有「手动粘贴密钥」的备选路径。<br/>
+        <strong>风控提示：</strong>重签名、挂钩微信进程这类操作有被腾讯检测到的可能，极端情况下可能触发账号安全提醒或限制。
+        Murmur 只读取你这台电脑上你自己的聊天数据，不上传任何内容；介意的话请不要继续。
       </div>
       <CapabilityList diag={diag} />
       <button onClick={onConsent} style={primaryBtn}>开始重签名</button>
@@ -1013,7 +1062,8 @@ function MacResignPrompt({ diag, onConsent, onPaste }: { diag: Diagnose; onConse
   );
 }
 
-function MacWaitLogin({ onContinue }: { onContinue: () => void }) {
+function MacWaitLogin({ diag, onContinue, onLive }: { diag: Diagnose | null; onContinue: () => void; onLive: () => void }) {
+  const liveFirst = !!diag?.live_key?.recommended;
   return (
     <>
       <div className="et-serif" style={{ fontSize: 15, lineHeight: 1.7, color: 'var(--et-ink-soft)', marginBottom: 14 }}>
@@ -1040,17 +1090,25 @@ function MacWaitLogin({ onContinue }: { onContinue: () => void }) {
         💡 为啥要点开对话？WCDB 是「点哪个 DB 才解锁哪个 DB」的，没点开 → 那个 DB 的 key 不在内存里 → 我抓出来会缺几个库。<br/>
         点完再来按下面按钮，会弹密码窗口（要 root 权限扫内存），输完就开始扫。
       </div>
-      <button onClick={onContinue} style={primaryBtn}>WeChat 都准备好了 → 开始抓密钥</button>
+      {liveFirst && <LiveRecommendBanner version={diag?.wechat_version} onLive={onLive} />}
+      <button onClick={onContinue} style={liveFirst ? secondaryBtn : primaryBtn}>
+        WeChat 都准备好了 → {liveFirst ? '先试试内存扫描（抓不到会自动切到实时抓取）' : '开始抓密钥'}
+      </button>
+      {!liveFirst && (
+        <button onClick={onLive} style={secondaryBtn}>微信 4.1.9 及以上？直接用「实时抓取」</button>
+      )}
     </>
   );
 }
 
-function MacAutoExtract({ diag, onStart, onPaste }: { diag: Diagnose; onStart: () => void; onPaste: () => void }) {
+function MacAutoExtract({ diag, onStart, onLive, onPaste }: { diag: Diagnose; onStart: () => void; onLive: () => void; onPaste: () => void }) {
+  const liveFirst = !!diag.live_key?.recommended;
   return (
     <>
       <div className="et-serif" style={{ fontSize: 15, lineHeight: 1.7, color: 'var(--et-ink-soft)', marginBottom: 12 }}>
         我会附加到微信进程扫内存抓 SQLCipher 密钥。<br/>
       </div>
+      {liveFirst && <LiveRecommendBanner version={diag.wechat_version} onLive={onLive} />}
       <div style={{
         padding: '12px 14px', background: 'var(--et-paper-2)',
         border: '0.5px solid var(--et-line-2)', borderRadius: 8,
@@ -1071,7 +1129,12 @@ function MacAutoExtract({ diag, onStart, onPaste }: { diag: Diagnose; onStart: (
         💡 准备好了再点下面 — 一旦点确认，30 秒内会弹一次 macOS 系统密码窗口，输入开机密码后立刻开扫。
       </div>
       <CapabilityList diag={diag} />
-      <button onClick={onStart} style={primaryBtn}>WeChat 已就绪 → 开始抓取</button>
+      <button onClick={onStart} style={liveFirst ? secondaryBtn : primaryBtn}>
+        WeChat 已就绪 → {liveFirst ? '先试试内存扫描（抓不到会自动切到实时抓取）' : '开始抓取'}
+      </button>
+      {!liveFirst && (
+        <button onClick={onLive} style={secondaryBtn}>微信 4.1.9 及以上？直接用「实时抓取」</button>
+      )}
       <button onClick={onPaste} style={{
         ...primaryBtn, marginTop: 8, background: 'transparent',
         color: 'var(--et-ink)', boxShadow: 'none',
@@ -1127,6 +1190,24 @@ function WinNeedKey({ diag, onStart, onRetry }: { diag: Diagnose; onStart: () =>
   );
 }
 
+function LiveRecommendBanner({ version, onLive }: { version?: string | null; onLive: () => void }) {
+  return (
+    <div style={{
+      padding: '12px 14px', background: 'rgba(255,107,71,0.08)',
+      border: '0.5px solid rgba(255,107,71,0.35)', borderRadius: 8,
+      fontSize: 13, lineHeight: 1.7, marginBottom: 12, color: 'var(--et-ink)',
+    }}>
+      <div style={{ fontWeight: 600 }}>
+        检测到微信 {version || '4.1.9+'}：推荐用「实时抓取」
+      </div>
+      <div className="et-meta" style={{ marginBottom: 4 }}>
+        4.1.9 之后密钥不再常驻内存，下面的内存扫描大概率一个都抓不到。实时抓取会在你用微信时把密钥截下来，大约 1–2 分钟。
+      </div>
+      <button onClick={onLive} style={primaryBtn}>用实时抓取（推荐）</button>
+    </div>
+  );
+}
+
 function Working({ text }: { text: string }) {
   return (
     <div style={{ textAlign: 'center', padding: '32px 0' }}>
@@ -1159,17 +1240,18 @@ function Done({ onDone }: { onDone: () => void }) {
   );
 }
 
-function ErrorView({ error, diag, onRetry }: { error: string; diag: Diagnose | null; onRetry: () => void }) {
-  const isWinHookInstallFailure = diag?.platform === 'windows' &&
+function ErrorView({ error, code, diag, onRetry }: { error: string; code?: string | null; diag: Diagnose | null; onRetry: () => void }) {
+  const isWinHookInstallFailure = code !== 'WIN_HOOK_FAILED' && diag?.platform === 'windows' &&
     /hook (setup|install) failed|wx_key\.dll|注入到微信进程/i.test(error);
   return (
     <>
+      <ErrorExplain code={code} />
       <div style={{
         padding: '12px 14px', background: 'rgba(196,90,63,0.12)',
         border: '0.5px solid rgba(196,90,63,0.4)',
         borderRadius: 8, marginBottom: 14,
       }}>
-        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--et-rose)', marginBottom: 6 }}>失败原因</div>
+        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--et-rose)', marginBottom: 6 }}>{lookupError(code) ? '原始报错' : '失败原因'}</div>
         <pre className="et-meta" style={{ fontSize: 11, color: 'var(--et-ink-soft)',
           whiteSpace: 'pre-wrap', margin: 0 }}>{maskText(error)}</pre>
       </div>
@@ -1203,4 +1285,9 @@ const primaryBtn: React.CSSProperties = {
   background: 'var(--et-orange)', color: '#fff',
   borderRadius: 'var(--et-r)', fontSize: 14, fontWeight: 600,
   boxShadow: '0 6px 16px rgba(255,107,71,0.32)',
+};
+
+const secondaryBtn: React.CSSProperties = {
+  ...primaryBtn, background: 'transparent', color: 'var(--et-ink)', boxShadow: 'none',
+  border: '1px solid var(--et-line-2)',
 };
