@@ -675,3 +675,41 @@ class EtcliEndpointTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class KeyForDbPassphraseTest(unittest.TestCase):
+    """#32's passphrase fallback, merged into the refactored key_for_db."""
+
+    def test_derives_from_passphrase_and_memoizes(self):
+        import refresh
+        import live_key
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            db = root / "message" / "message_9.db"
+            db.parent.mkdir()
+            db.write_bytes(b"\x11" * 16 + b"\x00" * 4080)
+            per_db = {"keys_by_db": {}, "keys_by_salt": {},
+                      "passphrase": {"hex": "ab" * 16, "prf": 5, "rounds": 256000}}
+            refresh._PASSPHRASE_KEYS.clear()
+            with mock.patch.object(live_key, "derive_from_passphrase",
+                                   return_value="cd" * 32) as m:
+                self.assertEqual(refresh.key_for_db(db, root, per_db), "cd" * 32)
+                self.assertEqual(refresh.key_for_db(db, root, per_db), "cd" * 32)
+            self.assertEqual(m.call_count, 1)
+            self.assertEqual(m.call_args[0][1][:16], b"\x11" * 16)
+
+    def test_saved_key_wins_over_passphrase(self):
+        import refresh
+        import live_key
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            db = root / "session" / "session.db"
+            db.parent.mkdir()
+            db.write_bytes(b"\x22" * 4096)
+            per_db = {"keys_by_db": {"session/session.db": "ef" * 32},
+                      "passphrase": {"hex": "ab" * 16}}
+            with mock.patch.object(live_key, "derive_from_passphrase") as m:
+                self.assertEqual(refresh.key_for_db(db, root, per_db), "ef" * 32)
+            m.assert_not_called()

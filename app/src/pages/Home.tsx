@@ -4,7 +4,8 @@ import { FriendCard } from '../components/FriendCard';
 import { Postmark } from '../components/Postmark';
 import { Ribbon } from '../components/Ribbon';
 import { Sparkline } from '../components/Sparkline';
-import { APP_VERSION, getAllFriends, getHomeSummary, getLogTail, getTauriLogTail, refreshData } from '../data/api';
+import { APP_VERSION, errorCode, getAllFriends, getHomeSummary, getLogTail, getTauriLogTail, refreshData } from '../data/api';
+import { lookupError } from '../data/errorCatalog';
 import type { LogTailResponse } from '../data/api';
 import type { Friend, HomeSummary } from '../data/types';
 import { ExtractKeyDialog } from './ExtractKeyDialog';
@@ -231,6 +232,7 @@ function FilterBar({
 }
 
 function isOnboardingNeededError(e: any): boolean {
+  if (errorCode(e) === 'NO_DECRYPTED_DATA') return true;
   const text = String(e?.message || e || '').toLowerCase();
   return text.includes('no_decrypted_data') ||
     text.includes('onboarding_required') ||
@@ -356,14 +358,15 @@ export function HomePage({ dark = false, onOpenFriend, onOpenOnboarding }: Props
     try {
       const r = await refreshData();
       window.clearInterval(progT);
-      const failure = r.ok ? '' : summarizeRefreshFailure(r.details || '');
+      const failCode = r.ok ? null : (r.code ?? null);
+      const failure = r.ok ? '' : summarizeRefreshFailure(r.details || '', failCode);
       const partial = r.ok && (r.details || '').includes('[WARN]');
       const successMsg = partial
         ? '已更新，但部分数据库未解密；可多打开聊天/朋友圈后重抓密钥'
         : `已更新 · ${(r.ms / 1000).toFixed(1)}s`;
       taskCenter.updateTask(taskId, {
         pct: 100, status: r.ok ? 'done' : 'error',
-        sub: r.ok ? successMsg : failure,
+        sub: r.ok ? successMsg : refreshFailureDetail(failure, failCode),
       });
       setRefreshMsg(r.ok ? successMsg : failure);
       if (r.ok) {
@@ -376,8 +379,9 @@ export function HomePage({ dark = false, onOpenFriend, onOpenOnboarding }: Props
       }
     } catch (e: any) {
       window.clearInterval(progT);
-      const failure = summarizeRefreshFailure(e?.message || String(e));
-      taskCenter.updateTask(taskId, { status: 'error', pct: 100, sub: failure });
+      const failCode = errorCode(e);
+      const failure = summarizeRefreshFailure(e?.message || String(e), failCode);
+      taskCenter.updateTask(taskId, { status: 'error', pct: 100, sub: refreshFailureDetail(failure, failCode) });
       setRefreshMsg(failure);
     } finally {
       setRefreshing(false);
@@ -503,7 +507,15 @@ export function HomePage({ dark = false, onOpenFriend, onOpenOnboarding }: Props
   );
 }
 
-function summarizeRefreshFailure(details: string): string {
+// Task-center line: catalog title + fix when the backend sent a known code.
+function refreshFailureDetail(summary: string, code: string | null): string {
+  const entry = lookupError(code);
+  return entry ? `${entry.title}：${entry.fix}` : summary;
+}
+
+function summarizeRefreshFailure(details: string, code: string | null = null): string {
+  const entry = lookupError(code);
+  if (entry) return `更新失败：${entry.title}`;
   const text = details || '';
   if (text.includes('找不到 Mac 解密密钥') || text.includes('decrypted_keys.json')) {
     return '缺少 Mac 解密密钥：先点「密钥」→「开始自动抓取」，抓到后再更新数据。';

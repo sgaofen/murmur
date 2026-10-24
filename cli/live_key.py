@@ -229,6 +229,7 @@ def split_pending(salt_map: dict, existing: dict) -> tuple[dict, dict]:
     re-keys DBs after a reinstall / account switch)."""
     by_db = existing.get("keys_by_db") or {}
     by_salt = existing.get("keys_by_salt") or {}
+    pp = existing.get("passphrase") or None
     pending: dict[str, bytes] = {}
     known: dict[str, str] = {}
     for salt_hex, meta in salt_map.items():
@@ -236,22 +237,39 @@ def split_pending(salt_map: dict, existing: dict) -> tuple[dict, dict]:
         cand = by_db.get(rel) or by_salt.get(salt_hex)
         if cand and _verify(page1, cand):
             known[rel] = cand
+            continue
+        # A saved account passphrase covers DBs created after the capture
+        # (new message shards) without hooking WeChat again.
+        derived = derive_from_passphrase(pp, page1) if pp else None
+        if derived:
+            known[rel] = derived
         else:
             pending[rel] = page1
     return pending, known
 
 
+def derive_from_passphrase(pp: dict, page1: bytes) -> Optional[str]:
+    sys.path.insert(0, str(CLI_DIR))
+    from hook_cc_key_frida import derive_db_key
+    try:
+        key = derive_db_key(bytes.fromhex(pp["hex"]), page1,
+                            int(pp.get("prf", 5)), int(pp.get("rounds", 256000)))
+    except (KeyError, TypeError, ValueError):
+        return None
+    return key.hex() if key else None
+
+
 def merge_keys(new_keys: dict, salt_by_rel: dict, wxid: Optional[str],
-               path: Optional[Path] = None) -> dict:
+               path: Optional[Path] = None, passphrase: Optional[dict] = None) -> dict:
     """Merge {rel: key_hex} into decrypted_keys.json without dropping
     anything found before. Returns the merged payload."""
     path = path or keys_path()
     with _MERGE_LOCK:
-        return _merge_keys_locked(new_keys, salt_by_rel, wxid, path)
+        return _merge_keys_locked(new_keys, salt_by_rel, wxid, path, passphrase)
 
 
 def _merge_keys_locked(new_keys: dict, salt_by_rel: dict, wxid: Optional[str],
-                       path: Path) -> dict:
+                       path: Path, passphrase: Optional[dict] = None) -> dict:
     cur = load_keys(path)
     by_db = dict(cur.get("keys_by_db") or {})
     by_salt = dict(cur.get("keys_by_salt") or {})
@@ -266,6 +284,9 @@ def _merge_keys_locked(new_keys: dict, salt_by_rel: dict, wxid: Optional[str],
         "keys_by_db": by_db,
         "keys_by_salt": by_salt,
     }
+    pp = passphrase or cur.get("passphrase")
+    if pp:
+        payload["passphrase"] = pp
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + f".tmp-{os.getpid()}-{os.urandom(4).hex()}")
     fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -336,6 +357,7 @@ class LiveKeyJob:
             "total": 0, "known": 0, "matched_count": 0, "new": [], "hits": 0,
             "elevated": False, "error": None, "log": "", "round": 0,
             "child_phase": None, "child_error": None,
+            "passphrase_found": False,
         }
 
     # --- helpers -------------------------------------------------------
@@ -447,13 +469,14 @@ class LiveKeyJob:
         upd = {
             "child_phase": p.get("phase"),
             "child_error": p.get("error"),
+            "passphrase_found": bool(p.get("passphrase_found")),
             "remaining": p.get("remaining"),
             "hits": p.get("hits", 0),
             "new": new,
             "matched_count": known + len(new),
         }
         ph = p.get("phase")
-        if ph in ("attaching", "capturing"):
+        if ph in ("attaching", "capturing", "waiting-wechat"):
             upd["phase"] = ph
         self._set(**upd)
 
@@ -569,17 +592,20 @@ class LiveKeyJob:
                 rc, out2 = self._run_once(argv, progress, known, True, pythonpath)
                 log += "\n--- 以管理员身份重试 ---\n" + out2
                 self._wait_child_finished(progress, STOP_WAIT)
-            new = {}
+            new, passphrase = {}, None
             try:
-                new = (json.loads(out_keys.read_text(encoding="utf-8")).get("keys_by_db") or {})
+                found = json.loads(out_keys.read_text(encoding="utf-8"))
+                new = found.get("keys_by_db") or {}
+                passphrase = found.get("passphrase") or None
             except (OSError, ValueError):
                 pass
             # Only trust keys for DBs we asked about, and re-check each one
             # against the page 1 we hold (cheap: two HMACs).
             new = {rel: k for rel, k in new.items()
                    if rel in pending and isinstance(k, str) and _verify(pending[rel], k)}
-            if new:
-                merge_keys(new, salt_by_rel, getattr(prof, "wxid", None), self._kpath())
+            if new or passphrase:
+                merge_keys(new, salt_by_rel, getattr(prof, "wxid", None), self._kpath(),
+                           passphrase=passphrase)
             with self._lock:
                 child_error = self.state.get("child_error")
             error = None

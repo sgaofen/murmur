@@ -13,8 +13,8 @@ import { useState } from 'react';
 import type { Friend } from '../../data/types';
 import { Avatar } from '../../components/Avatar';
 import { displayName } from '../../utils/privacy';
-import { Download, Sparkle, Code, Archive, Lock, Info } from '../../utils/icons';
-import { exportPairChat, type ExportFormat } from '../../data/api';
+import { Download, Sparkle, Code, Archive, Lock, Info, IconEvidence } from '../../utils/icons';
+import { exportPairChat } from '../../data/api';
 
 interface Props {
   a: string;       // wxid
@@ -24,7 +24,7 @@ interface Props {
 }
 
 interface Format {
-  id: 'md' | 'json' | 'html';
+  id: 'md' | 'json' | 'html' | 'csv';
   label: string;
   ext: string;
   tagline: string;
@@ -50,6 +50,12 @@ const FORMATS: Format[] = [
     tagline: '离线归档 / 直接打印',
     body: '一个文件就能离线打开，带样式，送给本人或备份云盘都合适。',
     icon: <Archive size={18} />,
+  },
+  {
+    id: 'csv', label: 'CSV', ext: '.csv',
+    tagline: '用 Excel / Numbers 打开',
+    body: '每条关系证据一行：提及、互回、朋友圈互动、共同的群，方便筛选排序。',
+    icon: <IconEvidence size={18} />,
   },
 ];
 
@@ -93,10 +99,7 @@ export function PairAnalysisPanel({ a, b, aName, bName }: Props) {
       // Goes through `exportPairChat` so it picks up the API_BASE absolute
       // URL (Tauri WebView resolves relative paths to `tauri://localhost/...`
       // which doesn't reach etcli on 127.0.0.1:9100).
-      // 'md' is the export-format alias for the markdown pack; the helper
-      // accepts our standard ExportFormat enum so we map md → txt internally.
-      const apiFmt: ExportFormat = fmt.id === 'md' ? 'txt' : fmt.id;
-      await exportPairChat(a, b, apiFmt);
+      await exportPairChat(a, b, fmt.id);
     } catch (e) {
       console.warn('[PairAnalysisPanel]', e);
       alert('导出失败：' + (e as Error).message);
@@ -194,7 +197,7 @@ export function PairAnalysisPanel({ a, b, aName, bName }: Props) {
       <div
         style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(3, 1fr)',
+          gridTemplateColumns: 'repeat(2, 1fr)',
           gap: 10,
         }}
       >

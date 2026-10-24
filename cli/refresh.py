@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import json
 import os
 import shutil
 import sqlite3
@@ -223,7 +224,7 @@ def _load_per_db_keys() -> dict | None:
         return None
     try:
         d = __import__("json").loads(p.read_text(encoding="utf-8"))
-        if isinstance(d, dict) and (d.get("keys_by_db") or d.get("keys_by_salt")):
+        if isinstance(d, dict) and (d.get("keys_by_db") or d.get("keys_by_salt") or d.get("passphrase")):
             return d
     except Exception:
         pass
@@ -335,9 +336,26 @@ def key_for_db(src: Path, encrypted_root: Path, per_db: dict) -> Optional[str]:
         return key_hex
     try:
         with open(src, "rb") as f:
-            return keys_by_salt.get(f.read(16).hex())
+            page1 = f.read(4096)
     except OSError:
         return None
+    key_hex = keys_by_salt.get(page1[:16].hex())
+    if key_hex or not per_db.get("passphrase"):
+        return key_hex
+    # Live capture saved the account passphrase: derive keys for DBs that
+    # appeared after the capture (new message shards etc.). PBKDF2 is 256k
+    # rounds, so memoize per (passphrase, salt) — live sync asks every tick.
+    import hashlib
+    pp = per_db["passphrase"]
+    memo_key = (hashlib.sha256(json.dumps(pp, sort_keys=True).encode("utf-8")).hexdigest(), page1[:16])
+    if memo_key not in _PASSPHRASE_KEYS:
+        from live_key import derive_from_passphrase  # noqa: E402
+        _PASSPHRASE_KEYS[memo_key] = derive_from_passphrase(pp, page1)
+    return _PASSPHRASE_KEYS[memo_key]
+
+
+# (sha256(passphrase), salt) -> derived key hex or None; see key_for_db.
+_PASSPHRASE_KEYS: dict = {}
 
 
 def snapshot_db(src: Path, dst_dir: Path, *, attempts: int = 4,

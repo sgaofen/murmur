@@ -56,6 +56,15 @@ can't signal a root process).
 Exit codes: 0 done, 1 generic failure, 5 attach denied (retry as root),
 6 frida not importable.
 
+One round instead of many: every DB key is
+PBKDF2-HMAC-SHA512(account passphrase, DB salt = first 16 bytes of the
+file, 256000). CCKeyDerivationPBKDF is hooked too, and as soon as WeChat
+derives *any* DB key we see the passphrase, so the keys of every other DB —
+including ones the user never touched this session — are derived offline
+here and HMAC-verified. The passphrase is saved alongside the keys
+("passphrase" in decrypted_keys.json) so DBs WeChat creates later (new
+message shards) can be decrypted without another capture.
+
 Writes/merges into ~/.murmur/decrypted_keys.json — same format and file as
 extract_key_mac.py / hook_cc_key.py, safe to alternate between them. Each
 run loads existing keys first and only reports on what's still missing.
@@ -128,9 +137,53 @@ function tryHook(name) {
     send({type: "info", msg: "hooked " + name + " @ " + addr});
 }
 
+// CCKeyDerivationPBKDF(algorithm, password, passwordLen, salt, saltLen,
+//                      prf, rounds, derivedKey, derivedKeyLen)
+const seenPassphrases = new Set();
+function hookPBKDF() {
+    let addr = null;
+    try {
+        addr = Process.getModuleByName("libcommonCrypto.dylib").getExportByName("CCKeyDerivationPBKDF");
+    } catch (e) {
+        send({type: "info", msg: "CCKeyDerivationPBKDF not hookable: " + e});
+        return;
+    }
+    Interceptor.attach(addr, {
+        onEnter(args) {
+            try {
+                const pwLen = args[2].toInt32();
+                const rounds = args[6].toInt32();
+                this.dk = args[7];
+                this.dkLen = args[8].toInt32();
+                // Skip SQLCipher's 2-round HMAC-key derivation and absurd sizes.
+                if (rounds < 1000 || pwLen <= 0 || pwLen > 1024) return;
+                const pw = Array.from(new Uint8Array(args[1].readByteArray(pwLen)));
+                const prf = args[5].toInt32();
+                const tag = pw.join(",") + "|" + prf + "|" + rounds;
+                if (seenPassphrases.has(tag)) return;
+                seenPassphrases.add(tag);
+                send({type: "pbkdf", password: pw, prf: prf, rounds: rounds});
+            } catch (e) {
+                send({type: "error", msg: "CCKeyDerivationPBKDF: " + e});
+            }
+        },
+        onLeave(retval) {
+            try {
+                if (this.dkLen !== KEY_SIZE) return;
+                const bytes = this.dk.readByteArray(KEY_SIZE);
+                send({type: "candidate", fn: "CCKeyDerivationPBKDF", key: Array.from(new Uint8Array(bytes))});
+            } catch (e) {
+                send({type: "error", msg: "CCKeyDerivationPBKDF leave: " + e});
+            }
+        }
+    });
+    send({type: "info", msg: "hooked CCKeyDerivationPBKDF @ " + addr});
+}
+
 tryHook("CCCrypt");
 tryHook("CCCryptorCreate");
 tryHook("CCCryptorCreateWithMode");
+hookPBKDF();
 send({type: "ready"});
 """
 
@@ -182,6 +235,21 @@ def verify_candidate_key(page1, candidate_key):
     mac.update(iv)
     mac.update((1).to_bytes(4, "little"))
     return hmac.compare_digest(mac.digest(), stored_hmac)
+
+
+# CommonCrypto's CCPseudoRandomAlgorithm values -> hashlib names.
+PRF_HASHES = {1: "sha1", 2: "sha224", 3: "sha256", 4: "sha384", 5: "sha512"}
+
+
+def derive_db_key(passphrase, page1, prf=5, rounds=256000):
+    """Derive one DB's AES key from the account passphrase (SQLCipher salt =
+    the DB file's first 16 bytes). Returns the key only if it HMAC-verifies
+    against page 1, else None."""
+    name = PRF_HASHES.get(prf)
+    if not name or len(page1) != PAGE_SIZE:
+        return None
+    key = hashlib.pbkdf2_hmac(name, passphrase, page1[:SALT_SIZE], rounds, KEY_SIZE)
+    return key if verify_candidate_key(page1, key) else None
 
 
 def discover_dbs():
@@ -254,6 +322,8 @@ class Capture:
         self.out_keys = out_keys
         self.progress_path = progress_path
         self.hits = 0
+        self.passphrase = None   # {"hex", "prf", "rounds"} once one verifies
+        self._tried_passphrases = set()
         self.phase = "starting"
         self.error = None
         self.started_at = time.time()
@@ -264,7 +334,8 @@ class Capture:
         if self.out_keys:
             # App-driven: only report what's new; the backend owns the merge.
             try:
-                _write_json_atomic(self.out_keys, {"wxid": self.wxid, "keys_by_db": self.new})
+                _write_json_atomic(self.out_keys, {"wxid": self.wxid, "keys_by_db": self.new,
+                                                   "passphrase": self.passphrase})
             except OSError as e:
                 log(f"WARNING: could not write {self.out_keys} ({e}) — new keys: {self.new}")
             return
@@ -288,6 +359,8 @@ class Capture:
             "keys_by_db": by_db,
             "keys_by_salt": dict(payload.get("keys_by_salt") or {}),
         })
+        if self.passphrase:
+            payload["passphrase"] = self.passphrase
         os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)
         try:
             _write_json_atomic(OUT_PATH, payload, mode=0o600)
@@ -328,6 +401,7 @@ class Capture:
                 "new": sorted(self.new.keys()),
                 "pending": sorted(self.pending.keys()),
                 "hits": self.hits,
+                "passphrase_found": self.passphrase is not None,
                 "error": self.error,
                 "updated_at": now,
             })
@@ -350,6 +424,30 @@ class Capture:
             self.write_progress()
         return hit
 
+    def on_passphrase(self, passphrase, prf=5, rounds=256000):
+        """Try a passphrase seen in CCKeyDerivationPBKDF against every
+        still-missing DB; one hit usually means we can derive all of them."""
+        tag = (bytes(passphrase), prf, rounds)
+        if tag in self._tried_passphrases or not self.pending:
+            return 0
+        self._tried_passphrases.add(tag)
+        got = 0
+        for rel, page1 in list(self.pending.items()):
+            key = derive_db_key(bytes(passphrase), page1, prf, rounds)
+            if key is None:
+                continue
+            self.matched[rel] = key.hex()
+            self.new[rel] = key.hex()
+            del self.pending[rel]
+            got += 1
+        if got:
+            self.passphrase = {"hex": bytes(passphrase).hex(), "prf": prf, "rounds": rounds}
+            log(f"PASSPHRASE verified (prf={prf}, rounds={rounds}) — derived {got} DB keys "
+                f"({len(self.matched)}/{self.total})")
+            self.save()
+            self.write_progress()
+        return got
+
     def on_message(self, message, data):
         if message.get("type") != "send":
             if message.get("type") == "error":
@@ -365,6 +463,10 @@ class Capture:
             return
         if kind == "ready":
             log("[agent] ready — hooks installed")
+            return
+        if kind == "pbkdf":
+            self.on_passphrase(bytes(payload["password"]), int(payload.get("prf", 5)),
+                               int(payload.get("rounds", 256000)))
             return
         if kind != "candidate":
             return
@@ -408,11 +510,16 @@ def find_wechat_pid():
 
 
 def run_capture(cap, pid, attach=None, stop_file=None, sleep=time.sleep,
-                clock=time.time, stop_when_complete=True, parent_pid=None):
+                clock=time.time, stop_when_complete=True, parent_pid=None,
+                find_pid=None):
     """Attach to `pid`, stream candidates into `cap` for `cap.seconds`.
 
-    `attach(pid) -> (session, script)` is injectable for tests; the default
-    uses Frida. Returns an EXIT_* code.
+    `attach(pid, on_message, on_detached) -> (session, script)` is injectable
+    for tests; the default uses Frida. If WeChat quits during the window and
+    `find_pid` is given, wait for it to be relaunched and re-attach: logging
+    in again re-opens every DB, i.e. re-derives every key through
+    CCKeyDerivationPBKDF — the fastest way to capture the passphrase.
+    Returns an EXIT_* code.
     """
     if attach is None:
         attach = _frida_attach
@@ -421,11 +528,16 @@ def run_capture(cap, pid, attach=None, stop_file=None, sleep=time.sleep,
         cap.write_progress()
         log("stop requested before attaching — exiting")
         return EXIT_OK
+    detached = {"flag": False}
+
+    def on_detached(*_a):
+        detached["flag"] = True
+
     cap.phase = "attaching"
     cap.write_progress()
     log(f"attaching to pid {pid} via frida")
     try:
-        session, script = attach(pid, cap.on_message)
+        session, script = attach(pid, cap.on_message, on_detached)
     except ImportError:
         cap.phase, cap.error = "error", "frida-missing"
         cap.write_progress()
@@ -442,9 +554,9 @@ def run_capture(cap, pid, attach=None, stop_file=None, sleep=time.sleep,
     cap.phase = "capturing"
     cap.hooked_at = clock()
     cap.write_progress()
-    log(">>> hooks are live — go ACTIVELY USE WeChat now: send a text, send a voice "
-        "message, send/view an image, open chats you haven't opened yet this session, "
-        "check Moments/Contacts/Favorites/stickers. Passively idling won't trigger much. <<<")
+    log(">>> hooks are live — go ACTIVELY USE WeChat now (fastest: quit WeChat and log in "
+        "again — every DB key is re-derived at login). Otherwise send a text, open chats "
+        "you haven't opened yet this session, check Moments/Contacts/Favorites. <<<")
     reason = "timeout"
     try:
         while clock() - cap.hooked_at < cap.seconds:
@@ -454,6 +566,25 @@ def run_capture(cap, pid, attach=None, stop_file=None, sleep=time.sleep,
             if should_stop(stop_file, parent_pid):
                 reason = "stopped"
                 break
+            if detached["flag"]:
+                if find_pid is None:
+                    reason = "wechat-exited"
+                    break
+                new_pid = find_pid()
+                if new_pid and new_pid != pid:
+                    # Give dyld a moment; hooks must be in before login opens the DBs.
+                    sleep(0.3)
+                    try:
+                        session, script = attach(new_pid, cap.on_message, on_detached)
+                        pid = new_pid
+                        detached["flag"] = False
+                        cap.phase = "capturing"
+                        log(f"WeChat relaunched — re-attached to pid {pid}")
+                    except Exception as e:
+                        log(f"re-attach to {new_pid} failed: {type(e).__name__}: {e}")
+                elif cap.phase != "waiting-wechat":
+                    cap.phase = "waiting-wechat"
+                    log("WeChat exited — waiting for it to be reopened")
             sleep(0.5)
             cap.write_progress()
     finally:
@@ -475,10 +606,12 @@ def run_capture(cap, pid, attach=None, stop_file=None, sleep=time.sleep,
     return EXIT_OK
 
 
-def _frida_attach(pid, on_message):
+def _frida_attach(pid, on_message, on_detached=None):
     import frida  # optional dependency — ImportError is handled by the caller
     device = frida.get_local_device()
     session = device.attach(pid)
+    if on_detached is not None:
+        session.on("detached", on_detached)
     script = session.create_script(JS_AGENT)
     script.on("message", on_message)
     script.load()
@@ -549,7 +682,8 @@ def main(argv=None):
         pid = args.pid
 
     return run_capture(cap, pid, stop_file=args.stop_file,
-                       stop_when_complete=args.pid is None, parent_pid=args.parent_pid)
+                       stop_when_complete=args.pid is None, parent_pid=args.parent_pid,
+                       find_pid=find_wechat_pid if args.pid is None else None)
 
 
 if __name__ == "__main__":
