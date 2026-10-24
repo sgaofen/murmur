@@ -23,6 +23,28 @@ sys.path.insert(0, str(ROOT / "cli"))
 import hook_cc_key_frida as hck  # noqa: E402
 import live_key  # noqa: E402
 
+
+# Never let a test touch the user's real ~/.murmur/decrypted_keys.json:
+# Capture.save() without out_keys (CLI mode) merges into hck.OUT_PATH, and
+# ReattachTest once did exactly that on a dev machine.
+_KEYS_TMP = tempfile.TemporaryDirectory()
+_KEYS_PATCHES = [
+    mock.patch.object(hck, "OUT_PATH", os.path.join(_KEYS_TMP.name, "decrypted_keys.json")),
+    mock.patch.object(live_key, "keys_path",
+                      lambda: Path(_KEYS_TMP.name) / "decrypted_keys.json"),
+]
+
+
+def setUpModule():
+    for p in _KEYS_PATCHES:
+        p.start()
+
+
+def tearDownModule():
+    for p in _KEYS_PATCHES:
+        p.stop()
+    _KEYS_TMP.cleanup()
+
 PAGE = 4096
 
 
@@ -366,6 +388,14 @@ class LiveKeyJobTest(unittest.TestCase):
         argv = self.calls[0]
         self.assertEqual(argv[argv.index("--seconds") + 1], str(live_key.MAX_SECONDS))
 
+
+
+class KeysFileIsolationTest(unittest.TestCase):
+    def test_cli_mode_save_goes_to_patched_path(self):
+        real = os.path.expanduser("~/.murmur/decrypted_keys.json")
+        self.assertNotEqual(hck.OUT_PATH, real)
+        self.assertTrue(hck.OUT_PATH.startswith(_KEYS_TMP.name))
+        self.assertNotEqual(str(live_key.keys_path()), real)
 
 if __name__ == "__main__":
     unittest.main()
@@ -757,7 +787,8 @@ class ReattachTest(unittest.TestCase):
     def test_waits_for_relaunch_and_reattaches(self):
         k = os.urandom(32)
         cap = hck.Capture({"a.db": make_page1(k, os.urandom(16))}, seconds=30,
-                          progress_path=str(self.d / "p.json"))
+                          progress_path=str(self.d / "p.json"),
+                          out_keys=str(self.d / "keys.json"))
         attached = []
         t = [0.0]
         pids = iter([None, None, 222])
