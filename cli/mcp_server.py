@@ -85,7 +85,17 @@ _NAME_STOPLIST = {
 }
 _SCHEMA_KEY_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 _PASSTHROUGH_KEYS = {"type", "time", "order", "resultType"}
-_ISO_TIME_RE = re.compile(r"^\d{4}-\d{2}(-\d{2})?([T ][0-9:.+\-Z]*)?$")
+# Strict: a loose `[0-9:.+-]*` tail let "2025-01-05 13800138000" skip masking.
+_ISO_TIME_RE = re.compile(
+    r"^\d{4}-\d{2}(?:-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:?\d{2})?)?)?$"
+)
+# Containers whose dict keys / item values are words mined from chat text
+# (local_analysis vocabulary, annual report top_words / top_phrases).
+_WORD_DICT_KEYS = {"self_top_words", "other_top_words"}
+_WORD_ITEM_KEYS = ("word", "phrase")
+_CJK_RE = re.compile(r"[㐀-鿿]")
+# wxid_xxx plus the `_abcd` folder suffix WeChat 4 appends (wxid_abc123_7f3a).
+_WXID_RE = re.compile(r"wxid_[A-Za-z0-9_-]+")
 
 
 def js_short_hash(s: str) -> int:
@@ -168,6 +178,9 @@ class Privacy:
         self._tokens: dict[str, str] = {}      # substring replacements (names, odd ids)
         self._token_re: Optional[re.Pattern] = None
         self._tokens_lower: dict[str, str] = {}
+        self._alias_fwd: dict[str, str] = {}   # real id → 朋友 XY / 群 N
+        self._name_pool: set[str] = set()      # lowercased names / handles of every contact
+        self._person_pool: set[str] = set()    # same, people only (no group names)
         self._registered = False
 
     # --- registration ---
@@ -183,7 +196,17 @@ class Privacy:
             is_group = c.is_group or ("群" in (display or ""))
             alias = alias_for(username, is_group)
             self._alias_rev.setdefault(alias, []).append(username)
+            self._alias_fwd[username] = alias
             masked = self.mask_id(username)
+            handles = [c.remark, c.nick_name, c.alias]
+            if not re.match(r"^(wxid_|gh_|openim_)", username) and not username.endswith("@chatroom"):
+                handles.append(username)
+            for h in handles:
+                for v in ([_normalize_name(h)] + _name_variants(h)) if h else []:
+                    if v:
+                        self._name_pool.add(v.lower())
+                        if not is_group:
+                            self._person_pool.add(v.lower())
             for nm in (c.remark, c.nick_name):
                 if not nm:
                     continue
@@ -216,6 +239,30 @@ class Privacy:
         self._id_rev[masked] = real
         self._exact.setdefault(real, masked)
         return masked
+
+    def handle_text(self, real: str) -> str:
+        """What the model can see of an id (masked id + alias) — the only text a
+        privacy-mode `query` filter is allowed to match against."""
+        return f"{self.mask_id(real)} {self._alias_fwd.get(real, '')}"
+
+    def is_name_fragment(self, word: str, people_only: bool = False) -> bool:
+        """True if `word` could reveal (part of) a registered contact name.
+
+        Catches what token masking can't: lowercased name parts ("alice",
+        "wang" from "Alice Wang"), CJK sub-strings ("爱丽", "丽丝" from "爱丽丝"),
+        and CJK bigrams straddling a name boundary ("找爱")."""
+        w = _normalize_name(word or "").lower()
+        if not w:
+            return False
+        pool = self._person_pool if people_only else self._name_pool
+        for n in pool:
+            if w in n or (len(n) >= 2 and n in w):
+                return True
+            if _CJK_RE.search(n) and _CJK_RE.search(w):
+                for k in range(1, min(len(w), len(n))):
+                    if w[-k:] == n[:k] or w[:k] == n[-k:]:
+                        return True
+        return False
 
     # --- reverse lookup (masked handle → real id) ---
 
@@ -257,7 +304,7 @@ class Privacy:
         out = _mask_local_paths(text)
         # ids first, so the name pass below never re-masks a generated id
         out = re.sub(r"[a-z0-9_-]+@chatroom", lambda m: self.mask_id(m.group(0)), out, flags=re.I)
-        out = re.sub(r"wxid_[a-z0-9]+", lambda m: self.mask_id(m.group(0)), out)
+        out = _WXID_RE.sub(self._mask_wxid_match, out)
         out = re.sub(r"(?:gh_|openim_)[a-z0-9_-]+", lambda m: f"id_{js_short_hash(m.group(0)) % 9999}", out, flags=re.I)
         tok_re = self._compiled_tokens()
         if tok_re is not None:
@@ -280,14 +327,37 @@ class Privacy:
 
         return re.sub(r"「([^」]{2,4})」", _quoted, out)
 
+    def _mask_wxid_match(self, m: re.Match) -> str:
+        tok = m.group(0).rstrip("_-")
+        tail = m.group(0)[len(tok):]
+        if tok in self._id_rev:      # already one of our masked ids — don't mask twice
+            return m.group(0)
+        return self.mask_id(tok) + tail
+
+    def mask_error(self, text: str) -> str:
+        """Tool error text → always strip local paths; with privacy also names/ids."""
+        text = _mask_local_paths(str(text))
+        return self.mask_text(text) if self.enabled else text
+
     def mask(self, obj: Any) -> Any:
         """Recursively mask every string (and dict key) except timestamps."""
         if not self.enabled:
             return obj
         if isinstance(obj, dict):
-            return {self._mask_key(k): (v if k in _PASSTHROUGH_KEYS else self.mask(v)) for k, v in obj.items()}
+            out = {}
+            for k, v in obj.items():
+                if k in _PASSTHROUGH_KEYS:
+                    out[self._mask_key(k)] = v
+                elif k in _WORD_DICT_KEYS and isinstance(v, dict):
+                    # Mined words: drop anything that is (part of) a contact name —
+                    # "alice" passes the schema-key check, "爱丽" isn't a whole token.
+                    out[k] = {self._mask_key(w): self.mask(c) for w, c in v.items()
+                              if not (isinstance(w, str) and self.is_name_fragment(w))}
+                else:
+                    out[self._mask_key(k)] = self.mask(v)
+            return out
         if isinstance(obj, (list, tuple)):
-            return [self.mask(v) for v in obj]
+            return [self.mask(v) for v in obj if not self._is_name_word_item(v)]
         if isinstance(obj, str):
             return self._mask_str(obj)
         return obj
@@ -300,6 +370,15 @@ class Privacy:
             return k
         return self._mask_str(k)
 
+    def _is_name_word_item(self, v: Any) -> bool:
+        # {"word": "爱丽", "count": 3} / {"phrase": ...} items in word rankings
+        if not isinstance(v, dict):
+            return False
+        for k in _WORD_ITEM_KEYS:
+            if isinstance(v.get(k), str) and self.is_name_fragment(v[k]):
+                return True
+        return False
+
     def _mask_str(self, s: str) -> str:
         if not s or _ISO_TIME_RE.match(s):
             return s
@@ -307,8 +386,9 @@ class Privacy:
 
 
 _PATH_RULES = [
-    (re.compile(r"/Users/[^/\s\"'<>]+/[^\s\"'<>)]*"), "~/本机路径"),
-    (re.compile(r"[A-Z]:\\Users\\[^\\\s\"'<>]+\\[^\s\"'<>)]*", re.I), "本机路径"),
+    # home dirs, with or without anything after the user name
+    (re.compile(r"/(?:Users|home)/[^/\s\"'<>]+(?:/[^\s\"'<>)]*)?"), "~/本机路径"),
+    (re.compile(r"[A-Z]:\\(?:Users|Documents and Settings)\\[^\\\s\"'<>]+(?:\\[^\s\"'<>)]*)?", re.I), "本机路径"),
     (re.compile(r"[A-Z]:[\\/][^\s\"'<>)]*(?:xwechat_files|Documents[\\/]Murmur|Desktop[\\/]Murmur)[^\s\"'<>)]*", re.I), "本机路径"),
     (re.compile(r"(?:~/)?(?:Desktop|Documents)/Murmur/[^\s\"'<>)]*"), "Murmur/隐藏路径"),
     (re.compile(r"(?:agent_reports|decrypted|logs)[\\/][^\s\"'<>)]*"), "隐藏路径"),
@@ -613,7 +693,7 @@ class MurmurMCPServer:
             return _error(req_id, e.code, e.message, e.data)
         except Exception as e:  # pragma: no cover - defensive
             sys.stderr.write(f"[mcp] internal error in {method}: {traceback.format_exc()}\n")
-            return _error(req_id, INTERNAL_ERROR, f"Internal error: {e}")
+            return _error(req_id, INTERNAL_ERROR, self.privacy.mask_error(f"Internal error: {e}"))
         if modern:
             result = {"resultType": "complete", **result}
             meta = dict(result.get("_meta") or {})
@@ -684,26 +764,43 @@ class MurmurMCPServer:
             payload = json.loads(json.dumps(payload, ensure_ascii=False, default=_json_default))
             payload = self.privacy.mask(payload)
         except ToolError as e:
-            return {"content": [{"type": "text", "text": str(e)}], "isError": True}
+            return self._tool_error(str(e))
         except SystemExit as e:  # etcli helpers bail out with SystemExit("找不到联系人: …")
-            return {"content": [{"type": "text", "text": self.privacy.mask_text(str(e.code))}], "isError": True}
+            return self._tool_error(str(e.code))
         except Exception as e:
             sys.stderr.write(f"[mcp] tool {name} failed: {traceback.format_exc()}\n")
-            return {"content": [{"type": "text", "text": f"工具执行失败 / tool failed: {type(e).__name__}: {e}"}],
-                    "isError": True}
+            return self._tool_error(f"工具执行失败 / tool failed: {type(e).__name__}: {e}")
         return {
             "content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False)}],
             "structuredContent": payload,
             "isError": False,
         }
 
+    def _tool_error(self, text: str) -> dict:
+        # Every isError text goes through the masker: exception strings carry
+        # data-dir paths (system user name), wxid folder names and echoed queries.
+        return {"content": [{"type": "text", "text": self.privacy.mask_error(text)}], "isError": True}
+
     # --- helpers ---
+
+    def _query_hit(self, q: str, real_id: str, real_text: str) -> bool:
+        """`query` filter: in privacy mode only masked handles are searchable,
+        so the model can't probe for a contact by real name."""
+        if not q:
+            return True
+        hay = self.privacy.handle_text(real_id) if self.privacy.enabled else real_text
+        return q in hay.lower()
 
     def _resolve(self, query: str) -> str:
         q = query.strip()
         real = self.privacy.unmask(q)
         if real:
             return real
+        if self.privacy.enabled:
+            raise ToolError(
+                "隐私模式下只能用 list_contacts / list_chats 返回的脱敏代号（wxid 字段，或「朋友 XY」「群 N」别名）指定对象，"
+                "不能用真实名字或真实 wxid。"
+            )
         store = self.store
         if q in store.contacts():
             return q
@@ -755,7 +852,7 @@ class MurmurMCPServer:
                 continue
             if kind == "friends" and not c.is_real_friend:
                 continue
-            if q and q not in f"{u} {c.remark} {c.nick_name} {c.alias}".lower():
+            if not self._query_hit(q, u, f"{u} {c.remark} {c.nick_name} {c.alias}"):
                 continue
             n = count_of(u)
             if n < a["min_messages"]:
@@ -785,7 +882,7 @@ class MurmurMCPServer:
                 continue
             if a["kind"] == "private" and r["is_group"]:
                 continue
-            if q and q not in f"{r['wxid']} {r['name']}".lower():
+            if not self._query_hit(q, r["wxid"], f"{r['wxid']} {r['name']}"):
                 continue
             n = count_of(r["wxid"])
             if n == 0 and not a["include_empty"]:
@@ -835,6 +932,9 @@ class MurmurMCPServer:
         # the text EchoStore.messages() has already decoded.
         store = self.store
         kw = a["keyword"]
+        if self.privacy.enabled and self.privacy.is_name_fragment(kw, people_only=True):
+            # Hit counts for a name would confirm who is in the address book.
+            raise ToolError("隐私模式下不能按联系人名字（或名字的一部分）搜索消息，请换一个关键词。")
         limit = max(1, min(a["limit"], self.max_rows, 200))
         since, until = self._time(a.get("since")), self._time(a.get("until"), end=True)
         if a.get("chat"):

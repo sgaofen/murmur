@@ -437,15 +437,17 @@ class PrivacyTest(_Base):
 
     def test_privacy_masks_every_tool(self):
         s = self.make_server(privacy=True)
+        contacts = self.call_ok(s, "list_contacts", {})
+        m = s.privacy.mask_id   # privacy mode only accepts masked handles
         payloads = [
-            self.call_ok(s, "list_contacts", {}),
+            contacts,
             self.call_ok(s, "list_chats", {"include_empty": True}),
-            self.call_ok(s, "get_messages", {"chat": ALICE, "limit": 50}),
-            self.call_ok(s, "get_messages", {"chat": GROUP}),
-            self.call_ok(s, "get_messages", {"chat": CAROL}),
+            self.call_ok(s, "get_messages", {"chat": m(ALICE), "limit": 50}),
+            self.call_ok(s, "get_messages", {"chat": m(GROUP)}),
+            self.call_ok(s, "get_messages", {"chat": m(CAROL)}),
             self.call_ok(s, "search_messages", {"keyword": "羽毛球"}),
-            self.call_ok(s, "get_friend_stats", {"who": ALICE, "detail": "full"}),
-            self.call_ok(s, "get_relationship_evidence", {"who": ALICE, "sample": 40}),
+            self.call_ok(s, "get_friend_stats", {"who": m(ALICE), "detail": "full"}),
+            self.call_ok(s, "get_relationship_evidence", {"who": m(ALICE), "sample": 40}),
             self.call_ok(s, "get_annual_summary", {}),
         ]
         for p in payloads:
@@ -498,6 +500,128 @@ class PrivacyTest(_Base):
         b = p.mask_id("wxid_aaa")
         self.assertEqual(b, a + "~2")
         self.assertEqual(p.unmask(b), "wxid_aaa")
+
+
+class PrivacyLeakTest(_Base):
+    """Second-round review: leaks the first privacy pass missed."""
+
+    NAME_BITS = ("alice", "wang", "爱丽", "丽丝", "找爱")
+
+    def test_vocabulary_drops_name_fragments(self):
+        # Sanity: without privacy the fixture really produces these words …
+        off = self.call_ok(self.make_server(privacy=False), "get_friend_stats", {"who": ALICE, "detail": "full"})
+        words_off = set(off["vocabulary"]["self_top_words"]) | set(off["vocabulary"]["other_top_words"])
+        for w in self.NAME_BITS:
+            self.assertIn(w, words_off)
+        # … and with privacy none of them (nor any other name piece) survive.
+        s = self.make_server(privacy=True)
+        self.call_ok(s, "list_contacts", {})
+        on = self.call_ok(s, "get_friend_stats", {"who": s.privacy.mask_id(ALICE), "detail": "full"})
+        voc = on["vocabulary"]
+        words_on = set(voc["self_top_words"]) | set(voc["other_top_words"])
+        for w in self.NAME_BITS:
+            self.assertNotIn(w, words_on)
+        blob = json.dumps(voc, ensure_ascii=False).lower()
+        for w in self.NAME_BITS:
+            self.assertNotIn(w, blob)
+        self.assertIn("么样", words_on)   # ordinary words are kept
+
+    def test_word_ranking_items_drop_name_fragments(self):
+        s = self.make_server(privacy=True)
+        self.call_ok(s, "list_contacts", {})
+        out = s.privacy.mask({"top_words": [{"word": "爱丽", "count": 3}, {"word": "Wang", "count": 2},
+                                            {"word": "周六", "count": 2}],
+                              "top_phrases": [{"phrase": "丽丝", "count": 5}, {"phrase": "好的", "count": 5}]})
+        self.assertEqual([w["word"] for w in out["top_words"]], ["周六"])
+        self.assertEqual([w["phrase"] for w in out["top_phrases"]], ["好的"])
+
+    def test_tool_error_text_is_masked(self):
+        s = self.make_server(privacy=True)
+        self.call_ok(s, "list_contacts", {})
+
+        def boom(_a):
+            raise RuntimeError("cannot open /Users/stephenyu/Documents/xwechat_files/wxid_alice001_7f3a/db_storage "
+                               "(owner wxid_alice001_7f3a, 爱丽丝, C:\\Users\\stephen\\AppData) home=/Users/stephenyu")
+        s._handlers["list_chats"] = boom
+        res = self.call(s, "list_chats", {})
+        self.assertTrue(res["isError"])
+        text = res["content"][0]["text"]
+        for secret in ("stephenyu", "stephen", "alice001", "7f3a", "爱丽丝"):
+            self.assertNotIn(secret, text)
+
+        def bail(_a):
+            raise SystemExit("找不到联系人: wxid_bob002 / 老王头 in /home/stephenyu/murmur")
+        s._handlers["list_chats"] = bail
+        text = self.call(s, "list_chats", {})["content"][0]["text"]
+        for secret in ("wxid_bob002", "bob002", "老王头", "stephenyu"):
+            self.assertNotIn(secret, text)
+
+        def tool_err(_a):
+            raise mcp_server.ToolError("数据目录不可用：[Errno 2] No such file: '/Users/stephenyu'")
+        s._handlers["list_chats"] = tool_err
+        text = self.call(s, "list_chats", {})["content"][0]["text"]
+        self.assertNotIn("stephenyu", text)
+        self.assertIn("数据目录不可用", text)
+
+    def test_error_paths_masked_even_without_privacy(self):
+        s = self.make_server(privacy=False)
+        s._handlers["list_chats"] = lambda _a: (_ for _ in ()).throw(OSError("bad /Users/stephenyu/x.db"))
+        text = self.call(s, "list_chats", {})["content"][0]["text"]
+        self.assertNotIn("stephenyu", text)
+
+    def test_date_prefixed_strings_are_masked(self):
+        s = self.make_server(privacy=True)
+        self.call_ok(s, "list_contacts", {})
+        p = s.privacy
+        out = p.mask({"text": "2025-01-05 13800138000", "note": "2025-01-05 爱丽丝 alice_w88",
+                      "x": "2025-01 wxid_alice001", "time": "2025-01-05T21:00:00+08:00",
+                      "first": "2025-01-05 21:00:00", "day": "2025-01-05", "month": "2025-01"})
+        blob = json.dumps(out, ensure_ascii=False)
+        for secret in ("13800138000", "爱丽丝", "alice_w88", "wxid_alice001"):
+            self.assertNotIn(secret, blob)
+        self.assertEqual(out["time"], "2025-01-05T21:00:00+08:00")
+        self.assertEqual(out["first"], "2025-01-05 21:00:00")
+        self.assertEqual(out["day"], "2025-01-05")
+        self.assertEqual(out["month"], "2025-01")
+
+    def test_wxid_suffix_fully_masked_and_idempotent(self):
+        p = mcp_server.Privacy(True)
+        out = p.mask_text("dir wxid_alice001_7f3a and wxid_Bob-002 end")
+        self.assertNotIn("alice001", out)
+        self.assertNotIn("7f3a", out)
+        self.assertNotIn("Bob-002", out)
+        masked = p.mask_id(ALICE)
+        self.assertEqual(p.mask_text(f"see {masked}"), f"see {masked}")   # no double masking
+        self.assertEqual(p.unmask(p.mask_text(ALICE)), ALICE)
+
+    def test_query_does_not_match_real_names(self):
+        s = self.make_server(privacy=True)
+        for q in ("爱丽丝", "alice", "Alice Wang", "alice_w88", "wxid_alice", "Carol", "周末羽毛球群"):
+            self.assertEqual(self.call_ok(s, "list_contacts", {"query": q})["total"], 0, q)
+            self.assertEqual(self.call_ok(s, "list_chats", {"query": q, "include_empty": True})["total"], 0, q)
+        hit = self.call_ok(s, "list_contacts", {"query": "朋友 WL"})
+        self.assertEqual(hit["total"], 1)
+        self.assertEqual(self.call_ok(s, "list_contacts", {"query": s.privacy.mask_id(ALICE)})["total"], 1)
+        self.assertEqual(self.call_ok(s, "list_chats", {"query": s.privacy.mask_id(GROUP)})["total"], 1)
+        # who/chat/other: real names and real ids are refused, without echoing them
+        for args in ({"chat": "爱丽丝"}, {"chat": "alice"}, {"chat": ALICE}, {"chat": "Carol"}):
+            res = self.call(s, "get_messages", args)
+            self.assertTrue(res["isError"], args)
+            text = res["content"][0]["text"]
+            self.assertNotIn("爱丽丝", text)
+            self.assertNotIn("alice001", text)
+        res = self.call(s, "get_relationship_evidence", {"who": s.privacy.mask_id(ALICE), "other": "老王头"})
+        self.assertTrue(res["isError"])
+        # keyword search can't be used as a name oracle either
+        for kw in ("爱丽丝", "爱丽", "Alice", "wang", "Carol"):
+            res = self.call(s, "search_messages", {"keyword": kw})
+            self.assertTrue(res["isError"], kw)
+        self.assertGreater(self.call_ok(s, "search_messages", {"keyword": "羽毛球"})["count"], 0)
+
+    def test_privacy_off_query_still_matches_names(self):
+        s = self.make_server(privacy=False)
+        self.assertEqual(self.call_ok(s, "list_contacts", {"query": "爱丽丝"})["total"], 1)
+        self.assertEqual(self.call_ok(s, "get_messages", {"chat": "爱丽丝"})["chat"], ALICE)
 
 
 class StdioTest(_Base):
