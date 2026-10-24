@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
-import { extractKey, getDiagnose, saveKey } from '../data/api';
+import { errorCode, extractKey, getDiagnose, saveKey } from '../data/api';
+import { lookupError } from '../data/errorCatalog';
+import { ErrorExplain } from '../components/ErrorExplain';
 import { maskText } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
+import { LiveKeyCapture } from '../components/LiveKeyCapture';
 
 interface Props {
   open: boolean;
@@ -9,7 +12,7 @@ interface Props {
   onSuccess?: (key?: string) => void;
 }
 
-type Phase = 'intro' | 'restarting' | 'waiting-login' | 'success' | 'error';
+type Phase = 'intro' | 'restarting' | 'waiting-login' | 'success' | 'error' | 'live';
 type Platform = 'windows' | 'macos' | 'linux';
 
 export function ExtractKeyDialog({ open, onClose, onSuccess }: Props) {
@@ -17,21 +20,25 @@ export function ExtractKeyDialog({ open, onClose, onSuccess }: Props) {
   const [phase, setPhase] = useState<Phase>('intro');
   const [key, setKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Stable backend error code for `error` (data/errorCatalog.ts); null → raw text only.
+  const [errCode, setErrCode] = useState<string | null>(null);
   const [log, setLog] = useState<string>('');
   const [elapsed, setElapsed] = useState(0);
   const [platform, setPlatform] = useState<Platform | null>(null);
   const [macKeysCount, setMacKeysCount] = useState(0);
+  const [liveReason, setLiveReason] = useState<'scan-empty' | 'version' | 'manual'>('manual');
+  const [wechatVersion, setWechatVersion] = useState<string | null>(null);
   const elapsedTimer = useRef<number | null>(null);
 
   useEffect(() => {
     if (!open) {
       setPhase('intro');
-      setKey(null); setError(null); setLog(''); setElapsed(0); setMacKeysCount(0);
+      setKey(null); setError(null); setErrCode(null); setLog(''); setElapsed(0); setMacKeysCount(0);
       if (elapsedTimer.current) { window.clearInterval(elapsedTimer.current); elapsedTimer.current = null; }
       return;
     }
     getDiagnose()
-      .then(d => setPlatform(d.platform))
+      .then(d => { setPlatform(d.platform); setWechatVersion(d.wechat_version ?? null); })
       .catch(() => setPlatform(navigator.userAgent.toLowerCase().includes('mac') ? 'macos' : 'windows'));
   }, [open]);
 
@@ -39,6 +46,7 @@ export function ExtractKeyDialog({ open, onClose, onSuccess }: Props) {
 
   async function handleStart() {
     setError(null);
+    setErrCode(null);
     let currentPlatform: Platform;
     try {
       const diag = await getDiagnose();
@@ -46,6 +54,7 @@ export function ExtractKeyDialog({ open, onClose, onSuccess }: Props) {
       setPlatform(diag.platform);
       if (diag.platform === 'windows' && diag.capabilities.weixin_running === false) {
         setError('没有检测到正在运行的微信进程。请先打开微信，退出到登录页但不要关闭微信程序，然后再回来点开始。');
+        setErrCode('WECHAT_NOT_RUNNING');
         setPhase('error');
         return;
       }
@@ -83,16 +92,22 @@ export function ExtractKeyDialog({ open, onClose, onSuccess }: Props) {
         }
         setPhase('success');
         onSuccess?.(r.key);
+      } else if (isMac && r.suggest_live === true) {
+        // WeChat 4.1.9+ keeps no key in memory — switch to live capture.
+        setLiveReason('scan-empty');
+        setPhase('live');
       } else {
         const fallback = isMac
           ? '没有在 WeChat 内存里扫到密钥。请保持微信登录，先点开几个聊天、群聊和朋友圈，再回来重试。'
           : '没有读到登录密钥。请先让微信停在登录页，再点开始抓密钥，然后 90 秒内回微信登录。';
         setError(r.log?.split('\n').slice(-6).join('\n') || fallback);
+        setErrCode(r.code ?? 'KEY_NOT_FOUND');
         setPhase('error');
       }
     } catch (e: any) {
       if (elapsedTimer.current) { window.clearInterval(elapsedTimer.current); elapsedTimer.current = null; }
       setError(e?.message || String(e));
+      setErrCode(errorCode(e));
       setPhase('error');
     }
   }
@@ -107,11 +122,14 @@ export function ExtractKeyDialog({ open, onClose, onSuccess }: Props) {
     }}>
       <div style={{
         width: 600, maxWidth: '94%',
+        // Live capture adds a checklist + countdown; scroll inside the card
+        // instead of clipping it on small windows.
+        maxHeight: 'calc(100vh - 48px)', overflowY: 'auto',
         background: 'var(--et-paper)',
         borderRadius: 'var(--et-r-lg)',
         boxShadow: 'var(--et-shadow-3)',
         border: '0.5px solid var(--et-line-2)',
-        overflow: 'hidden', position: 'relative',
+        position: 'relative',
       }}>
         <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 6, background: 'var(--et-orange)' }} />
         <button onClick={onClose} style={{
@@ -131,14 +149,20 @@ export function ExtractKeyDialog({ open, onClose, onSuccess }: Props) {
             {phase === 'waiting-login' && (platform === 'macos' ? '请在 WeChat 里点开聊天和朋友圈' : '请回微信登录一次')}
             {phase === 'success' && '✓ 密钥已就位'}
             {phase === 'error' && '没读到密钥'}
+            {phase === 'live' && '实时抓取密钥（微信 4.1.9+）'}
           </div>
         </div>
         <div style={{ padding: '14px 28px 24px' }}>
-          {phase === 'intro' && <Intro isMac={platform === 'macos'} onStart={handleStart} />}
+          {phase === 'intro' && <Intro isMac={platform === 'macos'} onStart={handleStart}
+            onLive={() => { setLiveReason(wechatVersion ? 'version' : 'manual'); setPhase('live'); }} />}
+          {phase === 'live' && (
+            <LiveKeyCapture reason={liveReason} wechatVersion={wechatVersion}
+              onDecrypt={() => { onSuccess?.(); onClose(); }} />
+          )}
           {phase === 'restarting' && <Restarting isMac={platform === 'macos'} elapsed={elapsed} />}
           {phase === 'waiting-login' && <WaitingLogin isMac={platform === 'macos'} elapsed={elapsed} />}
           {phase === 'success' && <Success keyHex={key} macKeysCount={macKeysCount} isMac={platform === 'macos'} onClose={onClose} />}
-          {phase === 'error' && <ErrorView isMac={platform === 'macos'} error={error || '未知错误'} log={log} onRetry={() => setPhase('intro')} />}
+          {phase === 'error' && <ErrorView isMac={platform === 'macos'} error={error || '未知错误'} code={errCode} log={log} onRetry={() => setPhase('intro')} />}
         </div>
       </div>
     </div>
@@ -167,7 +191,7 @@ function Step({ n, title, body, active }: { n: number; title: string; body: stri
   );
 }
 
-function Intro({ isMac, onStart }: { isMac: boolean; onStart: () => void }) {
+function Intro({ isMac, onStart, onLive }: { isMac: boolean; onStart: () => void; onLive: () => void }) {
   return (
     <>
       <div className="et-meta" style={{ fontSize: 13, color: 'var(--et-ink-soft)', marginBottom: 14 }}>
@@ -209,6 +233,14 @@ function Intro({ isMac, onStart }: { isMac: boolean; onStart: () => void }) {
         borderRadius: 'var(--et-r)', fontSize: 14, fontWeight: 600,
         boxShadow: '0 6px 16px rgba(255,107,71,0.32)',
       }}>{isMac ? '开始现场抓取' : '开始抓密钥'}</button>
+      {isMac && (
+        <button onClick={onLive} style={{
+          all: 'unset', cursor: 'pointer', display: 'block', width: '100%',
+          textAlign: 'center', padding: '12px 0', marginTop: 8,
+          border: '1px solid var(--et-line-2)', color: 'var(--et-ink)',
+          borderRadius: 'var(--et-r)', fontSize: 13, fontWeight: 600,
+        }}>微信 4.1.9 及以上：用「实时抓取」（内存扫不到时用这个）</button>
+      )}
     </>
   );
 }
@@ -312,26 +344,28 @@ function Success({ keyHex, macKeysCount, isMac, onClose }: { keyHex: string | nu
   );
 }
 
-function ErrorView({ isMac, error, log, onRetry }: { isMac: boolean; error: string; log: string; onRetry: () => void }) {
+function ErrorView({ isMac, error, code, log, onRetry }: { isMac: boolean; error: string; code?: string | null; log: string; onRetry: () => void }) {
   const hookInstallFailed = !isMac && /hook (setup|install) failed|wx_key\.dll|注入到微信进程/i.test(`${error}\n${log}`);
+  const known = lookupError(code) !== null;
   return (
     <>
+      <ErrorExplain code={code} />
       <div style={{
         padding: '14px 16px',
         background: 'rgba(196,90,63,0.12)',
         border: '0.5px solid rgba(196,90,63,0.4)',
         borderRadius: 8, marginBottom: 14,
       }}>
-        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--et-rose)', marginBottom: 8 }}>失败原因</div>
+        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--et-rose)', marginBottom: 8 }}>{known ? '原始报错' : '失败原因'}</div>
         <div className="et-meta" style={{ fontSize: 12, color: 'var(--et-ink-soft)', whiteSpace: 'pre-wrap' }}>{maskText(error)}</div>
       </div>
-      <div className="et-meta" style={{ fontSize: 12, marginBottom: 14, lineHeight: 1.6 }}>
+      {!known && <div className="et-meta" style={{ fontSize: 12, marginBottom: 14, lineHeight: 1.6 }}>
         {isMac
           ? '最常见原因：还没在 WeChat 里点开足够多的聊天/朋友圈，对应数据库 key 还没有进入内存。'
           : hookInstallFailed
             ? '这是 hook 安装失败，不是等登录超时。请先把 Murmur 安装目录加入杀毒/Defender 白名单，确认 wx_key.dll 没被隔离；然后重启电脑，微信和 Murmur 都用普通权限打开，再按登录页流程重试。'
             : '最常见原因：点开始后微信没有发生新的登录事件。Win 上 hook 等的是登录瞬间，微信一直保持已登录不会触发。'}
-      </div>
+      </div>}
       <details style={{ marginBottom: 14 }}>
         <summary style={{ cursor: 'pointer', fontSize: 12, color: 'var(--et-mute)' }}>查看完整日志</summary>
         <pre style={{

@@ -9,11 +9,55 @@ import type { Friend, FriendStats, HomeSummary, Moment } from './types';
 // Fixes "Could not connect to the server" / "Load failed" in production .app builds.
 export const API_BASE = (import.meta.env?.VITE_ETCLI_URL as string) || 'http://127.0.0.1:9100';
 
+/** Error thrown for non-2xx responses (and unreachable backend). `message`
+ * keeps the historical `API <path>: <status> <body>` shape so existing
+ * string checks keep working; `code` is the stable backend error code
+ * (cli/error_codes.py → data/errorCatalog.ts) when the body carried one. */
+export class ApiError extends Error {
+  code: string | null;
+  status: number;
+  /** Original `error` text from the JSON body, if any. */
+  raw: string | null;
+  constructor(message: string, opts: { code?: string | null; status?: number; raw?: string | null } = {}) {
+    super(message);
+    this.name = 'ApiError';
+    this.code = opts.code ?? null;
+    this.status = opts.status ?? 0;
+    this.raw = opts.raw ?? null;
+  }
+}
+
+/** Stable error code from anything a request can throw or return:
+ * ApiError, a JSON payload with `code`, or null when unknown. */
+export function errorCode(e: unknown): string | null {
+  if (!e || typeof e !== 'object') return null;
+  const c = (e as { code?: unknown }).code;
+  return typeof c === 'string' && c ? c : null;
+}
+
 async function j<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(API_BASE + path, init);
+  let res: Response;
+  try {
+    res = await fetch(API_BASE + path, init);
+  } catch (e) {
+    // Network-level failure (backend not running / connection refused).
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new ApiError(`API ${path}: ${msg}`, { code: 'BACKEND_UNREACHABLE', raw: msg });
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => '');
-    throw new Error(`API ${path}: ${res.status} ${text.slice(0, 200)}`);
+    let code: string | null = null;
+    let raw: string | null = null;
+    try {
+      const body = JSON.parse(text);
+      if (body && typeof body === 'object') {
+        code = typeof body.code === 'string' ? body.code : null;
+        raw = typeof body.error === 'string' ? body.error : null;
+      }
+    } catch {
+      // Non-JSON body — leave code/raw empty.
+    }
+    throw new ApiError(`API ${path}: ${res.status} ${text.slice(0, 200)}`, { code, status: res.status, raw });
   }
   return res.json();
 }
@@ -31,6 +75,8 @@ export interface InfoResponse {
   // Last EchoStore/QQStore init exception, surfaced so OnboardingDialog
   // shows the real cause instead of silently looping back to extract-key.
   init_error?: string | null;
+  /** Stable code for init_error (see data/errorCatalog.ts). */
+  init_error_code?: string | null;
 }
 
 // Cross-platform profile listing — drives the ProfileSwitcher.
@@ -118,6 +164,10 @@ export interface Diagnose {
   wechat_exe: string | null;
   murmur_home: string;
   wechat_search_roots?: string[];
+  /** macOS only: CFBundleShortVersionString of WeChat.app, e.g. "4.1.22". */
+  wechat_version?: string | null;
+  /** macOS only: whether live capture (Frida) is the recommended key path. */
+  live_key?: { recommended: boolean; frida: FridaStatus } | null;
 }
 
 export async function getDiagnose(): Promise<Diagnose> {
@@ -481,6 +531,8 @@ export interface RefreshResult {
   // Set when the decrypt subprocess returned 0 but the post-decrypt store
   // re-init still threw — caller should treat success+init_error as failure.
   init_error?: string | null;
+  /** Stable error code when !ok or init_error is set (data/errorCatalog.ts). */
+  code?: string | null;
 }
 
 export interface RefreshOpts {
@@ -509,6 +561,12 @@ export async function generateAIPack(id: string, opts: { sample?: number } = {})
 
 export async function extractKey(opts: { autoRestart?: boolean; timeout?: number } = {}): Promise<{
   ok: boolean; key?: string; mac_keys_count?: number; ms?: number; log?: string;
+  /** Stable error code when !ok (data/errorCatalog.ts). */
+  code?: string | null;
+  /** macOS: number of encrypted DBs found on disk. */
+  total_dbs?: number;
+  /** macOS: memory scan missed some/all DBs — offer live capture (Frida). */
+  suggest_live?: boolean;
 }> {
   return j('/api/extract-key', {
     method: 'POST',
@@ -520,7 +578,75 @@ export async function extractKey(opts: { autoRestart?: boolean; timeout?: number
   });
 }
 
-export async function saveKey(key: string): Promise<{ ok: boolean; path?: string; error?: string }> {
+// ---- macOS live key capture (Frida hook on CommonCrypto, WeChat 4.1.9+) ----
+
+export interface FridaStatus {
+  installed: boolean;
+  version: string | null;
+  /** false in the packaged app — frida must be bundled there or run via CLI. */
+  installable: boolean;
+  frozen: boolean;
+}
+
+export type LiveKeyPhase = 'idle' | 'starting' | 'auth' | 'attaching' | 'capturing' | 'waiting-wechat' | 'done' | 'error';
+
+export interface LiveKeyJob {
+  running: boolean;
+  phase: LiveKeyPhase;
+  seconds: number;
+  remaining: number | null;
+  /** encrypted DBs on disk */
+  total: number;
+  /** DBs that already had a working key before this round */
+  known: number;
+  /** known + matched this round */
+  matched_count: number;
+  /** DBs matched this round (relative paths) */
+  new: string[];
+  hits: number;
+  /** account passphrase seen in CCKeyDerivationPBKDF — every DB key derived from it */
+  passphrase_found: boolean;
+  elevated: boolean;
+  /** 'frida-missing' | 'attach-denied' | 'auth-cancelled' | 'exit-N' | free text */
+  error: string | null;
+  /** Stable code for `error` (data/errorCatalog.ts). */
+  code?: string | null;
+  log: string;
+  round: number;
+}
+
+export interface LiveKeyStatus {
+  platform_ok: boolean;
+  frida: FridaStatus;
+  install: { running: boolean; ok: boolean | null; log: string };
+  job: LiveKeyJob;
+  /** pending = DBs (relative paths) that still have no working key */
+  coverage?: { total: number; known: number; pending?: string[]; error?: string };
+}
+
+export async function getLiveKeyStatus(opts: { coverage?: boolean } = {}): Promise<LiveKeyStatus> {
+  return j(`/api/live-key/status${opts.coverage ? '?coverage=1' : ''}`);
+}
+
+export async function startLiveKey(seconds: number): Promise<{
+  ok: boolean; started?: boolean; complete?: boolean; already_running?: boolean; error?: string; code?: string;
+}> {
+  return j('/api/live-key/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ seconds }),
+  });
+}
+
+export async function cancelLiveKey(): Promise<{ ok: boolean }> {
+  return j('/api/live-key/cancel', { method: 'POST' });
+}
+
+export async function installFrida(): Promise<{ ok: boolean; started?: boolean; already_running?: boolean; error?: string; code?: string }> {
+  return j('/api/live-key/install-frida', { method: 'POST' });
+}
+
+export async function saveKey(key: string): Promise<{ ok: boolean; path?: string; error?: string; code?: string }> {
   return j('/api/save-key', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -638,11 +764,11 @@ export async function cancelQQScan(): Promise<{ ok: boolean; cancelled: boolean 
   return j('/api/qq/scan-disks/cancel', { method: 'POST' });
 }
 
-export async function extractQQKey(timeout = 240): Promise<{ ok: boolean; key: string | null; log: string; error: string | null }> {
+export async function extractQQKey(timeout = 240, qq?: string): Promise<{ ok: boolean; key: string | null; qq?: string | null; log: string; error: string | null }> {
   return j('/api/qq/extract-key', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ timeout }),
+    body: JSON.stringify({ timeout, qq }),
   });
 }
 
@@ -663,7 +789,7 @@ export async function decryptQQ(qq: string, key?: string): Promise<{ ok: boolean
 }
 
 export async function resignWechat(opts: { relaunch?: boolean } = {}): Promise<{
-  ok: boolean; ms?: number; log?: string[]; error?: string; stderr?: string; next_steps?: string;
+  ok: boolean; ms?: number; log?: string[]; error?: string; stderr?: string; next_steps?: string; code?: string;
 }> {
   return j('/api/resign-wechat', {
     method: 'POST',
@@ -842,22 +968,47 @@ export async function getAvailableReportYears(): Promise<{
   return j('/api/annual-report/years');
 }
 
-export type ExportFormat = 'json' | 'html' | 'txt';
+export type ExportFormat = 'json' | 'html' | 'txt' | 'csv' | 'md' | 'chatlab';
+/** Pair export supports a subset: the relationship pack as md/json/html, and
+ *  the evidence edges as csv. 'txt' is kept as a legacy alias of 'md'. */
+export type PairExportFormat = 'json' | 'html' | 'md' | 'csv' | 'txt';
+/** none = text only; originals = only decrypted full-size images / videos;
+ *  best = originals, falling back to thumbnails. */
+export type MediaPolicy = 'none' | 'originals' | 'best';
 
-/** Trigger a download of the chat with `wxid` in the requested format.
- *  Drives the export buttons in Friend.tsx — no JSON parsing here, this is
- *  a binary file the browser saves directly via the Content-Disposition header. */
-export async function exportFriendChat(wxid: string, format: ExportFormat): Promise<void> {
-  const url = `${API_BASE}/api/export?wxid=${encodeURIComponent(wxid)}&format=${format}`;
-  const res = await fetch(url);
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`导出失败：${res.status} ${text.slice(0, 200)}`);
-  }
+export interface ExportMediaSummary {
+  policy: MediaPolicy;
+  media_messages: number;
+  exported_original: number;
+  exported_thumbnail: number;
+  exported_total: number;
+  missing_total: number;
+  missing_by_kind: Record<string, number>;
+  missing_reasons: Record<string, number>;
+  missing_reason_labels: Record<string, string>;
+  thumbnail_skipped: number;
+}
+
+/** Returned when exporting with attachments (media !== 'none'): the backend
+ *  writes a folder (chat file + media/ + 导出报告.md) instead of a download. */
+export interface ExportReport {
+  ok: boolean;
+  chat_id: string;
+  name: string;
+  format: ExportFormat;
+  messages: number;
+  exported_at: string;
+  dir: string;
+  file: string;
+  report_file: string;
+  media: ExportMediaSummary;
+}
+
+async function downloadResponse(res: Response, fallbackName: string): Promise<void> {
   const blob = await res.blob();
   const dispo = res.headers.get('Content-Disposition') || '';
   const m = /filename="([^"]+)"/.exec(dispo);
-  const filename = m ? m[1] : `murmur_${wxid}.${format}`;
+  const filename = m ? m[1] : fallbackName;
   const link = document.createElement('a');
   link.href = URL.createObjectURL(blob);
   link.download = filename;
@@ -865,6 +1016,28 @@ export async function exportFriendChat(wxid: string, format: ExportFormat): Prom
   link.click();
   document.body.removeChild(link);
   setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+}
+
+/** Export the chat with `wxid`.
+ *  media === 'none' → the browser downloads one file (Content-Disposition), returns null.
+ *  otherwise        → the backend writes a folder next to the other exports and
+ *                     returns its report (counts + missing-attachment reasons). */
+export async function exportFriendChat(
+  wxid: string,
+  format: ExportFormat,
+  media: MediaPolicy = 'none',
+): Promise<ExportReport | null> {
+  const url = `${API_BASE}/api/export?wxid=${encodeURIComponent(wxid)}&format=${format}&media=${media}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`导出失败：${res.status} ${text.slice(0, 200)}`);
+  }
+  if (media !== 'none') {
+    return (await res.json()) as ExportReport;
+  }
+  await downloadResponse(res, `murmur_${wxid}.${format === 'chatlab' ? 'chatlab.json' : format}`);
+  return null;
 }
 
 export interface VoiceItem {
@@ -881,25 +1054,16 @@ export async function getFriendVoices(wxid: string): Promise<VoiceItem[]> {
 /** Murmur's signature feature (issue #10): export how friend A and friend B
  *  know each other from your vantage point. Bundles direct evidence (mentions
  *  / mutual replies / sns cross-likes) + group co-presence + chat samples.
- *  txt yields markdown the user can paste straight into ChatGPT/Claude. */
-export async function exportPairChat(a: string, b: string, format: ExportFormat): Promise<void> {
+ *  md yields markdown the user can paste straight into ChatGPT/Claude; csv
+ *  lists the evidence edges for spreadsheets. */
+export async function exportPairChat(a: string, b: string, format: PairExportFormat): Promise<void> {
   const url = `${API_BASE}/api/pair-export?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}&format=${format}`;
   const res = await fetch(url);
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     throw new Error(`双人导出失败：${res.status} ${text.slice(0, 200)}`);
   }
-  const blob = await res.blob();
-  const dispo = res.headers.get('Content-Disposition') || '';
-  const m = /filename="([^"]+)"/.exec(dispo);
-  const filename = m ? m[1] : `murmur_pair_${a}__${b}.${format}`;
-  const link = document.createElement('a');
-  link.href = URL.createObjectURL(blob);
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+  await downloadResponse(res, `murmur_pair_${a}__${b}.${format === 'txt' ? 'md' : format}`);
 }
 
 export interface BatchStartReq {
