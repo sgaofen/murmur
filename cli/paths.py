@@ -1448,6 +1448,25 @@ def wechat_main_exec(app: Path | None = None) -> Path | None:
     return None
 
 
+def wechat_app_version(app: Path | None = None) -> str | None:
+    """CFBundleShortVersionString of the macOS WeChat bundle (e.g. "4.1.22")."""
+    if not IS_MAC:
+        return None
+    try:
+        app = app or find_weixin_exe()
+        if not app:
+            return None
+        if app.is_file():
+            app = _mac_app_bundle_for_executable(app) or app
+        import plistlib
+        with open(app / "Contents" / "Info.plist", "rb") as f:
+            info = plistlib.load(f)
+        v = info.get("CFBundleShortVersionString") or info.get("CFBundleVersion")
+        return str(v) if v else None
+    except Exception:
+        return None
+
+
 # ---------- Capability matrix ----------
 
 @dataclass

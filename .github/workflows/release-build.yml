@@ -64,6 +64,12 @@ jobs:
       - name: Install Python backend dependencies
         run: python -m pip install --upgrade pip pyinstaller -r requirements.txt
 
+      # Bundled into etcli so the macOS App can do live key capture for
+      # WeChat 4.1.9+ without the user installing anything (see cli/live_key.py).
+      - name: Install macOS live key capture dependency
+        if: matrix.platform == 'macos'
+        run: python -m pip install -r requirements-mac-keyextract.txt
+
       - name: Install frontend dependencies
         working-directory: app
         run: npm ci
