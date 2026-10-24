@@ -30,6 +30,7 @@ import { IconKey } from '../ui/icons';
 - **accent**（珊瑚橙品牌色）：`--accent`（图标/细线）、`--accent-strong`、`--accent-text`（小字号文字，已保证对比度）、`--accent-solid` / `--accent-solid-hover`（实心按钮底）、`--accent-soft`（浅底）、`--accent-border`
 - **状态色**：`--{success|warning|danger|info}-{bg|fg|border|solid}`，`-bg` 做底、`-fg` 做字和图标、`-border` 做描边、`-solid` 做实心元素（`--danger-solid-hover` 用于危险按钮悬停）
 - **其他**：`--shadow-sm/md/lg/accent`、`--skeleton-base/shine`、`--radius-xs/sm/md/lg/xl/pill`、`--space-1..9`（4/8/12/16/24/32/48/64/96px）、`--font-serif/sans/mono`、`--ease-out`、`--dur-fast/base`、`--z-dialog`（外壳自己的层级见第 7 节）
+- **media**（盖在照片 / 视频 / 渐变头像上的东西，深浅色一样）：`--media-scrim`（角标、悬停渐变）、`--media-scrim-strong`（看大图的遮罩）、`--media-on-scrim`（上面的白字）、`--media-control` + `--media-control-ink`（播放按钮的底和图标）。页面本身的遮罩仍用 `--surface-overlay`
 
 ### 规则
 

@@ -43,7 +43,7 @@ export function LocalAgentPanel({
     <div style={{
       padding: '14px 16px',
       background: 'linear-gradient(180deg, var(--et-orange-soft), transparent 90%)',
-      border: '0.5px solid rgba(224,83,46,0.28)',
+      border: '0.5px solid var(--accent-border)',
       borderRadius: 'var(--et-r)', marginBottom: 18,
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
@@ -61,7 +61,7 @@ export function LocalAgentPanel({
               padding: '10px 12px', borderRadius: 10,
               background: active ? 'var(--et-paper)' : 'var(--et-paper-2)',
               border: `0.5px solid ${active ? 'var(--et-orange)' : 'var(--et-line)'}`,
-              boxShadow: active ? '0 1px 0 rgba(255,255,255,0.6) inset, 0 4px 12px rgba(255,107,71,0.14)' : 'none',
+              boxShadow: active ? 'var(--shadow-sm), 0 0 0 3px var(--accent-soft)' : 'none',
               cursor: 'pointer',
             }}
             onClick={() => onSelect(a.cli)}
@@ -76,7 +76,7 @@ export function LocalAgentPanel({
               </span>
               <span style={{
                 width: 30, height: 30, borderRadius: 8,
-                background: 'var(--et-ink)', color: 'var(--et-paper)',
+                background: 'var(--surface-inverse)', color: 'var(--text-inverse)',
                 fontFamily: 'var(--et-serif)', fontWeight: 600, fontSize: 13,
                 display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
               }}>{a.name.charAt(0)}</span>
@@ -93,7 +93,7 @@ export function LocalAgentPanel({
                   style={{
                     all: 'unset', cursor: 'pointer',
                     padding: '5px 10px', borderRadius: 6,
-                    background: 'var(--et-orange)', color: '#fff',
+                    background: 'var(--accent-solid)', color: 'var(--text-on-accent)',
                     fontSize: 11, fontWeight: 600, whiteSpace: 'nowrap',
                   }}
                 >让它分析 →</button>

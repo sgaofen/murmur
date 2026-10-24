@@ -25,6 +25,7 @@ import { IconInfoCircle, IconRefresh, IconSearch, IconSparkle } from '../ui/icon
 import { PageHeader } from '../shell/PageHeader';
 import { displayName, maskText } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
+import { searchQuery } from '../utils/searchLinks';
 import { TypeIcon, clockOf, dayOf, isStub, normType, typeLabel } from '../components/chatBits';
 import './Chat.css';
 import './Search.css';
@@ -119,6 +120,11 @@ export function SearchPage({ query, navigate }: SearchPageProps) {
   const [searchError, setSearchError] = useState<unknown>(null);
   const reqRef = useRef(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  // The search on screen, and whether it ran against a half-built index —
+  // when the build finishes it is run again so the results are complete.
+  const lastRef = useRef<{ q: string; mode: Mode; dates: Range; partial: boolean } | null>(null);
+  const indexStateRef = useRef<SearchIndexStatus['state'] | null>(null);
+  const rerunRef = useRef<() => void>(() => {});
 
   // Index status: also starts an incremental update when needed; poll while building.
   const [statusNonce, setStatusNonce] = useState(0);
@@ -129,9 +135,12 @@ export function SearchPage({ query, navigate }: SearchPageProps) {
       try {
         const st = await getSearchStatus();
         if (cancelled) return;
+        const was = indexStateRef.current;
+        indexStateRef.current = st.state;
         setIndex(st);
         setIndexError(null);
         if (st.state === 'building') timer = window.setTimeout(tick, 1500);
+        else if (was === 'building' && st.state === 'ready') rerunRef.current();
       } catch (e) {
         if (!cancelled) setIndexError(e);
       }
@@ -178,6 +187,10 @@ export function SearchPage({ query, navigate }: SearchPageProps) {
       if (out.index) setIndex(out.index);
       const next = out.results;
       setResults(append && prev ? { ...next, hits: [...prev.hits, ...next.hits] } : next);
+      if (!append) {
+        const building = (out.index?.state ?? indexStateRef.current) === 'building';
+        lastRef.current = { q: trimmed, mode: next.mode, dates: d, partial: building };
+      }
     } catch (e) {
       if (req !== reqRef.current) return;
       setSearchError(e);
@@ -185,14 +198,18 @@ export function SearchPage({ query, navigate }: SearchPageProps) {
     if (req === reqRef.current) setBusy('idle');
   }, [from, to]);
 
+  // The index finished building under a search that ran against part of it:
+  // run that search again (same words, mode and dates) so nothing is missing.
+  rerunRef.current = () => {
+    const last = lastRef.current;
+    if (!last?.partial) return;
+    lastRef.current = { ...last, partial: false };
+    void run(last.q, last.mode, 0, null, last.dates);
+  };
+
   // Keep the query in the URL (no history entry) so 「返回」 from a chat restores it.
   const remember = (q: string, m: Mode, d: Range = { from, to }) => {
-    const p = new URLSearchParams();
-    if (q) p.set('q', q);
-    if (m === 'semantic') p.set('mode', 'semantic');
-    if (d.from) p.set('from', d.from);
-    if (d.to) p.set('to', d.to);
-    const s = p.toString();
+    const s = searchQuery(q, m, d);
     try {
       window.history.replaceState(window.history.state, '', `#/search${s ? '?' + s : ''}`);
     } catch {
@@ -246,9 +263,13 @@ export function SearchPage({ query, navigate }: SearchPageProps) {
     }, 400);
   };
 
+  // `back` carries the whole search (words, mode, dates) so the chat page's
+  // 「返回」 lands on the same results, not just the same words.
   const openHit = (h: Hit, q: string) => {
     const p = new URLSearchParams({ m: chatCursorFor(h), from: 'search' });
     if (q) p.set('q', q);
+    const back = searchQuery(q, results?.mode ?? effectiveMode, lastRef.current?.dates ?? { from, to });
+    if (back) p.set('back', back);
     navigate(`chat/${encodeURIComponent(h.chat)}?${p}`);
   };
 

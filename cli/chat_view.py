@@ -21,9 +21,15 @@ Queries
     at=<ts|date>      a window around the first message at/after that time
     (none)            the newest `limit` messages
 
-For EchoStore every page is a LIMITed SQL query per message DB, so paging
-costs O(page) instead of re-reading the whole chat. Other stores (QQStore)
-fall back to materialising the chat once per request and slicing it.
+For EchoStore each message DB's sort keys are read once and cached while
+the file is unchanged (see "Sort-key index" below), so a page is a bisect
+plus a primary-key fetch of the rows it shows — O(page), not a scan and sort
+of the whole chat per request. Other stores (QQStore) fall back to
+materialising the chat once per request and slicing it.
+
+Numbers are bounded: cursor parts and `at` must fit in ±2^53 (what a JS
+number holds exactly); anything bigger is a CursorError (HTTP 400), never an
+SQLite OverflowError.
 
 Media: image / video messages get `media = {kind, url}`; `url` is the
 existing `/api/media/<md5>` route when that md5 is in media-index.json and
@@ -34,10 +40,14 @@ same contract as /api/search. No third-party imports.
 """
 from __future__ import annotations
 
+import bisect
 import json
 import re
 import sqlite3
 import sys
+import threading
+from array import array
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -67,6 +77,17 @@ class CursorError(ValueError):
 
 # ---------------------------------------------------------------- cursors
 
+# Largest integer a JS number holds exactly; also keeps every value an SQLite
+# INTEGER can bind (a bigger Python int raises OverflowError at execute()).
+_INT_LIMIT = 1 << 53
+
+
+def _bounded(v: int, what: str, lo: int = 0) -> int:
+    if not lo <= v <= _INT_LIMIT:
+        raise CursorError(f"{what} out of range: {str(v)[:40]}")
+    return v
+
+
 def parse_cursor(s: str) -> tuple:
     """"<ts>:<local_id>:<db>" → (ts, db, local_id) sort key."""
     parts = (s or "").split(":", 2)
@@ -77,6 +98,8 @@ def parse_cursor(s: str) -> tuple:
         local_id = int(parts[1])
     except ValueError:
         raise CursorError(f"bad cursor: {s!r}")
+    _bounded(ts, "cursor time")
+    _bounded(local_id, "cursor local_id")
     db = parts[2]
     if "/" in db or "\\" in db:
         raise CursorError(f"bad cursor: {s!r}")
@@ -144,6 +167,88 @@ def _is_echo(store) -> bool:
     return hasattr(store, "_locate_msg_dbs") and hasattr(store, "_conn")
 
 
+# Sort-key index. WeChat indexes Msg tables by sort_seq / sender / server_id /
+# type, never by create_time, so `ORDER BY create_time ... LIMIT n` scans and
+# sorts the whole chat (wide rows included) for every page, and the chat's
+# COUNT / MIN / MAX is one more full scan. Instead each (DB file, table) has
+# its sort keys read once — packed as create_time << 32 | local_id into an
+# array('Q'), 8 bytes a message — and kept while the file is unchanged
+# (decrypted DBs are opened immutable, so the file's mtime/size is the whole
+# story). A page is then a bisect plus a primary-key fetch of only the rows it
+# shows, and count / first / last come from the same arrays.
+
+_PACK = 1 << 32
+_LID_MAX = _PACK - 1
+_KEY_CACHE: "OrderedDict[tuple, tuple]" = OrderedDict()  # (path, table) → (stamp, keys | None)
+_KEY_LOCK = threading.Lock()
+_KEY_CACHE_MAX_ENTRIES = 32
+_KEY_CACHE_MAX_ROWS = 4_000_000  # ≈ 32 MB of packed keys
+
+
+def _build_keys(c: sqlite3.Connection, table: str) -> Optional[array]:
+    """The table's packed sort keys in display order; None if they don't pack
+    (negative / post-2106 times, local_id ≥ 2^32, non-integer columns)."""
+    rows = c.execute(f"SELECT COALESCE(create_time, 0), local_id FROM {table} ORDER BY 1, 2").fetchall()
+    try:
+        keys = array("Q", [t << 32 | lid for t, lid in rows])
+        if rows and max(lid for _, lid in rows) > _LID_MAX:
+            return None
+    except (OverflowError, TypeError):
+        return None
+    return keys
+
+
+def _file_keys(store, fname: str, table: str) -> Optional[array]:
+    """Cached sort keys of `table` in `fname`; None → page it with plain SQL."""
+    base = getattr(store, "dir", None)
+    if base is None:
+        return None
+    path = Path(base) / fname
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    stamp = (st.st_mtime_ns, st.st_size)
+    ck = (str(path), table)
+    with _KEY_LOCK:
+        hit = _KEY_CACHE.get(ck)
+        if hit is not None and hit[0] == stamp:
+            _KEY_CACHE.move_to_end(ck)
+            return hit[1]
+    c = store._conn(fname)
+    try:
+        keys = _build_keys(c, table)
+    finally:
+        c.close()
+    with _KEY_LOCK:
+        _KEY_CACHE[ck] = (stamp, keys)
+        _KEY_CACHE.move_to_end(ck)
+        rows = sum(len(v[1]) for v in _KEY_CACHE.values() if v[1] is not None)
+        while len(_KEY_CACHE) > 1 and (len(_KEY_CACHE) > _KEY_CACHE_MAX_ENTRIES or rows > _KEY_CACHE_MAX_ROWS):
+            _, (_, old) = _KEY_CACHE.popitem(last=False)
+            rows -= len(old) if old is not None else 0
+    return keys
+
+
+def _probe(ts: int, local_id: int) -> int:
+    return ts * _PACK + min(max(local_id, 0), _LID_MAX)
+
+
+def _cut(keys: array, key: Optional[tuple], fname: str, direction: str) -> int:
+    """Split point of one file's keys: keys[:cut] sort before `key`, keys[cut:]
+    after it (the same rule as _bound, cross-file tie-break included)."""
+    if key is None:
+        return len(keys) if direction == "before" else 0
+    ts, db, local_id = key
+    if fname < db or (fname == db and local_id > _LID_MAX):
+        return bisect.bisect_right(keys, _probe(ts, _LID_MAX))   # same second sorts before
+    if fname > db or local_id < 0:
+        return bisect.bisect_left(keys, _probe(ts, 0))           # same second sorts after
+    if direction == "before":
+        return bisect.bisect_left(keys, _probe(ts, local_id))
+    return bisect.bisect_right(keys, _probe(ts, local_id))
+
+
 def _bound(fname: str, key: tuple, direction: str) -> tuple:
     """SQL condition for rows of `fname` strictly before/after `key`."""
     ts, db, local_id = key
@@ -160,6 +265,42 @@ def _bound(fname: str, key: tuple, direction: str) -> tuple:
     return "create_time >= ?", [ts]
 
 
+def _select_rows(c: sqlite3.Connection, fname: str, table: str, where: str, params: list) -> list:
+    """Rows of `table` matching `where` (SQL tail incl. ORDER/LIMIT) as
+    (ts, db, local_id, sender_raw, mtype, content)."""
+    cols = {r[1] for r in c.execute(f"PRAGMA table_info({table})").fetchall()}
+    compress = "compress_content" if "compress_content" in cols else "NULL"
+    got = c.execute(f"SELECT local_id, create_time, real_sender_id, local_type, message_content, "
+                    f"{compress} FROM {table}{where}", params).fetchall()
+    ids = sorted({r[2] for r in got if r[2] is not None})
+    n2i: dict = {}
+    if ids:
+        try:
+            for i in range(0, len(ids), 500):
+                part = ids[i:i + 500]
+                n2i.update(c.execute(
+                    f"SELECT rowid, user_name FROM Name2Id WHERE rowid IN ({','.join('?' * len(part))})",
+                    part).fetchall())
+        except sqlite3.DatabaseError:
+            n2i = {}
+    out = []
+    for local_id, ts, sender_id, mtype, content, comp in got:
+        mtype = int(mtype or 0)
+        out.append((int(ts or 0), fname, int(local_id or 0), n2i.get(sender_id, f"<id_{sender_id}>"),
+                    mtype, _prefer_compressed(mtype, content, comp)))
+    return out
+
+
+def _skip_malformed(store, fname: str, e: sqlite3.DatabaseError) -> None:
+    if "malformed" not in str(e).lower():
+        raise e
+    try:
+        store._known_malformed.add(fname)
+    except AttributeError:
+        pass
+    sys.stderr.write(f"[chat-view] skipping malformed DB {fname}\n")
+
+
 def _echo_rows(store, chat: str, key: Optional[tuple], direction: str, limit: int) -> tuple:
     """Up to `limit` raw rows next to `key` → (rows ascending, has_more).
 
@@ -167,57 +308,76 @@ def _echo_rows(store, chat: str, key: Optional[tuple], direction: str, limit: in
     (ts, db, local_id, sender_raw, mtype, content).
     """
     want = limit + 1
-    rows: list = []
+    picks: list = []   # (ts, db, local_id, row or None while only the key is known)
+    available = 0      # rows on this side of `key`, over all files
+    tables: dict = {}
     malformed = getattr(store, "_known_malformed", set())
     for fname, table in store._locate_msg_dbs(chat):
         if fname in malformed:
             continue
-        c = store._conn(fname)
+        tables[fname] = table
         try:
-            cols = {r[1] for r in c.execute(f"PRAGMA table_info({table})").fetchall()}
-            compress = "compress_content" if "compress_content" in cols else "NULL"
-            where, params = ("", [])
+            keys = _file_keys(store, fname, table)
+            if keys is not None:
+                cut = _cut(keys, key, fname, direction)
+                if direction == "before":
+                    lo, hi = max(0, cut - want), cut
+                    available += cut
+                else:
+                    lo, hi = cut, min(len(keys), cut + want)
+                    available += len(keys) - cut
+                picks.extend((k >> 32, fname, k & _LID_MAX, None) for k in keys[lo:hi])
+                continue
+            # Keys that don't pack: the table's own ORDER BY ... LIMIT.
+            where, params = "", []
             if key is not None:
                 cond, params = _bound(fname, key, direction)
                 where = " WHERE " + cond
             order = "DESC" if direction == "before" else "ASC"
-            sql = (f"SELECT local_id, create_time, real_sender_id, local_type, message_content, "
-                   f"{compress} FROM {table}{where} "
-                   f"ORDER BY create_time {order}, local_id {order} LIMIT ?")
-            got = c.execute(sql, params + [want]).fetchall()
-            ids = sorted({r[2] for r in got if r[2] is not None})
-            n2i: dict = {}
-            if ids:
-                try:
-                    for i in range(0, len(ids), 500):
-                        part = ids[i:i + 500]
-                        n2i.update(c.execute(
-                            f"SELECT rowid, user_name FROM Name2Id WHERE rowid IN ({','.join('?' * len(part))})",
-                            part).fetchall())
-                except sqlite3.DatabaseError:
-                    n2i = {}
-            for local_id, ts, sender_id, mtype, content, comp in got:
-                content = _prefer_compressed(int(mtype or 0), content, comp)
-                rows.append((int(ts or 0), fname, int(local_id or 0),
-                             n2i.get(sender_id, f"<id_{sender_id}>"), int(mtype or 0), content))
+            c = store._conn(fname)
+            try:
+                got = _select_rows(c, fname, table, f"{where} ORDER BY create_time {order}, local_id {order} LIMIT ?",
+                                   params + [want])
+            finally:
+                c.close()
+            available += len(got)
+            picks.extend((r[0], r[1], r[2], r) for r in got)
         except sqlite3.DatabaseError as e:
-            if "malformed" in str(e).lower():
-                try:
-                    malformed.add(fname)
-                except AttributeError:
-                    pass
-                sys.stderr.write(f"[chat-view] skipping malformed DB {fname}\n")
-                continue
-            raise
+            _skip_malformed(store, fname, e)
+    picks.sort(key=lambda p: (p[0], p[1], p[2]))
+    has_more = available > limit
+    if direction == "before":
+        picks = picks[max(0, len(picks) - limit):] if limit else []
+    else:
+        picks = picks[:limit]
+    return _fill_rows(store, tables, picks), has_more
+
+
+def _fill_rows(store, tables: dict, picks: list) -> list:
+    """Fetch the rows behind key-only picks (by primary key), keep order."""
+    need: dict = {}
+    for _ts, fname, local_id, row in picks:
+        if row is None:
+            need.setdefault(fname, []).append(local_id)
+    got: dict = {}
+    for fname, ids in need.items():
+        c = store._conn(fname)
+        try:
+            for i in range(0, len(ids), 500):
+                part = ids[i:i + 500]
+                for r in _select_rows(c, fname, tables[fname],
+                                      f" WHERE local_id IN ({','.join('?' * len(part))})", part):
+                    got[(fname, r[2])] = r
+        except sqlite3.DatabaseError as e:
+            _skip_malformed(store, fname, e)
         finally:
             c.close()
-    rows.sort(key=lambda r: (r[0], r[1], r[2]))
-    has_more = len(rows) > limit
-    if direction == "before":
-        rows = rows[-limit:] if limit else []
-    else:
-        rows = rows[:limit]
-    return rows, has_more
+    out = []
+    for _ts, fname, local_id, row in picks:
+        row = row or got.get((fname, local_id))
+        if row is not None:  # gone since the keys were read (file swapped mid-request)
+            out.append(row)
+    return out
 
 
 def _prefer_compressed(mtype: int, content, compress):
@@ -321,13 +481,21 @@ def _echo_meta(store, chat: str) -> dict:
     for fname, table in store._locate_msg_dbs(chat):
         if fname in malformed:
             continue
-        c = store._conn(fname)
         try:
-            n, lo, hi = c.execute(f"SELECT COUNT(*), MIN(create_time), MAX(create_time) FROM {table}").fetchone()
+            keys = _file_keys(store, fname, table)
+            if keys is not None:
+                # Same arrays the pages were cut from — no extra scan.
+                n = len(keys)
+                lo, hi = (keys[0] >> 32, keys[-1] >> 32) if n else (None, None)
+            else:
+                c = store._conn(fname)
+                try:
+                    n, lo, hi = c.execute(
+                        f"SELECT COUNT(*), MIN(create_time), MAX(create_time) FROM {table}").fetchone()
+                finally:
+                    c.close()
         except sqlite3.DatabaseError:
             continue
-        finally:
-            c.close()
         count += int(n or 0)
         if lo is not None:
             first = int(lo) if first is None else min(first, int(lo))
@@ -348,7 +516,6 @@ class _ListSource:
         self.keys = [(int(m.create_time), "", i) for i, m in enumerate(msgs)]
 
     def rows(self, key: Optional[tuple], direction: str, limit: int) -> tuple:
-        import bisect
         if direction == "before":
             hi = len(self.keys) if key is None else bisect.bisect_left(self.keys, key)
             lo = max(0, hi - limit)
@@ -425,7 +592,7 @@ def chat_page(store, chat: str, *, before: Optional[str] = None, after: Optional
             # store: its db/local_id mean nothing here, so open at its time.
             older_key = newer_key = _key_at(target[0])
     elif at not in (None, ""):
-        older_key = newer_key = _key_at(int(at))
+        older_key = newer_key = _key_at(_bounded(int(at), "at", lo=-_INT_LIMIT))
     else:
         older_key = newer_key = None
 
@@ -433,9 +600,16 @@ def chat_page(store, chat: str, *, before: Optional[str] = None, after: Optional
         msgs, more_before = page(None, "before", limit)
         payload.update(messages=msgs, has_more_before=more_before, has_more_after=False)
     else:
+        # Half each side; near either end of the chat the other side makes
+        # up the difference, so the window is full whenever the chat has
+        # `limit` messages.
         n_newer = limit - limit // 2
         newer, more_after = page(newer_key, "after", n_newer)
         older, more_before = page(older_key, "before", limit - len(newer))
+        short = limit - len(newer) - len(older)
+        if short > 0 and more_after and newer:
+            extra, more_after = page(parse_cursor(newer[-1]["id"]), "after", short)
+            newer = newer + extra
         msgs = older + newer
         payload.update(messages=msgs, has_more_before=more_before, has_more_after=more_after)
         anchor = None

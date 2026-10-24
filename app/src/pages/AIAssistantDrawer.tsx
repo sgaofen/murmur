@@ -244,7 +244,7 @@ function DrawerShell({
         onClick={onClose ?? undefined}
         style={{
           position: 'absolute', inset: 0,
-          background: 'rgba(20, 24, 42, 0.32)',
+          background: 'var(--surface-overlay)',
           opacity: shown ? 1 : 0,
           transition: 'opacity 280ms cubic-bezier(.4, 0, .2, 1)',
           cursor: onClose ? 'pointer' : 'default',
@@ -257,7 +257,7 @@ function DrawerShell({
           width: 480, maxWidth: '92vw',
           background: 'var(--et-paper)',
           borderLeft: '0.5px solid var(--et-line-2)',
-          boxShadow: '-18px 0 48px rgba(26,43,74,0.16), -1px 0 0 rgba(26,43,74,0.06)',
+          boxShadow: 'var(--shadow-lg)',
           transform: shown ? 'translateX(0)' : 'translateX(100%)',
           transition: 'transform 320ms cubic-bezier(.32, .72, .24, 1)',
           display: 'flex', flexDirection: 'column',
@@ -405,8 +405,8 @@ function AgentCard({
         background: active ? 'var(--et-paper)' : 'var(--et-paper-2)',
         border: `0.5px solid ${active ? 'var(--et-orange)' : 'var(--et-line-2)'}`,
         boxShadow: active
-          ? '0 0 0 3px rgba(255,107,71,0.12), 0 1px 0 rgba(26,43,74,0.04)'
-          : '0 1px 0 rgba(26,43,74,0.03)',
+          ? '0 0 0 3px var(--accent-soft), var(--shadow-sm)'
+          : 'var(--shadow-sm)',
         opacity: disabled ? 0.55 : 1,
         gridColumn: spanFull ? 'span 2' : 'auto',
         display: 'flex', flexDirection: 'column', gap: 8,
@@ -417,7 +417,7 @@ function AgentCard({
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         <span style={{
           width: 32, height: 32, borderRadius: 8,
-          background: active ? 'var(--et-orange-soft)' : 'rgba(26,43,74,0.05)',
+          background: active ? 'var(--et-orange-soft)' : 'var(--surface-hover)',
           color: active ? 'var(--et-orange)' : 'var(--et-ink)',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           flexShrink: 0,
@@ -491,9 +491,9 @@ function RangePills({
               all: 'unset', cursor: (disabled || o.locked) ? 'not-allowed' : 'pointer',
               flex: 1, textAlign: 'center',
               padding: '10px 12px', borderRadius: 10,
-              background: active ? 'var(--et-ink)' : 'transparent',
-              color: active ? 'var(--et-paper)' : 'var(--et-ink)',
-              border: `0.5px solid ${active ? 'var(--et-ink)' : 'var(--et-line-2)'}`,
+              background: active ? 'var(--surface-inverse)' : 'transparent',
+              color: active ? 'var(--text-inverse)' : 'var(--text-primary)',
+              border: `0.5px solid ${active ? 'var(--surface-inverse)' : 'var(--et-line-2)'}`,
               opacity: o.locked ? 0.4 : (disabled ? 0.55 : 1),
               transition: 'background 160ms, color 160ms',
             }}
@@ -503,7 +503,10 @@ function RangePills({
             </div>
             <div style={{
               fontSize: 10, marginTop: 4, letterSpacing: '0.04em',
-              color: active ? 'rgba(251, 246, 238, 0.6)' : 'var(--et-mute)',
+              // Inverse text at 60% — a fixed cream here vanished on the
+              // cream pill dark mode uses for the active option.
+              color: active ? 'var(--text-inverse)' : 'var(--et-mute)',
+              opacity: active ? 0.6 : 1,
             }}>
               {o.sub}
             </div>
@@ -538,7 +541,7 @@ function FocusChips({
               fontSize: 12, fontWeight: 500,
               background: on ? 'var(--et-orange-soft)' : 'transparent',
               color: on ? 'var(--et-orange-2)' : 'var(--et-ink-soft)',
-              border: `0.5px solid ${on ? 'rgba(224,83,46,0.32)' : 'var(--et-line-2)'}`,
+              border: `0.5px solid ${on ? 'var(--accent-border)' : 'var(--et-line-2)'}`,
               transition: 'background 140ms, border-color 140ms, color 140ms',
             }}
           >
@@ -610,11 +613,11 @@ function ProgressPanel({
               <span style={{
                 width: 16, height: 16, borderRadius: '50%',
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
-                background: done ? 'var(--et-orange)' : (active ? 'var(--et-paper)' : 'transparent'),
+                background: done ? 'var(--accent-solid)' : (active ? 'var(--et-paper)' : 'transparent'),
                 border: `1px solid ${done || active ? 'var(--et-orange)' : 'var(--et-line-2)'}`,
-                color: done ? '#fff' : 'var(--et-orange)',
+                color: done ? 'var(--text-on-accent)' : 'var(--et-orange)',
                 flexShrink: 0,
-                boxShadow: active ? '0 0 0 4px rgba(255,107,71,0.16)' : 'none',
+                boxShadow: active ? '0 0 0 4px var(--accent-soft)' : 'none',
               }}>
                 {done && <IconCheck size={10} />}
                 {active && <span style={{ width: 5, height: 5, borderRadius: '50%', background: 'var(--et-orange)' }} />}
@@ -633,7 +636,7 @@ function ProgressPanel({
       {phase === 'running' && (
         <div style={{
           marginTop: 16, height: 3, borderRadius: 999,
-          background: 'rgba(26,43,74,0.06)', overflow: 'hidden',
+          background: 'var(--surface-pressed)', overflow: 'hidden',
           position: 'relative',
         }}>
           <div className="ai-shimmer" style={{
@@ -752,7 +755,7 @@ function IconButton({
       color: 'var(--et-mute)',
     }}
     onMouseEnter={e => {
-      e.currentTarget.style.background = 'rgba(26,43,74,0.05)';
+      e.currentTarget.style.background = 'var(--surface-hover)';
       e.currentTarget.style.color = 'var(--et-ink)';
     }}
     onMouseLeave={e => {
@@ -773,14 +776,15 @@ export function ReportReadyBanner({
   const displayPack = privacy ? `${displayName(friend.id, friend.name)}_AI分析包.md` : pack.name;
   return (
     <div style={{
-      margin: '14px 28px 0',
+      margin: '14px min(28px, 4vw) 0',
       padding: '14px 22px 14px 24px',
       background: 'var(--et-paper)',
-      border: '0.5px solid rgba(224, 83, 46, 0.32)',
+      border: '0.5px solid var(--accent-border)',
       borderLeft: '3px solid var(--et-orange)',
       borderRadius: 'var(--et-r)',
       boxShadow: 'var(--et-shadow-1)',
-      display: 'flex', alignItems: 'center', gap: 18,
+      // Wraps on narrow windows instead of pushing the links off-screen.
+      display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '10px 18px',
     }}>
       <div style={{
         width: 28, height: 28, borderRadius: '50%',
@@ -789,7 +793,7 @@ export function ReportReadyBanner({
       }}>
         <IconCheck size={14} />
       </div>
-      <div style={{ flex: 1, minWidth: 0 }}>
+      <div style={{ flex: '1 1 220px', minWidth: 0 }}>
         <div className="et-serif" style={{ fontSize: 14, color: 'var(--et-ink)', lineHeight: 1.4 }}>
           给 <b style={{ fontWeight: 600 }}>{displayName(friend.id, friend.name)}</b> 的关系档案已就绪
           <span className="et-meta" style={{
@@ -799,7 +803,7 @@ export function ReportReadyBanner({
           </span>
         </div>
       </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 4, minWidth: 0 }}>
         <TextLink onClick={() => { void openFolder(pack.path); onOpenLocation(); }} icon={<IconFolder size={12} />}>打开文件位置</TextLink>
         <span style={{ width: 1, height: 12, background: 'var(--et-line-2)' }} />
         <TextLink

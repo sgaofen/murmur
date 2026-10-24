@@ -4,6 +4,9 @@ import { API_BASE, indexMedia } from '../../data/api';
 import { useTaskCenter } from '../../components/extras/TaskCenter';
 import { displayName, maskText } from '../../utils/privacy';
 import { usePrivacy } from '../../utils/usePrivacy';
+import { Button, EmptyState, Skeleton } from '../../ui';
+import { IconClose, IconPlay, IconSearch, IconSparkle } from '../../ui/icons';
+import './MediaGallery.css';
 
 interface MediaItem {
   md5: string;
@@ -109,78 +112,83 @@ export function MediaGallery({ friend }: Props) {
   const vidCount = items.filter(i => i.kind === 'vid').length;
 
   return (
-    <div className="et-root" style={{ background: 'var(--et-bg)', minHeight: '100%' }}>
-      <style>{`.media-hover-wrap:hover .media-hover { opacity: 1 !important; }`}</style>
-      <div style={{ padding: '14px 28px 0', display: 'flex', alignItems: 'center', gap: 14 }}>
+    <div className="media-page et-root">
+      <div className="media-head">
         <div className="et-eyebrow">相册 · 你和 {displayName(friend.id, friend.name)}</div>
-        <div className="et-meta">
-          共 <span className="et-num" style={{ color: 'var(--et-ink)', fontWeight: 600 }}>{imgCount}</span> 张图 ·{' '}
-          <span className="et-num" style={{ color: 'var(--et-ink)', fontWeight: 600 }}>{vidCount}</span> 条视频
+        <div className="et-meta media-head__count">
+          共 <b className="et-num">{imgCount}</b> 张图 · <b className="et-num">{vidCount}</b> 条视频
         </div>
-        <div style={{
-          marginLeft: 'auto',
-          display: 'flex', alignItems: 'center', gap: 8,
-          padding: '7px 12px', border: '0.5px solid var(--et-line-2)', borderRadius: 999,
-          background: 'var(--et-paper)', minWidth: 260,
-        }}>
-          <svg width="13" height="13" viewBox="0 0 13 13" fill="none" stroke="var(--et-mute)" strokeWidth="1.4">
-            <circle cx="5.5" cy="5.5" r="4" /><path d="M8.5 8.5l3 3" strokeLinecap="round" />
-          </svg>
-          <input
-            placeholder="搜文件名"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            style={{ all: 'unset', flex: 1, fontSize: 12, color: 'var(--et-ink)' }}
-          />
-        </div>
+        {items.length > 0 && (
+          <label className="media-search">
+            <IconSearch size={13} />
+            <input
+              type="search"
+              placeholder="搜文件名"
+              aria-label="搜文件名"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+          </label>
+        )}
       </div>
 
-      {loading && <div className="et-meta" style={{ padding: 40, textAlign: 'center' }}>加载中…</div>}
-      {!loading && items.length === 0 && (
-        <div style={{ padding: '60px 28px', textAlign: 'center' }}>
-          <div className="et-h3" style={{ color: 'var(--et-ink)', marginBottom: 8 }}>这里还没有媒体</div>
-          <div className="et-meta" style={{ maxWidth: 480, margin: '0 auto' }}>
-            视频和图片需要先建立本地索引。
-            <div style={{ marginTop: 14 }}>
-              <button onClick={handleIndexMedia} disabled={indexing} style={{
-                all: 'unset',
-                cursor: indexing ? 'wait' : 'pointer',
-                padding: '9px 18px',
-                borderRadius: 999,
-                background: indexing ? 'var(--et-paper-2)' : 'var(--et-orange)',
-                color: indexing ? 'var(--et-mute)' : '#fff',
-                fontWeight: 700,
-                fontSize: 12,
-                boxShadow: indexing ? 'none' : 'var(--et-shadow-2)',
-              }}>
-                {indexing ? '正在建立索引…' : '一键建立媒体索引'}
-              </button>
+      {loading && (
+        <div className="media-body" aria-busy="true" aria-label="正在加载相册">
+          <div>
+            <div className="media-month__head"><Skeleton width={96} height={16} /><span className="media-month__rule" /></div>
+            <div className="media-grid">
+              {Array.from({ length: 8 }, (_, i) => <Skeleton key={i} height="auto" radius={8} className="media-skel" />)}
             </div>
-            {indexError && (
-              <div style={{ marginTop: 12, color: 'var(--et-orange)', fontSize: 11 }}>
-                {maskText(indexError)}
-              </div>
-            )}
           </div>
         </div>
       )}
+      {!loading && items.length === 0 && (
+        <div className="media-empty">
+          <EmptyState
+            icon={<IconSparkle size={24} />}
+            title="这里还没有媒体"
+            description="视频和图片需要先建立本地索引，只扫描这台电脑上的微信缓存。"
+            actions={(
+              <Button variant="primary" loading={indexing} onClick={handleIndexMedia}>
+                {indexing ? '正在建立索引…' : '一键建立媒体索引'}
+              </Button>
+            )}
+          />
+          {indexError && (
+            <div className="media-empty__error" role="alert">
+              {maskText(indexError)}
+            </div>
+          )}
+        </div>
+      )}
+      {!loading && items.length > 0 && groups.length === 0 && (
+        <div className="media-empty">
+          <EmptyState
+            icon={<IconSearch size={24} />}
+            title={`没有文件名包含「${maskText(search)}」的媒体`}
+            actions={<Button size="sm" onClick={() => setSearch('')}>清除搜索</Button>}
+          />
+        </div>
+      )}
 
-      <div style={{ padding: '18px 28px 36px', display: 'flex', flexDirection: 'column', gap: 28 }}>
-        {groups.map((g) => (
-          <div key={g.month}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
-              <div className="et-serif" style={{ fontSize: 16, fontWeight: 600, color: 'var(--et-ink)' }}>{g.month}</div>
-              <div style={{ flex: 1, height: 1, background: 'var(--et-line-2)' }} />
-              <div className="et-meta">{g.items.length} 项</div>
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 }}>
-              {g.items.map((it) => (
-                <Thumb key={it.md5} item={it} onClick={() => setActive(it)} />
-              ))}
-            </div>
-          </div>
-        ))}
-      </div>
+      {!loading && groups.length > 0 && (
+        <div className="media-body">
+          {groups.map((g) => (
+            <section key={g.month}>
+              <div className="media-month__head">
+                <h3 className="media-month__title">{g.month}</h3>
+                <span className="media-month__rule" aria-hidden="true" />
+                <span className="et-meta">{g.items.length} 项</span>
+              </div>
+              <div className="media-grid">
+                {g.items.map((it) => (
+                  <Thumb key={it.md5} item={it} onClick={() => setActive(it)} />
+                ))}
+              </div>
+            </section>
+          ))}
+        </div>
+      )}
 
       {active && <Lightbox item={active} onClose={() => setActive(null)} />}
     </div>
@@ -192,62 +200,31 @@ function Thumb({ item, onClick }: { item: MediaItem; onClick: () => void }) {
   const senderLabel = item.from
     ? item.from === 'self' ? '你' : displayName(item.from, item.from)
     : '';
+  const when = new Date(item.ts * 1000).toLocaleString();
 
   return (
-    <div
-      className="media-hover-wrap"
-      onClick={onClick}
-      style={{
-        position: 'relative', aspectRatio: '1 / 1',
-        borderRadius: 8, overflow: 'hidden',
-        cursor: 'pointer',
-        background: 'var(--et-paper-2)',
-        boxShadow: 'inset 0 0 0 0.5px rgba(26,43,74,0.10)',
-      }}
-    >
+    <button type="button" className="media-thumb" onClick={onClick}
+      aria-label={`${item.kind === 'vid' ? '视频' : '图片'} · ${senderLabel ? senderLabel + ' 发送 · ' : ''}${when}`}>
       {item.kind === 'img' ? (
-        <img src={item.url} alt={maskText(item.filename)} loading="lazy"
-          style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-          onError={(e) => { (e.target as HTMLImageElement).style.opacity = '0.2'; }}
+        <img src={item.url} alt="" loading="lazy"
+          onError={(e) => { (e.target as HTMLImageElement).classList.add('is-broken'); }}
         />
       ) : (
-        <video src={item.url} muted preload="metadata"
-          style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-        />
+        <video src={item.url} muted preload="metadata" />
       )}
       {item.kind === 'vid' && (
         <>
-          <div style={{
-            position: 'absolute', top: 8, left: 8,
-            padding: '2px 7px', borderRadius: 4,
-            background: 'rgba(20,24,42,0.7)', color: '#fff',
-            fontSize: 10, fontWeight: 600, letterSpacing: '0.06em',
-          }}>视频</div>
-          <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <div style={{
-              width: 36, height: 36, borderRadius: '50%',
-              background: 'rgba(255,255,255,0.92)',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              boxShadow: '0 4px 12px rgba(0,0,0,0.2)',
-            }}>
-              <svg width="14" height="14" viewBox="0 0 14 14"><path d="M3 2v10l9-5z" fill="#1A2B4A" /></svg>
-            </div>
-          </div>
+          <span className="media-thumb__badge">视频</span>
+          <span className="media-thumb__play" aria-hidden="true"><span><IconPlay size={14} /></span></span>
         </>
       )}
-      <div className="media-hover" style={{
-        position: 'absolute', inset: 0,
-        background: 'linear-gradient(180deg, rgba(20,24,42,0) 40%, rgba(20,24,42,0.78) 100%)',
-        opacity: 0, transition: 'opacity .15s ease',
-        display: 'flex', alignItems: 'flex-end', padding: 8,
-        color: '#fff', fontSize: 10.5, lineHeight: 1.3,
-      }}>
-        <div>
-          {senderLabel && <div style={{ fontWeight: 600 }}>{senderLabel} 发送</div>}
-          <div style={{ opacity: 0.85 }}>{new Date(item.ts * 1000).toLocaleString()}</div>
-        </div>
-      </div>
-    </div>
+      <span className="media-thumb__info" aria-hidden="true">
+        <span>
+          {senderLabel && <b>{senderLabel} 发送</b>}
+          <span>{when}</span>
+        </span>
+      </span>
+    </button>
   );
 }
 
@@ -258,20 +235,14 @@ function Lightbox({ item, onClose }: { item: MediaItem; onClose: () => void }) {
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
   return (
-    <div onClick={onClose} style={{
-      position: 'fixed', inset: 0, zIndex: 200,
-      background: 'rgba(0,0,0,0.85)', backdropFilter: 'blur(8px)',
-      display: 'flex', alignItems: 'center', justifyContent: 'center',
-      padding: 30, cursor: 'zoom-out',
-    }}>
+    <div className="media-lightbox" onClick={onClose} role="dialog" aria-modal="true" aria-label="查看媒体">
       {item.kind === 'img'
-        ? <img src={item.url} alt={maskText(item.filename)} style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} />
-        : <video src={item.url} controls autoPlay style={{ maxWidth: '100%', maxHeight: '100%' }} />}
-      <button onClick={(e) => { e.stopPropagation(); onClose(); }} style={{
-        all: 'unset', cursor: 'pointer',
-        position: 'fixed', top: 20, right: 24,
-        color: '#fff', fontSize: 24,
-      }}>×</button>
+        ? <img src={item.url} alt={maskText(item.filename)} />
+        : <video src={item.url} controls autoPlay onClick={(e) => e.stopPropagation()} />}
+      <button type="button" className="media-lightbox__close" aria-label="关闭" title="关闭"
+        onClick={(e) => { e.stopPropagation(); onClose(); }}>
+        <IconClose size={16} />
+      </button>
     </div>
   );
 }

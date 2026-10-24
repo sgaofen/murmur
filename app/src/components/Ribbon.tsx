@@ -6,13 +6,13 @@ interface Props {
   tone?: 'light' | 'solid';
 }
 
-export function Ribbon({ children, color = 'var(--et-orange)', tone = 'light' }: Props) {
+export function Ribbon({ children, color = 'var(--accent-solid)', tone = 'light' }: Props) {
   return (
     <div style={{
       display: 'inline-flex', alignItems: 'center', gap: 8,
       padding: '6px 14px 6px 26px', position: 'relative',
       background: tone === 'light' ? 'var(--et-paper)' : color,
-      color: tone === 'light' ? color : '#fff',
+      color: tone === 'light' ? color : 'var(--text-on-accent)',
       border: `0.5px solid ${tone === 'light' ? color : 'transparent'}`,
       fontFamily: 'var(--et-sans)', fontSize: 11, fontWeight: 600,
       letterSpacing: '0.14em', textTransform: 'uppercase',
@@ -20,7 +20,7 @@ export function Ribbon({ children, color = 'var(--et-orange)', tone = 'light' }:
       <span style={{
         position: 'absolute', left: 8, top: '50%', transform: 'translateY(-50%)',
         width: 6, height: 6, borderRadius: '50%', background: color,
-        boxShadow: `0 0 0 2px ${tone === 'light' ? 'var(--et-paper)' : '#fff'}`,
+        boxShadow: `0 0 0 2px ${tone === 'light' ? 'var(--surface-card)' : 'var(--text-on-accent)'}`,
       }}/>
       {children}
     </div>

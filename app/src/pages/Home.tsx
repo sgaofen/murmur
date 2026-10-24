@@ -15,9 +15,10 @@ import { displayName, maskText } from '../utils/privacy';
 import { redactDiagnostics } from '../utils/diagRedact';
 import { usePrivacy } from '../utils/usePrivacy';
 import { LiveSyncToggle } from '../components/LiveSyncToggle';
-import { Button, EmptyState, ErrorState } from '../ui';
-import { IconKey } from '../ui/icons';
+import { Button, EmptyState, ErrorState, SegmentedControl, Skeleton, SkeletonText, cx } from '../ui';
+import { IconClose, IconInbox, IconKey, IconRefresh, IconSearch } from '../ui/icons';
 import { PageHeader } from '../shell/PageHeader';
+import './Home.css';
 
 interface Props {
   onOpenFriend: (id: string) => void;
@@ -35,34 +36,19 @@ function HomeChromeBar({ onRefresh, refreshing, refreshMsg, onExtractKey, onTogg
   // the app shell's left nav; only Home's own actions stay here.
   return (
     <PageHeader title="首页" subtitle="年代记 · 你和朋友们的这些年">
-      <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-        {refreshMsg && (
-          <span className="et-meta" style={{ color: 'var(--et-orange)', fontSize: 11 }}>{maskText(refreshMsg)}</span>
-        )}
-        <TaskCenterBell onClick={onToggleTaskCenter} active={taskCenterActive} />
-        <button onClick={onExtractKey} title="重新读取微信密钥，按引导操作" style={{
-          all: 'unset', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6,
-          color: 'var(--et-mute)', fontSize: 12, fontWeight: 500,
-        }}>
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4">
-            <path d="M5 7a2 2 0 1 1 4 0v1H5V7zm-1 1V7a3 3 0 1 1 6 0v1h.5A1.5 1.5 0 0 1 12 9.5v2A1.5 1.5 0 0 1 10.5 13h-7A1.5 1.5 0 0 1 2 11.5v-2A1.5 1.5 0 0 1 3.5 8H4z" strokeLinecap="round" />
-          </svg>
-          密钥
-        </button>
-        <LiveSyncToggle onSynced={onLiveSynced} disabled={refreshing} />
-        <button onClick={onRefresh} disabled={refreshing} style={{
-          all: 'unset', cursor: refreshing ? 'wait' : 'pointer',
-          display: 'flex', alignItems: 'center', gap: 6,
-          color: refreshing ? 'var(--et-faint)' : 'var(--et-mute)', fontSize: 12, fontWeight: 500,
-        }}>
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4"
-            style={refreshing ? { animation: 'spin 1s linear infinite' } : undefined}>
-            <path d="M11.5 7a4.5 4.5 0 1 1-1.32-3.18M11 1v3.5h-3.5" strokeLinecap="round" />
-          </svg>
-          {refreshing ? '正在解密最新数据…' : '更新数据'}
-        </button>
-      </div>
-      <style>{`@keyframes spin { from { transform: rotate(0); } to { transform: rotate(360deg); } }`}</style>
+      {refreshMsg && (
+        <span className="home-refresh-msg" role="status" title={maskText(refreshMsg)}>{maskText(refreshMsg)}</span>
+      )}
+      <TaskCenterBell onClick={onToggleTaskCenter} active={taskCenterActive} />
+      <Button variant="ghost" size="sm" className="home-action" icon={<IconKey size={14} />} onClick={onExtractKey}
+        title="重新读取微信密钥，按引导操作" aria-label="密钥">
+        密钥
+      </Button>
+      <LiveSyncToggle onSynced={onLiveSynced} disabled={refreshing} />
+      <Button variant="ghost" size="sm" className="home-action" icon={<IconRefresh size={14} />} onClick={onRefresh} loading={refreshing}
+        aria-label={refreshing ? '正在解密最新数据' : '更新数据'}>
+        {refreshing ? '正在解密最新数据…' : '更新数据'}
+      </Button>
     </PageHeader>
   );
 }
@@ -70,79 +56,59 @@ function HomeChromeBar({ onRefresh, refreshing, refreshMsg, onExtractKey, onTogg
 function HeroFrame({ summary, onOpen }: { summary: HomeSummary; onOpen: (id: string) => void }) {
   void usePrivacy();
   return (
-    <div className="et-paper-grain" style={{
-      position: 'relative', margin: '24px 28px 0', padding: '40px 44px 36px',
-      background: 'var(--et-paper)', border: '0.5px solid var(--et-line-2)',
-      borderRadius: 'var(--et-r-lg)', boxShadow: 'var(--et-shadow-2)', overflow: 'hidden',
-    }}>
-      <div style={{ position: 'absolute', inset: 14, border: '0.5px solid var(--et-line)', borderRadius: 14, pointerEvents: 'none' }} />
-      <div style={{ position: 'absolute', top: 24, right: 30, transform: 'rotate(8deg)', opacity: 0.85 }}>
+    <section className="home-hero et-paper-grain" aria-label="年代记">
+      <div className="home-hero__frame" aria-hidden="true" />
+      <div className="home-hero__postmark" aria-hidden="true">
         <Postmark size={86} />
       </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-        <Ribbon color="var(--et-orange)" tone="solid">2026 · 年代记</Ribbon>
-        <div className="et-meta" style={{ color: 'var(--et-mute)' }}>Murmur · Vol. 01</div>
+      <div className="home-hero__ribbon">
+        <Ribbon color="var(--accent-solid)" tone="solid">2026 · 年代记</Ribbon>
+        <span className="et-meta">Murmur · Vol. 01</span>
       </div>
-      <div className="et-serif" style={{
-        marginTop: 24, fontSize: 46, lineHeight: 1.22, fontWeight: 500,
-        color: 'var(--et-ink)', maxWidth: 760, letterSpacing: '0.005em',
-      }}>
-        这些年，时间带你遇见了 <span style={{ color: 'var(--et-orange)', fontWeight: 600 }}>{summary.totalContacts}</span> 个人，<br/>
-        其中 <span style={{ color: 'var(--et-orange)', fontWeight: 600 }}>{summary.closeFriends}</span> 位朋友，陪你走过了 <span style={{ color: 'var(--et-orange)', fontWeight: 600 }}>{summary.daysSinceFirst.toLocaleString()}</span> 天。
-      </div>
-      <div className="et-meta" style={{ marginTop: 16, fontSize: 13, color: 'var(--et-mute)', maxWidth: 560 }}>
-        翻一翻今年最常聊的人，这是 Murmur 写给你的一封小信。
-      </div>
-      <div style={{
-        marginTop: 32, display: 'grid',
-        gridTemplateColumns: 'repeat(5, minmax(0, 1fr))', gap: 14, position: 'relative',
-      }}>
-        {summary.topFriends.map((f, i) => (
-          <div key={f.id} onClick={() => onOpen(f.id)} style={{
-            position: 'relative', padding: '16px 14px 14px',
-            background: i === 0 ? 'var(--et-orange-soft)' : 'transparent',
-            border: `0.5px solid ${i === 0 ? 'rgba(224,83,46,0.25)' : 'var(--et-line)'}`,
-            borderRadius: 'var(--et-r)',
-            display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8,
-            textAlign: 'center', cursor: 'pointer',
-          }}>
-            <div style={{
-              position: 'absolute', top: -9, left: '50%', transform: 'translateX(-50%)',
-              background: 'var(--et-paper)', border: '0.5px solid var(--et-line-2)', borderRadius: 999,
-              padding: '2px 10px', fontFamily: 'var(--et-serif)', fontSize: 11, fontWeight: 600,
-              color: i === 0 ? 'var(--et-orange)' : 'var(--et-ink)',
-            }}>No.{i + 1}</div>
-            <Avatar friend={f} size={i === 0 ? 64 : 52} ring={i === 0} />
-            <div className="et-serif" style={{ fontSize: 15, fontWeight: 600, color: 'var(--et-ink)', marginTop: 2 }}>{displayName(f.id, f.name)}</div>
-            <div className="et-num" style={{ fontSize: 18, fontWeight: 600, color: i === 0 ? 'var(--et-orange)' : 'var(--et-ink)' }}>
-              {f.count.toLocaleString()}<span style={{ fontSize: 10, fontWeight: 500, color: 'var(--et-mute)', marginLeft: 3, fontFamily: 'var(--et-sans)' }}>条</span>
-            </div>
-            <div className="et-meta" style={{ color: 'var(--et-mute)' }}>{f.last}</div>
-          </div>
-        ))}
-      </div>
-    </div>
+      <h2 className="home-hero__title">
+        这些年，时间带你遇见了 <em className="et-num">{summary.totalContacts.toLocaleString()}</em> 个人，<br />
+        其中 <em className="et-num">{summary.closeFriends.toLocaleString()}</em> 位朋友，陪你走过了{' '}
+        <em className="et-num">{summary.daysSinceFirst.toLocaleString()}</em> 天。
+      </h2>
+      <p className="home-hero__lede">翻一翻今年最常聊的人，这是 Murmur 写给你的一封小信。</p>
+      {summary.topFriends.length > 0 && (
+        <ol className="home-top" aria-label="今年最常聊的人">
+          {summary.topFriends.map((f, i) => (
+            <li key={f.id}>
+              <button type="button" className={cx('home-top__item', i === 0 && 'is-first')} onClick={() => onOpen(f.id)}>
+                <span className="home-top__rank">No.{i + 1}</span>
+                <Avatar friend={f} size={i === 0 ? 64 : 52} ring={i === 0} />
+                <span className="home-top__text">
+                  <span className="home-top__name">{displayName(f.id, f.name)}</span>
+                  <span className="home-top__count et-num">
+                    {f.count.toLocaleString()}<span className="home-top__unit">条</span>
+                  </span>
+                  <span className="home-top__last">{f.last}</span>
+                </span>
+              </button>
+            </li>
+          ))}
+        </ol>
+      )}
+    </section>
   );
 }
 
 function Timeline({ summary }: { summary: HomeSummary }) {
   return (
-    <div style={{
-      margin: '24px 28px 0', padding: '22px 26px 18px',
-      background: 'var(--et-paper)', border: '0.5px solid var(--et-line-2)', borderRadius: 'var(--et-r)',
-    }}>
-      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 14 }}>
+    <section className="home-card home-timeline">
+      <div className="home-timeline__head">
         <div>
           <div className="et-eyebrow">时光线 · 一年里你和谁说话最多</div>
-          <div className="et-serif" style={{ fontSize: 18, fontWeight: 500, color: 'var(--et-ink)', marginTop: 6 }}>{summary.heat.peakLabel}最响，{summary.heat.troughLabel}最静。</div>
+          <div className="home-timeline__title">{summary.heat.peakLabel}最响，{summary.heat.troughLabel}最静。</div>
         </div>
-        <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
-          <span className="et-meta">高峰 · {summary.heat.peakLabel} <span className="et-num" style={{ color: 'var(--et-orange)', fontWeight: 600 }}>{summary.heat.peakCount.toLocaleString()}</span> 条</span>
-          <span className="et-meta">沉默 · {summary.heat.troughLabel} <span className="et-num" style={{ fontWeight: 600 }}>{summary.heat.troughCount.toLocaleString()}</span> 条</span>
+        <div className="home-timeline__stats">
+          <span className="et-meta">高峰 · {summary.heat.peakLabel} <span className="et-num home-timeline__peak">{summary.heat.peakCount.toLocaleString()}</span> 条</span>
+          <span className="et-meta">沉默 · {summary.heat.troughLabel} <span className="et-num">{summary.heat.troughCount.toLocaleString()}</span> 条</span>
         </div>
       </div>
       <Sparkline data={summary.heat.values} months={summary.heat.months} w={870} h={88} />
-    </div>
+    </section>
   );
 }
 
@@ -153,51 +119,104 @@ function FilterBar({
   search: string; setSearch: (s: string) => void;
   count: number;
 }) {
-  const tabs: { id: Tab; label: string }[] = [
-    { id: 'private', label: '私聊朋友' },
-    { id: 'group',   label: '群聊'     },
-  ];
   return (
-    <div style={{
-      margin: '28px 28px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16,
-      paddingBottom: 14, borderBottom: '0.5px solid var(--et-line-2)',
-    }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-        {tabs.map(t => (
-          <button key={t.id} onClick={() => setTab(t.id)} style={{
-            all: 'unset', cursor: 'pointer',
-            padding: '8px 14px', borderRadius: 999,
-            fontFamily: 'var(--et-sans)', fontSize: 13, fontWeight: t.id === tab ? 600 : 500,
-            color: t.id === tab ? 'var(--et-paper)' : 'var(--et-ink)',
-            background: t.id === tab ? 'var(--et-ink)' : 'transparent',
-            display: 'flex', alignItems: 'center', gap: 6,
-          }}>{t.label}</button>
-        ))}
-        <div style={{ width: 1, height: 18, background: 'var(--et-line-2)', margin: '0 6px' }} />
-        <span className="et-meta" style={{ color: 'var(--et-mute)' }}>共 {count} 个 · 排序 · 总消息数 ↓</span>
+    <div className="home-filter">
+      <div className="home-filter__left">
+        <SegmentedControl
+          label="朋友类型"
+          value={tab === 'group' ? 'group' : 'private'}
+          onChange={(v) => setTab(v as Tab)}
+          options={[{ value: 'private', label: '私聊朋友' }, { value: 'group', label: '群聊' }]}
+        />
+        <span className="et-meta">共 {count.toLocaleString()} 个 · 按总消息数排序</span>
       </div>
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: 8,
-        padding: '7px 12px', border: '0.5px solid var(--et-line-2)', borderRadius: 999,
-        background: 'var(--et-paper)', minWidth: 220,
-      }}>
-        <svg width="13" height="13" viewBox="0 0 13 13" fill="none" stroke="var(--et-mute)" strokeWidth="1.4">
-          <circle cx="5.5" cy="5.5" r="4" /><path d="M8.5 8.5l3 3" strokeLinecap="round" />
-        </svg>
+      <label className="home-search">
+        <IconSearch size={14} />
         <input
+          type="search"
           placeholder="搜索朋友（姓名 / 微信号 / 备注）"
+          aria-label="搜索朋友"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          style={{
-            all: 'unset', flex: 1, fontFamily: 'var(--et-sans)', fontSize: 13, color: 'var(--et-ink)',
-          }}
         />
         {search && (
-          <button onClick={() => setSearch('')} style={{
-            all: 'unset', cursor: 'pointer', color: 'var(--et-mute)', fontSize: 14,
-          }}>×</button>
+          <button type="button" className="ui-icon-btn" aria-label="清除搜索" title="清除搜索" onClick={() => setSearch('')}>
+            <IconClose size={12} />
+          </button>
         )}
+      </label>
+    </div>
+  );
+}
+
+/** Placeholder for one FriendCard while the list loads. */
+function FriendCardSkeleton() {
+  return (
+    <div className="home-skel-card" aria-hidden="true">
+      <div className="home-skel-card__row">
+        <Skeleton width={42} circle />
+        <div className="home-skel-card__lines">
+          <Skeleton width="58%" height={15} />
+          <Skeleton width="40%" height={11} />
+        </div>
       </div>
+      <div className="home-skel-card__row">
+        <div className="home-skel-card__lines">
+          <Skeleton width={96} height={22} />
+          <Skeleton width="52%" height={11} />
+        </div>
+        <Skeleton width={56} height={20} radius={999} />
+      </div>
+    </div>
+  );
+}
+
+function FriendGridSkeleton({ n = 8 }: { n?: number }) {
+  return (
+    <div className="home-grid" aria-busy="true" aria-label="正在加载朋友列表">
+      {Array.from({ length: n }, (_, i) => <FriendCardSkeleton key={i} />)}
+    </div>
+  );
+}
+
+/** The whole page while the local backend starts (cold launch can take a while). */
+function HomeSkeleton({ waitSec }: { waitSec: number }) {
+  return (
+    <div className="home-page et-root" aria-busy="true">
+      <PageHeader title="首页" subtitle="年代记 · 你和朋友们的这些年" />
+      <div className="home-boot" role="status">
+        <span className="ui-spinner" aria-hidden="true" />
+        <span>正在启动本地服务…</span>
+        <span className="home-boot__hint">
+          {waitSec >= 8
+            ? `首次打开时，本地后端正在启动；Windows 杀毒/Defender 扫描 etcli.exe 时可能要等 10-60 秒。已等待 ${waitSec} 秒`
+            : '正在连接 127.0.0.1:9100'}
+        </span>
+      </div>
+      <section className="home-hero home-hero--skeleton" aria-hidden="true">
+        <Skeleton width={150} height={26} radius={4} />
+        <Skeleton width="72%" height={34} />
+        <Skeleton width="54%" height={34} />
+        <Skeleton width="40%" height={13} />
+        <div className="home-top">
+          {Array.from({ length: 5 }, (_, i) => (
+            <div key={i} className="home-top__skel">
+              <Skeleton width={i === 0 ? 64 : 52} circle />
+              <Skeleton width="60%" height={14} />
+              <Skeleton width="44%" height={16} />
+            </div>
+          ))}
+        </div>
+      </section>
+      <section className="home-card home-timeline" aria-hidden="true">
+        <SkeletonText lines={2} lastLineWidth="36%" />
+        <div className="ui-mt-4"><Skeleton height={70} radius={6} /></div>
+      </section>
+      <div className="home-filter" aria-hidden="true">
+        <Skeleton width={150} height={30} radius={999} />
+        <Skeleton width={240} height={34} radius={999} />
+      </div>
+      <FriendGridSkeleton />
     </div>
   );
 }
@@ -219,6 +238,10 @@ export function HomePage({ onOpenFriend, onOpenOnboarding }: Props) {
   const [summary, setSummary] = useState<HomeSummary | null>(null);
   const [allFriends, setAllFriends] = useState<Friend[]>([]);
   const [loadingFriends, setLoadingFriends] = useState(true);
+  // First list response arrived (skeleton until then), and its failure if any.
+  const [friendsLoaded, setFriendsLoaded] = useState(false);
+  const [friendsError, setFriendsError] = useState<unknown>(null);
+  const [friendsNonce, setFriendsNonce] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [bootWaitSec, setBootWaitSec] = useState(0);
   const [bootLogs, setBootLogs] = useState<LogTailResponse | null>(null);
@@ -295,17 +318,20 @@ export function HomePage({ onOpenFriend, onOpenOnboarding }: Props) {
       .then(fs => {
         if (!cancelled) {
           setAllFriends(fs);
-          setError(null);
+          setFriendsError(null);
         }
       })
       .catch(e => {
-        if (!cancelled) setError(String(e.message || e));
+        if (!cancelled) setFriendsError(e);
       })
       .finally(() => {
-        if (!cancelled) setLoadingFriends(false);
+        if (!cancelled) {
+          setLoadingFriends(false);
+          setFriendsLoaded(true);
+        }
       });
     return () => { cancelled = true; };
-  }, [summary, tab, searchDebounced]);
+  }, [summary, tab, searchDebounced, friendsNonce]);
 
   // Live sync swapped in new DB files: quietly re-fetch what the page shows.
   async function handleLiveSynced() {
@@ -415,48 +441,92 @@ export function HomePage({ onOpenFriend, onOpenOnboarding }: Props) {
   }
 
   if (!summary) {
-    return (
-      <div style={{ minHeight: 'var(--shell-vh, 100vh)', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10 }}>
-        <div className="et-meta">正在启动本地服务…</div>
-        <div className="et-meta" style={{ color: 'var(--et-faint)', fontSize: 11 }}>
-          {bootWaitSec >= 8
-            ? `首次打开时，本地后端正在启动；Windows 杀毒/Defender 扫描 etcli.exe 时可能要等 10-60 秒。已等待 ${bootWaitSec} 秒`
-            : '正在连接 127.0.0.1:9100'}
-        </div>
+    return <HomeSkeleton waitSec={bootWaitSec} />;
+  }
+
+  // Connected, but the decrypted data has no chats yet (fresh account, wrong
+  // account picked, or a decrypt that is still filling in).
+  const noData = summary.totalContacts === 0 && summary.topFriends.length === 0
+    && friendsLoaded && allFriends.length === 0 && !searchDebounced && tab === 'private';
+
+  let list: ReactNode;
+  if (!friendsLoaded) {
+    list = <FriendGridSkeleton />;
+  } else if (friendsError && !loadingFriends) {
+    const code = errorCode(friendsError);
+    const entry = lookupError(code);
+    const raw = friendsError instanceof Error ? friendsError.message : String(friendsError);
+    list = (
+      <ErrorState
+        className="home-list-empty"
+        title={entry?.title ?? '朋友列表没能加载'}
+        code={code ?? undefined}
+        reason={entry?.reason ?? '读取朋友列表时本地服务返回了错误。'}
+        fixes={entry ? [entry.fix] : ['点「重试」再读一次', '还不行就点右上角「更新数据」']}
+        onRetry={() => setFriendsNonce(n => n + 1)}
+        details={raw ? <pre>{maskText(redactDiagnostics(raw))}</pre> : undefined}
+      />
+    );
+  } else if (allFriends.length === 0 && !loadingFriends) {
+    list = (
+      <EmptyState
+        className="home-list-empty"
+        icon={searchDebounced ? <IconSearch size={26} /> : <IconInbox size={26} />}
+        title={searchDebounced
+          ? `没找到「${maskText(searchDebounced)}」`
+          : tab === 'group' ? '还没有群聊记录' : '还没有私聊朋友'}
+        description={searchDebounced
+          ? '试试备注、昵称或微信号里的一部分。'
+          : '解密后的数据里还没有这类聊天。聊过天之后点右上角「更新数据」再看。'}
+        actions={searchDebounced
+          ? <Button size="sm" onClick={() => setSearch('')}>清除搜索</Button>
+          : undefined}
+      />
+    );
+  } else {
+    list = (
+      <div className={cx('home-grid', loadingFriends && 'is-refreshing')} aria-busy={loadingFriends || undefined}>
+        {allFriends.map((f, i) => (
+          <FriendCard key={f.id} friend={f} rank={i + 1} onClick={() => onOpenFriend(f.id)} />
+        ))}
       </div>
     );
   }
 
   return (
-    <div className="et-root" style={{ background: 'var(--et-bg)', minHeight: '100%' }}>
+    <div className="home-page et-root">
       <HomeChromeBar onRefresh={handleRefresh} refreshing={refreshing} refreshMsg={refreshMsg}
         onExtractKey={() => setExtractOpen(true)}
         onToggleTaskCenter={() => setTaskCenterOpen(o => !o)}
         taskCenterActive={taskCenterOpen}
         onLiveSynced={handleLiveSynced} />
-      <HeroFrame summary={summary} onOpen={onOpenFriend} />
-      <Timeline summary={summary} />
-      <FilterBar tab={tab} setTab={setTab} search={search} setSearch={setSearch} count={allFriends.length} />
-      <div style={{
-        margin: '0 28px 36px', display: 'grid',
-        gridTemplateColumns: 'repeat(4, minmax(0,1fr))', gap: 14,
-        opacity: loadingFriends ? 0.4 : 1, transition: 'opacity .2s ease',
-      }}>
-        {allFriends.length === 0 && !loadingFriends && (
-          <div className="et-meta" style={{ gridColumn: 'span 4', textAlign: 'center', padding: 40, color: 'var(--et-mute)' }}>
-            {searchDebounced ? `没找到 "${maskText(searchDebounced)}"` : '没有数据'}
-          </div>
-        )}
-        {allFriends.map((f, i) => (
-          <FriendCard key={f.id} friend={f} rank={i + 1} onClick={() => onOpenFriend(f.id)} />
-        ))}
-      </div>
-      <div style={{ margin: '0 28px 24px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <div className="et-meta" style={{ color: 'var(--et-mute)' }}>
-          全部数据均在你的电脑上 · 不会上传到任何云端
-        </div>
-        <div className="et-meta" style={{ fontFamily: 'var(--et-mono)', color: 'var(--et-faint)' }}>{APP_VERSION}</div>
-      </div>
+      {noData ? (
+        <EmptyState
+          layout="page"
+          icon={<IconInbox size={26} />}
+          title="这里还空着"
+          description="已经连上本地服务，但解密后的数据里还没有聊天记录。刚完成初始化的话，等解密跑完再点「更新数据」；也可能是选错了账号，可以在左下角切换。"
+          actions={(
+            <>
+              <Button variant="primary" icon={<IconRefresh size={15} />} loading={refreshing} onClick={handleRefresh}>
+                更新数据
+              </Button>
+              {onOpenOnboarding && <Button onClick={onOpenOnboarding}>重新走一遍初始化</Button>}
+            </>
+          )}
+        />
+      ) : (
+        <>
+          <HeroFrame summary={summary} onOpen={onOpenFriend} />
+          <Timeline summary={summary} />
+          <FilterBar tab={tab} setTab={setTab} search={search} setSearch={setSearch} count={allFriends.length} />
+          {list}
+          <footer className="home-footer">
+            <span className="et-meta">全部数据均在你的电脑上 · 不会上传到任何云端</span>
+            <span className="et-meta home-footer__version">{APP_VERSION}</span>
+          </footer>
+        </>
+      )}
       <ExtractKeyDialog
         open={extractOpen}
         onClose={() => setExtractOpen(false)}

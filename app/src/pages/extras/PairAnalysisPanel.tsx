@@ -165,8 +165,8 @@ export function PairAnalysisPanel({ a, b, aName, bName }: Props) {
       <div
         style={{
           padding: '12px 14px',
-          background: 'rgba(255,107,71,0.07)',
-          border: '0.5px solid rgba(255,107,71,0.30)',
+          background: 'var(--accent-soft)',
+          border: '0.5px solid var(--accent-border)',
           borderRadius: 'var(--et-r)',
           marginBottom: 18,
           display: 'flex',

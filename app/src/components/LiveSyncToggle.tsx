@@ -116,7 +116,9 @@ export function LiveSyncToggle({ onSynced, disabled }: { onSynced?: () => void; 
       title={title}
       style={{
         all: 'unset', cursor: off ? (busy ? 'wait' : 'not-allowed') : 'pointer',
-        display: 'flex', alignItems: 'center', gap: 6,
+        // `all: unset` also resets flex-shrink, so in a crowded top bar the
+        // label would wrap one character per line; keep it on one line.
+        display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0, whiteSpace: 'nowrap',
         opacity: qqActive || disabled ? 0.5 : 1,
         color: on ? 'var(--text-secondary)' : 'var(--text-muted)', fontSize: 12, fontWeight: 500,
       }}>

@@ -21,15 +21,15 @@ export function Avatar({ friend, size = 56, ring = false, frame = false, style }
       borderRadius: frame ? 6 : '50%',
       background: grad,
       display: 'flex', alignItems: 'center', justifyContent: 'center',
-      color: 'rgba(255,255,255,0.95)', fontFamily: 'var(--et-serif)',
+      color: 'var(--media-on-scrim)', fontFamily: 'var(--et-serif)',
       fontWeight: 600, fontSize: fs,
       boxShadow: ring
-        ? '0 0 0 2px var(--et-paper), 0 0 0 3.5px var(--et-orange)'
-        : 'inset 0 -1px 2px rgba(0,0,0,0.10), 0 1px 2px rgba(26,43,74,0.10)',
+        ? '0 0 0 2px var(--surface-card), 0 0 0 3.5px var(--accent)'
+        : 'var(--shadow-sm)',
       letterSpacing: '0.02em',
       ...style,
     }}>
-      <span style={{ textShadow: '0 1px 2px rgba(0,0,0,0.18)' }}>{glyph}</span>
+      <span style={{ textShadow: '0 1px 2px var(--media-scrim)' }}>{glyph}</span>
     </div>
   );
 }
