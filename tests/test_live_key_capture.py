@@ -97,7 +97,7 @@ class CaptureTest(unittest.TestCase):
     def test_run_capture_stops_when_complete(self):
         cap = self._cap()
 
-        def attach(pid, on_message):
+        def attach(pid, on_message, on_detached=None):
             # The agent fires both keys as soon as hooks are live.
             on_message({"type": "send", "payload": {"type": "candidate", "key": list(self.k1)}}, None)
             on_message({"type": "send", "payload": {"type": "candidate", "key": list(self.k2)}}, None)
@@ -122,7 +122,7 @@ class CaptureTest(unittest.TestCase):
             if t[0] >= 1.0:
                 stop.write_text("x")
 
-        rc = hck.run_capture(cap, 1, attach=lambda pid, cb: (FakeSession(), FakeScript()),
+        rc = hck.run_capture(cap, 1, attach=lambda pid, cb, det=None: (FakeSession(), FakeScript()),
                              stop_file=str(stop), sleep=sleep, clock=clock)
         self.assertEqual(rc, hck.EXIT_OK)
         self.assertLess(t[0], 5)  # stopped well before --seconds
@@ -131,7 +131,7 @@ class CaptureTest(unittest.TestCase):
         class PermissionDeniedError(Exception):
             pass
 
-        def attach(pid, cb):
+        def attach(pid, cb, det=None):
             raise PermissionDeniedError("unable to access process with pid 1")
 
         cap = self._cap()
@@ -141,7 +141,7 @@ class CaptureTest(unittest.TestCase):
         self.assertEqual(prog["error"], "attach-denied")
 
     def test_frida_missing_exit_code(self):
-        def attach(pid, cb):
+        def attach(pid, cb, det=None):
             raise ImportError("No module named 'frida'")
 
         rc = hck.run_capture(self._cap(), 1, attach=attach)
@@ -574,3 +574,115 @@ class JobReviewFixesTest(LiveKeyJobTest):
         self.assertFalse(st["running"])
         self.assertTrue(asked)                 # asked to stop first …
         self.assertTrue(procs[0].killed)       # … then killed after STOP_WAIT
+
+
+class PassphraseTest(unittest.TestCase):
+    """CCKeyDerivationPBKDF hook: one passphrase -> every DB's key."""
+
+    ROUNDS = 1000  # real WeChat uses 256000; keep tests fast
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.d = Path(self.tmp.name)
+        patcher = mock.patch.object(hck, "LOG_PATH", str(self.d / "log.txt"))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.pw = os.urandom(32)
+        self.pages = {}
+        for rel in ("session/session.db", "contact/contact.db", "message/message_7.db"):
+            salt = os.urandom(16)
+            key = hashlib.pbkdf2_hmac("sha512", self.pw, salt, self.ROUNDS, 32)
+            self.pages[rel] = make_page1(key, salt)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_one_passphrase_derives_every_db(self):
+        cap = hck.Capture(self.pages, seconds=5, out_keys=str(self.d / "new.json"),
+                          progress_path=str(self.d / "p.json"))
+        self.assertEqual(cap.on_passphrase(os.urandom(32), 5, self.ROUNDS), 0)
+        self.assertEqual(cap.on_passphrase(self.pw, 5, self.ROUNDS), 3)
+        self.assertEqual(cap.pending, {})
+        out = json.loads((self.d / "new.json").read_text())
+        self.assertEqual(len(out["keys_by_db"]), 3)
+        self.assertEqual(out["passphrase"], {"hex": self.pw.hex(), "prf": 5, "rounds": self.ROUNDS})
+        self.assertTrue(json.loads((self.d / "p.json").read_text())["passphrase_found"])
+        # same passphrase again is a no-op
+        self.assertEqual(cap.on_passphrase(self.pw, 5, self.ROUNDS), 0)
+
+    def test_agent_pbkdf_message(self):
+        cap = hck.Capture(self.pages, seconds=5)
+        with mock.patch.object(cap, "save"):
+            cap.on_message({"type": "send", "payload": {
+                "type": "pbkdf", "password": list(self.pw), "prf": 5, "rounds": self.ROUNDS}}, None)
+        self.assertEqual(len(cap.new), 3)
+
+    def test_unknown_prf_is_ignored(self):
+        page1 = next(iter(self.pages.values()))
+        self.assertIsNone(hck.derive_db_key(self.pw, page1, prf=99, rounds=self.ROUNDS))
+
+    def test_saved_passphrase_covers_new_dbs(self):
+        salt_map = {page1[:16].hex(): {"name": rel, "page1": page1} for rel, page1 in self.pages.items()}
+        existing = {"keys_by_db": {}, "passphrase": {"hex": self.pw.hex(), "prf": 5, "rounds": self.ROUNDS}}
+        pending, known = live_key.split_pending(salt_map, existing)
+        self.assertEqual(pending, {})
+        self.assertEqual(set(known), set(self.pages))
+
+    def test_merge_keeps_passphrase(self):
+        path = self.d / "keys.json"
+        pp = {"hex": self.pw.hex(), "prf": 5, "rounds": self.ROUNDS}
+        live_key.merge_keys({"a.db": "aa"}, {}, "wxid_x", path, passphrase=pp)
+        live_key.merge_keys({"b.db": "bb"}, {}, None, path)  # later round without passphrase
+        self.assertEqual(json.loads(path.read_text())["passphrase"], pp)
+
+
+class ReattachTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.d = Path(self.tmp.name)
+        patcher = mock.patch.object(hck, "LOG_PATH", str(self.d / "log.txt"))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_waits_for_relaunch_and_reattaches(self):
+        k = os.urandom(32)
+        cap = hck.Capture({"a.db": make_page1(k, os.urandom(16))}, seconds=30,
+                          progress_path=str(self.d / "p.json"))
+        attached = []
+        t = [0.0]
+        pids = iter([None, None, 222])
+
+        def attach(pid, cb, on_detached=None):
+            attached.append(pid)
+            if pid == 111:
+                on_detached("process-terminated")   # user quits WeChat
+            else:
+                cb({"type": "send", "payload": {"type": "candidate", "key": list(k)}}, None)
+            return FakeSession(), FakeScript()
+
+        def sleep(s):
+            t[0] += s
+
+        rc = hck.run_capture(cap, 111, attach=attach, sleep=sleep, clock=lambda: t[0],
+                             find_pid=lambda: next(pids, 222))
+        self.assertEqual(rc, hck.EXIT_OK)
+        self.assertEqual(attached, [111, 222])
+        self.assertEqual(cap.pending, {})
+
+    def test_without_find_pid_stops_when_wechat_exits(self):
+        cap = hck.Capture({"a.db": make_page1(os.urandom(32), os.urandom(16))}, seconds=30)
+        t = [0.0]
+
+        def attach(pid, cb, on_detached=None):
+            on_detached("process-terminated")
+            return FakeSession(), FakeScript()
+
+        def sleep(s):
+            t[0] += s
+
+        rc = hck.run_capture(cap, 1, attach=attach, sleep=sleep, clock=lambda: t[0])
+        self.assertEqual(rc, hck.EXIT_OK)
+        self.assertLess(t[0], 1)
