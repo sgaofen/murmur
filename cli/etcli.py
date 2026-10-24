@@ -6563,6 +6563,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     "get_task_allow": sig.get("get_task_allow"),
                     "lldb": lldb_path,
                     "lldb_error": lldb_err,
+                    "backup": _qmac.backup_info(install),
                 }
             return self._send_json(payload)
 
@@ -6656,7 +6657,8 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 import qq_mac_key as _qmac  # noqa: E402
                 if opts.get("async"):
                     return self._send_json(_qmac.start_capture(dbs, timeout=timeout))
-                return self._send_json(_qmac.run_capture(dbs, timeout=timeout))
+                # No lldb log / candidate hex in the HTTP response.
+                return self._send_json(_qmac.public_result(_qmac.run_capture(dbs, timeout=timeout)))
             r = _qdec.extract_key_via_powershell(timeout=timeout, verify_dbs=dbs)
             return self._send_json(r)
 
@@ -6677,6 +6679,19 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 return self._send_json(_qmac.resign_qq())
             except subprocess.TimeoutExpired:
                 return self._send_json({"ok": False, "error": "重签名超时（系统授权窗口没有及时确认）。"})
+            except Exception as e:
+                return self._send_json({"ok": False, "error": f"{type(e).__name__}: {e}"})
+
+        if path == "/api/qq/restore-signature":
+            # macOS only: put back the Tencent signature backed up to
+            # ~/.murmur/qq-backup/<version>/ before /api/qq/resign.
+            if not _qpaths.IS_MAC:
+                return self._send_json({"ok": False, "error": "macOS only"}, 400)
+            import qq_mac_key as _qmac  # noqa: E402
+            try:
+                return self._send_json(_qmac.restore_original())
+            except subprocess.TimeoutExpired:
+                return self._send_json({"ok": False, "error": "恢复超时（系统授权窗口没有及时确认）。"})
             except Exception as e:
                 return self._send_json({"ok": False, "error": f"{type(e).__name__}: {e}"})
 

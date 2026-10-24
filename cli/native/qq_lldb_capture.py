@@ -11,8 +11,9 @@ Options come from environment variables (avoids lldb's command-line quoting):
     MURMUR_QQ_APP          path to QQ.app (launched with `open` once we wait)
     MURMUR_QQ_PROCESS      process name to wait for (default "QQ")
     MURMUR_QQ_TIMEOUT      total seconds before giving up (default 200)
-    MURMUR_QQ_SETTLE       seconds to keep collecting after the first
-                           plausible 16-byte key (default 15)
+    MURMUR_QQ_SETTLE       seconds to keep collecting once the same plausible
+                           16-byte value was seen in 2 different breakpoint
+                           hits (default 15; same rule as qq_get_key.ps1)
     MURMUR_QQ_MAX_HITS     stop after this many breakpoint hits (default 200)
     MURMUR_QQ_CANCEL_FILE  if this file appears, detach and stop
     MURMUR_QQ_NO_LAUNCH    "1" = don't `open` QQ, wait for the user to start it
@@ -583,6 +584,34 @@ def is_plausible_key(value: str) -> bool:
     return len(value) == 16 and value != LOGIN_DB_FIXED_KEY and not LOGIN_DB_FIXED_KEY.startswith(value)
 
 
+class SettleTracker:
+    """Decides when to start the settle countdown, same rule as the Windows
+    script (qq_get_key.ps1): after login QQ opens several DBs with the same
+    key, so a plausible 16-char value that shows up in TWO DIFFERENT
+    breakpoint hits means the key has been seen. A single stray string
+    before login must not end the session early."""
+
+    def __init__(self, needed: int = 2):
+        self.needed = needed
+        self.counts: dict = {}
+        self.last_hit: dict = {}
+        self.triggered = False
+
+    def observe(self, hit_no: int, value: str) -> bool:
+        """Record `value` seen at breakpoint hit `hit_no`. Returns True exactly
+        once: when the countdown should start."""
+        if self.triggered or not is_plausible_key(value):
+            return False
+        if self.last_hit.get(value) == hit_no:
+            return False  # same value in two registers of one hit counts once
+        self.last_hit[value] = hit_no
+        self.counts[value] = self.counts.get(value, 0) + 1
+        if self.counts[value] >= self.needed:
+            self.triggered = True
+            return True
+        return False
+
+
 # ---------------------------------------------------------------------------
 # lldb driver (only runs inside lldb)
 # ---------------------------------------------------------------------------
@@ -753,6 +782,7 @@ def murmur_qq_capture(debugger, command, result, internal_dict):
     debugger.SetAsync(True)
     listener = debugger.GetListener()
     seen = set()
+    tracker = SettleTracker()
     hits = 0
     first_key_at = None
     reason = "timeout"
@@ -802,11 +832,10 @@ def murmur_qq_capture(debugger, command, result, internal_dict):
                 continue
             hits += 1
             for source, value in _hit_candidates(process, thread.GetFrameAtIndex(0), is_arm):
-                if value in seen:
-                    continue
-                seen.add(value)
-                _emit(format_candidate(source, value))
-                if first_key_at is None and is_plausible_key(value):
+                if value not in seen:
+                    seen.add(value)
+                    _emit(format_candidate(source, value))
+                if tracker.observe(hits, value) and first_key_at is None:
                     first_key_at = time.time()
                     _emit(format_status("key_seen", settle=settle))
             _emit(format_status("hit", n=hits))
