@@ -86,15 +86,16 @@ class CommandTest(unittest.TestCase):
         self.assertIn("--deep", argv)
         # Ad-hoc identity.
         self.assertEqual(argv[argv.index("--sign") + 1], "-")
-        self.assertEqual(argv[argv.index("--entitlements") + 1], "/x/ent.plist")
+        # Paths are compared via Path so the test is OS-separator agnostic.
+        self.assertEqual(argv[argv.index("--entitlements") + 1], str(Path("/x/ent.plist")))
         # The hardened runtime is dropped by NOT passing --options runtime.
         self.assertNotIn("runtime", argv)
-        self.assertEqual(argv[-1], "/x/WeChat.app")
+        self.assertEqual(argv[-1], str(Path("/x/WeChat.app")))
 
     def test_launch_env_injects_dylib_and_out(self):
         env = mpc.launch_env(Path("/o/cap.txt"), Path("/d/k.dylib"), base_env={"PATH": "/bin"})
-        self.assertEqual(env["DYLD_INSERT_LIBRARIES"], "/d/k.dylib")
-        self.assertEqual(env["MURMUR_KEYCAP_OUT"], "/o/cap.txt")
+        self.assertEqual(env["DYLD_INSERT_LIBRARIES"], str(Path("/d/k.dylib")))
+        self.assertEqual(env["MURMUR_KEYCAP_OUT"], str(Path("/o/cap.txt")))
         self.assertEqual(env["PATH"], "/bin")
 
     def test_launch_argv_finds_executable(self):
