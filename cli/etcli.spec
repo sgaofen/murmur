@@ -69,6 +69,7 @@ a = Analysis(
         "qq_decrypt",
         "qq_store",
         "search_index",
+        "semantic_index",
         "media",
         "sns",
         "voice",

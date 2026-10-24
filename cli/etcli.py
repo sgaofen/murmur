@@ -4318,6 +4318,46 @@ def _kick_search_index(store) -> None:
         sys.stderr.write(f"[search-index] kick failed: {type(e).__name__}: {e}\n")
 
 
+def _semantic_index_for(store):
+    """SemanticIndex layered on the store's keyword index (cli/semantic_index.py)."""
+    import semantic_index as _sem
+    return _sem.get_semantic_index(_search_index_for(store))
+
+
+def _kick_semantic_index(store) -> None:
+    """Incremental semantic pass after fresh data — only when the user turned
+    semantic search on, deps are installed and the model is present."""
+    if store is None:
+        return
+    try:
+        import semantic_index as _sem
+        if _sem.ensure_usable() is None:
+            _semantic_index_for(store).start_update(full=False)
+    except Exception as e:
+        sys.stderr.write(f"[semantic] kick failed: {type(e).__name__}: {e}\n")
+
+
+def _is_json_request(handler) -> bool:
+    """True when the POST declares a JSON body.
+
+    Browsers can send text/plain / form posts cross-site without a CORS
+    preflight; insisting on application/json makes every state-changing
+    semantic endpoint preflighted, so the origin allow-list applies.
+    """
+    ctype = (handler.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+    return ctype == "application/json"
+
+
+def _read_json_body(handler) -> dict:
+    length = int(handler.headers.get("Content-Length") or 0)
+    body = handler.rfile.read(length) if length else b"{}"
+    try:
+        data = json.loads(body.decode("utf-8") or "{}")
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 # ---------- HTTP handler ----------
 
 class _MurmurAPIHandler(BaseHTTPRequestHandler):
@@ -4464,7 +4504,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         # Bootstrap mode: only a small allowlist works without decrypted data.
         _NO_STORE_GET = {"/api/info", "/api/agents", "/api/diagnose", "/api/reports", "/api/log-tail",
                           "/api/scan-disks/status", "/api/profiles", "/api/diag-bundle",
-                          "/api/live-key/status", "/api/private-copy/status",
+                          "/api/search/semantic/status", "/api/live-key/status", "/api/private-copy/status",
                           "/api/live-sync/status"}
         # QQ endpoints have their own data lifecycle (separate stores keyed by
         # qq number) so they bypass the WeChat-store bootstrap gate entirely.
@@ -4675,7 +4715,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         # opened the Reports page on a fresh install.
         _gate_pass = (path in {"/api/diagnose", "/api/agents", "/api/reports", "/api/log-tail",
                                 "/api/scan-disks/status", "/api/profiles", "/api/diag-bundle",
-                                "/api/live-key/status", "/api/private-copy/status"}
+                                "/api/search/semantic/status", "/api/live-key/status", "/api/private-copy/status"}
                       or path.startswith("/api/report/"))
         if _gate_pass:
             pass  # these don't need store, fall through to their handlers
@@ -4693,18 +4733,44 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             payload = idx.status()
             payload["auto_started"] = auto
             return self._send_json(payload)
-        if path == "/api/search":
+        if path == "/api/search/semantic/status":
+            import semantic_index as _sem
+            # Works before decrypted data exists (install / model state only).
+            return self._send_json(_sem.full_status(
+                _search_index_for(self.store) if self.store is not None else None))
+        if path in ("/api/search", "/api/search/semantic"):
             import search_index as _si
             q = (qs.get("q", [""])[0] or "").strip()
             if not q:
                 return self._send_json({"error": "q required"}, 400)
+            semantic = (path == "/api/search/semantic"
+                        or (qs.get("mode", ["keyword"])[0] or "keyword") == "semantic")
             try:
                 ts_from = _si.parse_time_param(qs.get("from", [None])[0])
                 ts_to = _si.parse_time_param(qs.get("to", [None])[0], end=True)
-                limit = int(qs.get("limit", [50])[0])
+                limit = int(qs.get("limit", [20 if semantic else 50])[0])
                 offset = int(qs.get("offset", [0])[0])
+                ms = qs.get("min_score", [None])[0]
+                min_score = float(ms) if ms not in (None, "") else None
             except ValueError as e:
                 return self._send_json({"error": "bad_param", "message": str(e)}, 400)
+            if semantic:
+                import semantic_index as _sem
+                blocked = _sem.ensure_usable()
+                if blocked is not None:
+                    return self._send_json({"error": "semantic_unavailable",
+                                            "message": blocked["message"], "status": blocked}, 409)
+                sidx = _semantic_index_for(self.store)
+                try:
+                    payload = sidx.search(q, chat=qs.get("chat"), sender=qs.get("sender"),
+                                          ts_from=ts_from, ts_to=ts_to, limit=limit,
+                                          offset=offset, min_score=min_score)
+                except _sem.ModelIntegrityError as e:
+                    st = _sem.availability()
+                    return self._send_json({"error": "semantic_unavailable", "message": str(e),
+                                            "status": st}, 409)
+                payload["index"] = sidx.status()
+                return self._send_json(payload)
             idx = _search_index_for(self.store)
             idx.ensure_fresh()
             payload = idx.search(
@@ -5158,12 +5224,58 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             except json.JSONDecodeError:
                 opts = {}
             return self._set_active_profile(opts)
+        if path in ("/api/search/semantic/settings", "/api/search/semantic/download"):
+            # Account-independent: work before decrypted data exists too.
+            import semantic_index as _sem
+            if not _is_json_request(self):
+                return self._send_json({"error": "unsupported_media_type",
+                                        "message": "需要 Content-Type: application/json"}, 415)
+            opts = _read_json_body(self)
+            try:
+                if path == "/api/search/semantic/settings":
+                    en = opts.get("enabled")
+                    _sem.save_settings(enabled=None if en is None else bool(en),
+                                       mirror=opts.get("mirror"))
+                    if en is False:
+                        for sidx in list(_sem._REGISTRY.values()):
+                            sidx.cancel()
+                    kicked = {}
+                else:
+                    mirror = opts.get("mirror") or _sem.load_settings()["mirror"]
+                    if _sem.missing_deps():
+                        st = _sem.availability()
+                        return self._send_json({"error": "semantic_unavailable",
+                                                "message": st["message"], "status": st}, 409)
+                    if opts.get("mirror"):
+                        _sem.save_settings(mirror=mirror)
+                    kicked = _sem.downloader().start(mirror)
+            except ValueError as e:
+                return self._send_json({"error": "bad_param", "message": str(e)}, 400)
+            payload = _sem.full_status(_search_index_for(self.store) if self.store is not None else None)
+            payload.update({"ok": True, **kicked})
+            return self._send_json(payload)
         if self.store is None and path not in BOOTSTRAP_POSTS:
             return self._send_json({
                 "error": "no_decrypted_data",
                 "message": "解密数据未准备好。请先抓 key 再解密。",
                 "needs_onboarding": True,
             }, status=503)
+
+        if path == "/api/search/semantic/build":
+            import semantic_index as _sem
+            if not _is_json_request(self):
+                return self._send_json({"error": "unsupported_media_type",
+                                        "message": "需要 Content-Type: application/json"}, 415)
+            blocked = _sem.ensure_usable()
+            if blocked is not None:
+                return self._send_json({"error": "semantic_unavailable",
+                                        "message": blocked["message"], "status": blocked}, 409)
+            opts = _read_json_body(self)
+            sidx = _semantic_index_for(self.store)
+            kicked = sidx.start_update(full=bool(opts.get("full")))
+            payload = _sem.full_status(_search_index_for(self.store))
+            payload.update({"ok": True, **kicked})
+            return self._send_json(payload)
 
         if path == "/api/search/rebuild":
             idx = _search_index_for(self.store)
@@ -5360,6 +5472,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 # Fresh decrypted data → incremental search-index pass in the
                 # background (first run builds the whole index).
                 _kick_search_index(_MurmurAPIHandler._wechat_store)
+                _kick_semantic_index(_MurmurAPIHandler._wechat_store)
             return self._send_json({
                 "ok": ok,
                 "ms": dt,
