@@ -1,0 +1,102 @@
+/* App lock — lock screen (AppLockGate) and the settings section's inputs.
+ * Tokens only (see app/src/ui/README.md). */
+.app-lock-blank {
+  min-height: 100vh;
+  background: var(--surface-page);
+}
+
+.app-lock {
+  min-height: 100vh;
+  box-sizing: border-box;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 18px;
+  padding: 48px 16px;
+  background: var(--surface-page);
+  font-family: var(--font-sans);
+  color: var(--text-secondary);
+}
+.app-lock__card {
+  width: 100%; max-width: 360px;
+  box-sizing: border-box;
+  display: flex; flex-direction: column; align-items: stretch; gap: 12px;
+  padding: 32px 28px 22px;
+  background: var(--surface-card);
+  border: 0.5px solid var(--border-subtle);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-lg);
+  text-align: center;
+}
+.app-lock__mark { align-self: center; color: var(--accent); }
+.app-lock__title {
+  margin: 6px 0 0;
+  font-family: var(--font-serif); font-size: 24px; font-weight: 600; line-height: 1.25;
+  color: var(--text-primary);
+}
+.app-lock__lede { margin: 0 0 8px; font-size: 13px; color: var(--text-muted); }
+.app-lock__error { min-height: 18px; font-size: 12.5px; color: var(--danger-fg); }
+.app-lock__link {
+  all: unset;
+  align-self: center;
+  cursor: pointer;
+  font-size: 12.5px; color: var(--text-muted);
+  text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--border-strong);
+}
+.app-lock__link:hover { color: var(--text-primary); }
+.app-lock__link:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; border-radius: 4px; }
+.app-lock__forgot {
+  padding: 10px 12px;
+  font-size: 12.5px; line-height: 1.65; text-align: left;
+  color: var(--text-secondary);
+  background: var(--surface-sunken);
+  border-radius: var(--radius-sm);
+}
+.app-lock__forgot code, .app-lock-settings code {
+  font-family: var(--font-mono); font-size: 0.92em;
+  overflow-wrap: anywhere;
+}
+.app-lock__note {
+  max-width: 360px; margin: 0;
+  font-size: 12px; line-height: 1.6; text-align: center;
+  color: var(--text-faint);
+}
+
+/* password field with show/hide toggle (lock screen + settings) */
+.app-lock-field { position: relative; display: flex; }
+.app-lock-input {
+  flex: 1; min-width: 0;
+  box-sizing: border-box;
+  height: 40px;
+  padding: 0 40px 0 12px;
+  font: inherit; font-size: 14px;
+  color: var(--text-primary);
+  background: var(--surface-raised);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  outline: none;
+}
+.app-lock-input::placeholder { color: var(--text-faint); }
+.app-lock-input:focus { border-color: var(--accent-border); box-shadow: 0 0 0 3px var(--accent-soft); }
+.app-lock-input:disabled { opacity: 0.6; }
+.app-lock-field__eye {
+  all: unset;
+  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+  width: 28px; height: 28px;
+  display: inline-flex; align-items: center; justify-content: center;
+  cursor: pointer;
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+}
+.app-lock-field__eye:hover { color: var(--text-primary); background: var(--surface-hover); }
+.app-lock-field__eye:focus-visible { outline: 2px solid var(--focus-ring); }
+
+/* settings section */
+.app-lock-settings__form {
+  display: flex; flex-direction: column; gap: 10px;
+  max-width: 340px;
+}
+.app-lock-settings__form [role=radiogroup] { align-self: flex-start; }
+.app-lock-settings__label { font-size: 12px; font-weight: 600; color: var(--text-secondary); }
+.app-lock-settings__actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.app-lock-settings__error { font-size: 12.5px; color: var(--danger-fg); }
+.app-lock-settings__ok { font-size: 12.5px; color: var(--success-fg); }
+.app-lock-settings .ui-callout { margin-top: 14px; }

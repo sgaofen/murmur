@@ -154,6 +154,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import paths as _paths  # noqa: E402  (cross-platform discovery helper)
 import error_codes as _ec  # noqa: E402  (stable API error codes)
 import diag_redact as _redact  # noqa: E402  (diag bundle scrubbing)
+import app_lock as _app_lock  # noqa: E402  (password gate for the local API)
 import live_key as _live_key  # noqa: E402  (macOS live key capture via Frida)
 
 
@@ -4407,6 +4408,8 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         try:
             if not self._origin_allowed():
                 return self._send_json({"error": "origin_not_allowed"}, 403)
+            if self._handle_app_lock("GET"):
+                return
             self._dispatch_get()
         except Exception as e:
             self._send_exception_response(e)
@@ -4415,9 +4418,83 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         try:
             if not self._origin_allowed():
                 return self._send_json({"error": "origin_not_allowed"}, 403)
+            if self._handle_app_lock("POST"):
+                return
             self._dispatch_post()
         except Exception as e:
             self._send_exception_response(e)
+
+    # ---- app lock (cli/app_lock.py) ----
+    # Set by _run_server. None means "no lock object yet": the gate stays open
+    # and the /api/app-lock/* endpoints create one on first use.
+    app_lock: "Optional[_app_lock.AppLock]" = None
+    # Reachable while locked: nothing here returns chat data.
+    _APP_LOCK_OPEN = {"/api/app-lock/status", "/api/app-lock/unlock", "/api/app-lock/lock"}
+
+    @classmethod
+    def _get_app_lock(cls) -> "_app_lock.AppLock":
+        if cls.app_lock is None:
+            cls.app_lock = _app_lock.AppLock()
+        return cls.app_lock
+
+    def _read_json_opts(self) -> dict:
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length else b"{}"
+        try:
+            opts = json.loads(body.decode("utf-8") or "{}")
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            opts = {}
+        return opts if isinstance(opts, dict) else {}
+
+    def _handle_app_lock(self, method: str) -> bool:
+        """Serve /api/app-lock/* and refuse everything else while locked.
+
+        Returns True when the request has been answered here.
+        """
+        path = urllib.parse.urlparse(self.path).path
+        if path.startswith("/api/app-lock/"):
+            self._serve_app_lock(method, path)
+            return True
+        lock = self.__class__.app_lock
+        if lock is not None and lock.is_locked():
+            self._send_json({
+                "error": "app_locked",
+                "code": _ec.APP_LOCKED,
+                "message": "Murmur 已锁定，请先输入应用锁密码。",
+            }, status=423)
+            return True
+        return False
+
+    def _serve_app_lock(self, method: str, path: str) -> None:
+        lock = self._get_app_lock()
+        if path not in self._APP_LOCK_OPEN and lock.is_locked():
+            return self._send_json({"error": "app_locked", "code": _ec.APP_LOCKED}, status=423)
+        try:
+            if method == "GET" and path == "/api/app-lock/status":
+                return self._send_json(lock.status())
+            if method != "POST":
+                return self._send_json({"error": "method not allowed"}, 405)
+            opts = self._read_json_opts()
+            if path == "/api/app-lock/unlock":
+                lock.unlock(opts.get("password"))
+            elif path == "/api/app-lock/lock":
+                lock.lock()
+            elif path == "/api/app-lock/set":
+                idle = opts.get("idle_minutes")
+                lock.set_password(opts.get("password"), opts.get("current_password"),
+                                  idle if isinstance(idle, int) else None)
+            elif path == "/api/app-lock/disable":
+                lock.disable(opts.get("current_password"))
+            elif path == "/api/app-lock/idle":
+                idle = opts.get("idle_minutes")
+                lock.set_idle_minutes(idle if isinstance(idle, int) else -1)
+            else:
+                return self._send_json({"error": "not found"}, 404)
+        except _app_lock.AppLockError as e:
+            return self._send_json(e.payload(), status=e.status)
+        out = lock.status()
+        out["ok"] = True
+        return self._send_json(out)
 
     def _dispatch_get(self):
         url = urllib.parse.urlparse(self.path)
@@ -8015,6 +8092,10 @@ def _run_server(args) -> int:
         _MurmurAPIHandler.store = None
     if args.export_dir:
         _MurmurAPIHandler.export_dir = Path(args.export_dir)
+    # App lock: starts locked whenever a password is configured.
+    _MurmurAPIHandler.app_lock = _app_lock.AppLock()
+    if _MurmurAPIHandler.app_lock.enabled:
+        sys.stderr.write("[etcli serve] app lock on — data endpoints return 423 until unlocked\n")
 
     addr = (args.host, args.port)
     # ThreadingHTTPServer: each request in its own thread → batch_analyze.py and the

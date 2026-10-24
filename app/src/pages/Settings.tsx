@@ -9,6 +9,7 @@ import {
 } from '../ui';
 import { IconCheck, IconCopy, IconFolder } from '../ui/icons';
 import { PageHeader } from '../shell/PageHeader';
+import { AppLockSettings } from '../components/AppLockSettings';
 import { maskText, setPrivacyMode } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
 import './Settings.css';
@@ -58,7 +59,7 @@ export function SettingsPage() {
   const loading = data === null;
   return (
     <div className="settings">
-      <PageHeader title="设置" subtitle="外观、隐私、数据目录、本机 AI" />
+      <PageHeader title="设置" subtitle="外观、隐私、应用锁、数据目录、本机 AI" />
       {offline && (
         <Callout tone="warning" title="连不上本地服务">
           目录、本机 AI 和后端版本暂时读不到；外观和隐私设置不受影响。Murmur 刚启动时等几秒再打开这一页。
@@ -66,6 +67,7 @@ export function SettingsPage() {
       )}
       <AppearanceSection />
       <PrivacySection />
+      <AppLockSettings />
       <DataSection data={data} loading={loading} />
       <AgentsSection agents={data?.agents ?? null} loading={loading} />
       <AboutSection info={data?.info ?? null} diag={data?.diag ?? null} loading={loading} />
