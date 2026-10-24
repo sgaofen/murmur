@@ -5,13 +5,14 @@ import { FriendCard } from '../components/FriendCard';
 import { Postmark } from '../components/Postmark';
 import { Ribbon } from '../components/Ribbon';
 import { Sparkline } from '../components/Sparkline';
-import { APP_VERSION, errorCode, getAllFriends, getHomeSummary, getLogTail, getTauriLogTail, refreshData } from '../data/api';
+import { APP_VERSION, ApiError, errorCode, getAllFriends, getDiagBundle, getHomeSummary, getLogTail, getTauriLogTail, refreshData } from '../data/api';
 import { lookupError } from '../data/errorCatalog';
 import type { LogTailResponse } from '../data/api';
 import type { Friend, HomeSummary } from '../data/types';
 import { ExtractKeyDialog } from './ExtractKeyDialog';
 import { TaskCenterBell, TaskCenterDrawer, useTaskCenter } from '../components/extras/TaskCenter';
 import { displayName, maskText } from '../utils/privacy';
+import { redactDiagnostics } from '../utils/diagRedact';
 import { usePrivacy } from '../utils/usePrivacy';
 import { ProfileSwitcher } from '../components/ProfileSwitcher';
 import { LiveSyncToggle } from '../components/LiveSyncToggle';
@@ -267,6 +268,9 @@ export function HomePage({ onOpenFriend, onOpenOnboarding }: Props) {
     // Retry for up to 60 seconds on cold launch. On Windows the bundled
     // PyInstaller etcli.exe can be slowed down by Defender/AV scanning, and
     // on slower machines the webview may render long before port 9100 is ready.
+    // A user-initiated 「重新连接」 that gets an HTTP answer shows it right away:
+    // the backend is up, so polling for another minute won't change anything.
+    const isReconnect = bootNonce > 0;
     let cancelled = false;
     let attempts = 0;
     const tryFetch = async () => {
@@ -286,8 +290,8 @@ export function HomePage({ onOpenFriend, onOpenOnboarding }: Props) {
             onOpenOnboarding?.();
             return;
           }
-          // Last attempt — surface the error
-          if (attempts >= 80) {
+          // Last attempt (or the backend answered a reconnect) — surface the error
+          if (attempts >= 80 || (isReconnect && e instanceof ApiError && e.status > 0)) {
             setError(String(e?.message || e));
             getTauriLogTail(80)
               .then(localLogs => localLogs || getLogTail(80))
@@ -418,20 +422,22 @@ export function HomePage({ onOpenFriend, onOpenOnboarding }: Props) {
         onRetry={() => { setError(null); setBootLogs(null); setBootNonce(n => n + 1); }}
         retryLabel="重新连接"
         diagnostics={() => bootDiagnostics(error, bootLogs)}
+        // Redacted on screen too: when copying fails the button tells users to
+        // take a screenshot, and that also ends up in a public issue.
         details={
           <>
             <div>报错原文</div>
-            <pre>{maskText(error)}</pre>
+            <pre>{maskText(redactDiagnostics(error))}</pre>
             {bootLogs && (
               <>
-                <div>启动诊断日志 · {maskText(bootLogs.logs_dir)}</div>
-                <pre>{maskText([
+                <div>启动诊断日志 · {maskText(redactDiagnostics(bootLogs.logs_dir))}</div>
+                <pre>{maskText(redactDiagnostics([
                   '--- serve.log ---',
                   bootLogs.serve || '(empty)',
                   '',
                   '--- tauri-shell.log ---',
                   bootLogs.tauri_shell || '(empty)',
-                ].join('\n'))}</pre>
+                ].join('\n')))}</pre>
               </>
             )}
           </>
@@ -549,8 +555,8 @@ function describeBootError(raw: string): { code: string; title: string; reason: 
     code: apiCode ? `HTTP ${status} · ${apiCode}` : `HTTP ${status}`,
     title: '首页数据没能加载',
     reason: message
-      ? maskText(message)
-      : `本地服务返回了错误（HTTP ${status}）${detail ? `：${maskText(detail).slice(0, 160)}` : '。'}`,
+      ? maskText(redactDiagnostics(message))
+      : `本地服务返回了错误（HTTP ${status}）${detail ? `：${maskText(redactDiagnostics(detail)).slice(0, 160)}` : '。'}`,
     fixes: ['点「重新连接」再试一次', '完全退出 Murmur 再重新打开', logHint, issueHint],
   };
 }
@@ -591,23 +597,36 @@ function readJsonStringField(text: string, key: string): string | null {
   return m[2] ? value : `${value}…`;
 }
 
-function bootDiagnostics(error: string, logs: LogTailResponse | null): string {
-  return maskText([
+/** Text behind 「复制诊断信息」. When the backend answered with an HTTP error,
+ * prefer its /api/diag-bundle (profiles, init_error, log tails — scrubbed by
+ * cli/diag_redact.py); otherwise use the log tail we already fetched.
+ * ErrorState runs the result through redactDiagnostics() before copying, so
+ * this is redacted whether or not privacy mode is on. */
+async function bootDiagnostics(error: string, logs: LogTailResponse | null): Promise<string> {
+  const head = [
     '### Murmur 启动诊断',
     `- 版本：${APP_VERSION}`,
     `- 平台：${navigator.userAgent}`,
     `- 时间：${new Date().toISOString()}`,
     `- 报错：${error}`,
-    ...(logs ? [
-      `- 日志目录：${logs.logs_dir}`,
-      '',
-      '```',
-      '--- serve.log ---',
-      logs.serve || '(empty)',
-      '',
-      '--- tauri-shell.log ---',
-      logs.tauri_shell || '(empty)',
-      '```',
-    ] : []),
-  ].join('\n'));
+  ];
+  let body: string[] = logs ? [
+    `- 日志目录：${logs.logs_dir}`,
+    '',
+    '```',
+    '--- serve.log ---',
+    logs.serve || '(empty)',
+    '',
+    '--- tauri-shell.log ---',
+    logs.tauri_shell || '(empty)',
+    '```',
+  ] : [];
+  if (/^API \S+: \d{3}\b/.test(error)) {
+    try {
+      body = ['', (await getDiagBundle()).markdown];
+    } catch {
+      // diag-bundle unavailable — keep the local log tail
+    }
+  }
+  return maskText([...head, ...body].join('\n'));
 }

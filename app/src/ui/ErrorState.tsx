@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 import { Button } from './Button';
 import { copyText } from './clipboard';
 import { cx } from './cx';
+import { redactDiagnostics } from '../utils/diagRedact';
 import { IconAlertCircle, IconCheck, IconCopy, IconRefresh, IconWarning } from './icons';
 
 export interface ErrorStateProps {
@@ -16,7 +17,9 @@ export interface ErrorStateProps {
   onRetry?: () => void;
   retryLabel?: string;
   retrying?: boolean;
-  /** Text for 「复制诊断信息」. A function is only called on click. */
+  /** Text for 「复制诊断信息」. A function is only called on click. The copy is
+   * always passed through redactDiagnostics() (paths, wxid, keys, phones…),
+   * whether or not privacy mode is on — users paste it into public issues. */
   diagnostics?: string | (() => string | Promise<string>);
   diagnosticsLabel?: string;
   /** Extra buttons next to retry / copy. */
@@ -99,7 +102,7 @@ function CopyDiagnosticsButton({ source, label }: { source: NonNullable<ErrorSta
     setState('busy');
     try {
       const text = typeof source === 'function' ? await source() : source;
-      await copyText(text);
+      await copyText(redactDiagnostics(text));
       setState('ok');
     } catch {
       setState('err');
@@ -111,7 +114,7 @@ function CopyDiagnosticsButton({ source, label }: { source: NonNullable<ErrorSta
   return (
     <Button variant="secondary" onClick={copy} loading={state === 'busy'}
       icon={state === 'ok' ? <IconCheck size={15} /> : <IconCopy size={15} />}
-      title="复制版本、平台和报错原文，可以直接贴到 GitHub issue">
+      title="复制版本、平台和报错信息（已自动去掉用户名、wxid、密钥等），可以直接贴到 GitHub issue">
       {state === 'ok' ? '已复制' : state === 'err' ? '复制失败，请手动截图' : label}
     </Button>
   );

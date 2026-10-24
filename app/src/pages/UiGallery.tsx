@@ -9,6 +9,29 @@ import {
 import { IconArrowLeft, IconArrowRight, IconDownload, IconRefresh, IconSparkle } from '../utils/icons';
 import './UiGallery.css';
 
+const OFL_URL = `${import.meta.env.BASE_URL}licenses/NotoSerifSC-OFL.txt`;
+
+/** Noto Serif SC ships inside the app, so its SIL OFL 1.1 text has to ship
+ * and be readable too (app/public/licenses/). Loaded on first open. */
+function FontLicense() {
+  const [text, setText] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  function load() {
+    if (text != null || failed) return;
+    fetch(OFL_URL)
+      .then(r => (r.ok ? r.text() : Promise.reject(new Error(String(r.status)))))
+      .then(setText, () => setFailed(true));
+  }
+  return (
+    <details className="gal-license" onToggle={e => { if ((e.currentTarget as HTMLDetailsElement).open) load(); }}>
+      <summary>字体许可 · Noto Serif SC 以 SIL Open Font License 1.1 授权，点开查看全文</summary>
+      {failed
+        ? <p className="gal-license__note">许可文本没能加载，可以在安装目录的 <code>licenses/NotoSerifSC-OFL.txt</code> 找到。</p>
+        : <pre className="gal-license__text">{text ?? '加载中…'}</pre>}
+    </details>
+  );
+}
+
 const SURFACES = ['--surface-page', '--surface-card', '--surface-sunken', '--surface-raised', '--surface-inverse'];
 const TEXTS = ['--text-primary', '--text-secondary', '--text-muted', '--text-faint', '--border-default'];
 const ACCENTS = ['--accent', '--accent-strong', '--accent-text', '--accent-solid', '--accent-soft'];
@@ -94,6 +117,7 @@ export default function UiGalleryPage({ onBack }: { onBack: () => void }) {
             <span className="gal-type__meta">mono</span>
             <span className="gal-type__mono">~/Documents/Murmur/logs/serve.log</span>
           </div>
+          <FontLicense />
         </Section>
 
         <Section no="03" title="Button" desc="primary / secondary / ghost / danger × sm / md / lg；loading 会禁用点击；链接用 buttonClass()。">
