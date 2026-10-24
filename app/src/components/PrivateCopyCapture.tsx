@@ -15,12 +15,16 @@ import {
 import type { PrivateCopyStatus } from '../data/api';
 import { Button, Callout, Card, SegmentedControl } from '../ui';
 import { InlineError } from '../onboarding/parts';
+import { privateCopyBusy } from '../onboarding/capture';
 
 interface Props {
   /** Keys are saved — run the existing decrypt flow. */
   onDecrypt: () => void;
   /** Go back to the method chooser / Frida flow. */
   onBack?: () => void;
+  /** Told whenever a round starts / ends (incl. the start request in flight),
+   * so the dialog can lock its step rail and Esc. Pass a stable function. */
+  onBusyChange?: (busy: boolean) => void;
 }
 
 const DURATIONS = [120, 180, 300];
@@ -33,7 +37,7 @@ const TODO: Array<[string, string]> = [
   ['点开几个对话，打开通讯录、朋友圈', '补齐其余分库'],
 ];
 
-export function PrivateCopyCapture({ onDecrypt, onBack }: Props) {
+export function PrivateCopyCapture({ onDecrypt, onBack, onBusyChange }: Props) {
   const [st, setSt] = useState<PrivateCopyStatus | null>(null);
   const [seconds, setSeconds] = useState(180);
   const [err, setErr] = useState<string | null>(null);
@@ -41,6 +45,7 @@ export function PrivateCopyCapture({ onDecrypt, onBack }: Props) {
   const [errCode, setErrCode] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const pollRef = useRef<number | null>(null);
+  const startingRef = useRef(false);
 
   const refresh = useCallback(async (coverage = false) => {
     try {
@@ -56,7 +61,11 @@ export function PrivateCopyCapture({ onDecrypt, onBack }: Props) {
 
   useEffect(() => { void refresh(true); }, [refresh]);
 
-  const running = !!st?.job.running;
+  const running = privateCopyBusy(st);
+  const anyBusy = running || busy;
+
+  useEffect(() => { onBusyChange?.(anyBusy); }, [anyBusy, onBusyChange]);
+  useEffect(() => () => onBusyChange?.(false), [onBusyChange]);
 
   useEffect(() => {
     if (!running) return;
@@ -71,6 +80,8 @@ export function PrivateCopyCapture({ onDecrypt, onBack }: Props) {
   }, [running, refresh]);
 
   async function start() {
+    if (startingRef.current) return;  // double click: one start request only
+    startingRef.current = true;
     setErr(null);
     setErrCode(null);
     setBusy(true);
@@ -81,6 +92,7 @@ export function PrivateCopyCapture({ onDecrypt, onBack }: Props) {
     } catch (e: any) {
       setErr(e?.message || String(e));
     } finally {
+      startingRef.current = false;
       setBusy(false);
     }
   }

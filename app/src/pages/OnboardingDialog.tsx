@@ -14,9 +14,12 @@ import { Button, Callout, Dialog } from '../ui';
 import { IconReport, IconSparkle } from '../ui/icons';
 import { IconLock } from '../onboarding/icons';
 import {
-  BUSY_VIEWS, buildChecks, blockingCount, liveRecommended, routeAfterCheck, stepsFor, STEP_LABEL, VIEW_STEP,
+  buildChecks, blockingCount, canForceDecrypt, dialogBusy, keyExtractFailureCode, liveRecommended, routeAfterCheck,
+  savedKeyPath, stepsFor, STEP_LABEL, VIEW_STEP,
 } from '../onboarding/flow';
-import type { Platform, Route, StepKey, View } from '../onboarding/flow';
+import type { KeySource, Platform, Route, StepKey, View } from '../onboarding/flow';
+import type { CaptureMethod } from '../onboarding/capture';
+import { createActionGuard } from '../onboarding/guard';
 import { describeError, InlineError, Lead, logTail, StepError, StepRail, Working } from '../onboarding/parts';
 import { SelfCheck } from '../onboarding/SelfCheck';
 import { DataStep, FdaStep } from '../onboarding/DataStep';
@@ -45,8 +48,6 @@ interface Failure {
   retryView?: View;
 }
 
-const HOOK_INSTALL_FAILED = /hook (setup|install) failed|wx_key\.dll|注入到微信进程/i;
-
 function guessPlatform(): Platform {
   return typeof navigator !== 'undefined' && /Mac|iPhone|iPad|iPod/i.test(navigator.platform) ? 'macos' : 'windows';
 }
@@ -65,6 +66,17 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
   const [initCode, setInitCode] = useState<string | null>(null);
   // 「我已经授权并重启过了」 and TCC still blocks → say so on the FDA screen.
   const [fdaStillBlocked, setFdaStillBlocked] = useState(false);
+  // A Frida round / Frida install / private-copy round is running (reported by
+  // LiveKeyCapture): lock the step rail and Esc like the spinner screens.
+  const [captureBusy, setCaptureBusy] = useState(false);
+  // 实时抓取 opened from 「先不重签：用免 Frida 方式」 goes straight to that method.
+  const [liveMethod, setLiveMethod] = useState<CaptureMethod | null>(null);
+  // How this run got its key — the 完成 screen says where it was saved.
+  const [keySource, setKeySource] = useState<KeySource>(null);
+  // Every button goes through this: a second click while the first action is
+  // still running (double click) is dropped instead of sending a second request.
+  const [guard] = useState(createActionGuard);
+  const act = (fn: () => unknown) => () => { void guard.run(fn); };
   const layoutRef = useRef<HTMLDivElement>(null);
 
   function setDiag(d: Diagnose) {
@@ -78,6 +90,8 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
     setFail(null);
     setDone(new Set());
     setFdaStillBlocked(false);
+    setKeySource(null);
+    setLiveMethod(null);
   }, [open]);
 
   // The stuck-data banner: /api/info carries the catalog code for init_error.
@@ -141,9 +155,9 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
   }
 
   /** Redo one step without touching the others. */
-  function redo(step: StepKey) {
+  function redo(step: StepKey): Promise<void> | void {
     const d = diagRef.current;
-    if (step === 'check' || !d) { void runCheck(); return; }
+    if (step === 'check' || !d) return runCheck();
     if (step === 'data') show(d.platform === 'macos' && d.capabilities.tcc_blocked ? 'fda' : 'data');
     else if (step === 'auth') show('auth');
     else if (step === 'key') show('key');
@@ -151,10 +165,10 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
     else show('done');
   }
 
-  function retry(f: Failure) {
-    if (f.step === 'decrypt') { void runDecrypt({ force: lastForce }); return; }
+  function retry(f: Failure): Promise<void> | void {
+    if (f.step === 'decrypt') return runDecrypt({ force: lastForce });
     if (f.retryView) { show(f.retryView); return; }
-    redo(f.step);
+    return redo(f.step);
   }
 
   // ———————— actions ————————
@@ -212,6 +226,7 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
     try {
       const sr = await saveKey(cleaned);
       if (!sr.ok) { failAt('key', { code: sr.code ?? null, raw: sr.error, retryView: 'paste' }); return; }
+      setKeySource('paste');
       await runDecrypt();
     } catch (e) {
       failAt('key', { ...describeError(e), retryView: 'paste' });
@@ -243,13 +258,12 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
         return;
       }
       if (!r.ok) {
-        let code = r.code ?? 'KEY_NOT_FOUND';
-        if (win && code !== 'WIN_HOOK_FAILED' && HOOK_INSTALL_FAILED.test(r.log || '')) code = 'WIN_HOOK_FAILED';
-        failAt('key', { code, raw: logTail(r.log) });
+        failAt('key', { code: keyExtractFailureCode(r, win), raw: logTail(r.log) });
         return;
       }
       // Windows returns the master key; Mac writes ~/.murmur/decrypted_keys.json itself.
       if (r.key) await saveKey(r.key);
+      setKeySource('capture');
       await runDecrypt({ text: '密钥已就位，开始解密…' });
     } catch (e) {
       failAt('key', describeError(e));
@@ -273,8 +287,9 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
     }
   }
 
-  function openLive() {
+  function openLive(method: CaptureMethod | null = null) {
     setLiveReason(liveRecommended(diagRef.current) ? 'version' : 'manual');
+    setLiveMethod(method);
     advance('live');
   }
 
@@ -284,7 +299,7 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
 
   // ———————— render ————————
 
-  const busy = checking || (screen !== 'welcome' && screen !== 'error' && BUSY_VIEWS.has(screen));
+  const busy = dialogBusy(screen, checking, captureBusy);
   const current: StepKey | null = screen === 'welcome' ? null : screen === 'error' ? (fail?.step ?? 'check') : VIEW_STEP[screen];
   const stepNo = current ? steps.indexOf(current) + 1 : 0;
   const mac = platform === 'macos';
@@ -298,7 +313,7 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
     if (diag.profiles.length) notes.data = `找到 ${diag.profiles.length} 个账号`;
     if (mac && diag.capabilities.wechat_hardened === false) notes.auth = '已重签';
     else if (mac && diag.capabilities.wechat_hardened) notes.auth = diag.saved_key ? '已有密钥，不用重签' : '需要重签';
-    if (diag.saved_key) notes.key = '已保存';
+    if (diag.saved_key || keySource) notes.key = '已保存';
     else if (liveRecommended(diag)) notes.key = '推荐实时抓取';
   }
 
@@ -309,15 +324,15 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
       title = '回顾你的微信故事';
       body = (
         <Welcome initError={initError} initCode={initCode} onPickQQ={onPickQQ} mac={guessPlatform() === 'macos'}
-          onStart={() => { setDone(new Set()); void runCheck(); }} />
+          onStart={act(() => { setDone(new Set()); return runCheck(); })} />
       );
       break;
     case 'check':
       title = '先检查一下环境';
       body = (
         <SelfCheck diag={diag} checking={checking} route={diag ? routeAfterCheck(diag) : null}
-          onContinue={() => { if (diag) follow(routeAfterCheck(diag)); }}
-          onRecheck={() => void runCheck()}
+          onContinue={act(() => { if (diag) follow(routeAfterCheck(diag)); })}
+          onRecheck={act(runCheck)}
           onGotoData={() => advance(diag?.platform === 'macos' && diag.capabilities.tcc_blocked ? 'fda' : 'data')}
           onGotoAuth={() => advance('auth')} />
       );
@@ -327,7 +342,7 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
       body = (
         <>
           {fdaStillBlocked && <InlineError code="TCC_BLOCKED" className="ui-mb-4" />}
-          <FdaStep onOpenSettings={openFda} onRetry={() => void recheckAndFollow('data')} retrying={checking} />
+          <FdaStep onOpenSettings={openFda} onRetry={act(() => recheckAndFollow('data'))} retrying={checking} />
         </>
       );
       break;
@@ -335,15 +350,15 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
       title = diag?.profiles.length ? '找到你的微信数据' : mac ? 'Mac 上还没找到微信数据' : '没找到微信数据目录';
       body = diag && (
         <DataStep diag={diag} onSaved={() => recheckAndFollow('data')}
-          onNext={() => follow(routeAfterCheck(diag))}
-          onRecheck={() => void recheckAndFollow('data')} onOpenFda={openFda} />
+          onNext={act(() => follow(routeAfterCheck(diag)))}
+          onRecheck={act(() => recheckAndFollow('data'))} onOpenFda={openFda} />
       );
       break;
     case 'auth':
       title = diag?.capabilities.wechat_hardened === false ? '微信已经重签过了' : '一次性给微信重签名（不用关 SIP）';
       body = diag && (
-        <AuthStep diag={diag} onResign={() => void startResign()} onNext={() => advance('key')}
-          onPaste={() => advance('paste')} onLive={openLive} onOpenFda={openFda} />
+        <AuthStep diag={diag} onResign={act(startResign)} onNext={() => advance('key')}
+          onPaste={() => advance('paste')} onPrivateCopy={() => openLive('private-copy')} onOpenFda={openFda} />
       );
       break;
     case 'resigning':
@@ -352,19 +367,19 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
       break;
     case 'wait-login':
       title = '微信已重启：先登录，再回来抓密钥';
-      body = <MacWaitLogin diag={diag} onScan={() => void startKeyExtract()} onLive={openLive} />;
+      body = <MacWaitLogin diag={diag} onScan={act(startKeyExtract)} onLive={() => openLive()} />;
       break;
     case 'key':
       title = mac ? (liveRecommended(diag) ? '取得解密密钥' : '一切就绪 —— 一键抓密钥') : '只需要 30 秒，读取一次密钥';
       body = diag && (mac ? (
-        <MacKeyStep diag={diag} onScan={() => void startKeyExtract()} onLive={openLive}
+        <MacKeyStep diag={diag} onScan={act(startKeyExtract)} onLive={() => openLive()}
           onPaste={() => show('paste')} onResign={() => show('auth')} />
       ) : (
-        <WinKeyStep diag={diag} onStart={() => void startKeyExtract()} rechecking={checking}
-          onRecheck={async () => {
+        <WinKeyStep diag={diag} onStart={act(startKeyExtract)} rechecking={checking}
+          onRecheck={act(async () => {
             setChecking(true);
             try { setDiag(await getDiagnose()); } catch { /* keep the card */ } finally { setChecking(false); }
-          }} />
+          })} />
       ));
       break;
     case 'live':
@@ -372,12 +387,14 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
       body = (
         <LiveKeyCapture reason={liveReason} wechatVersion={diag?.wechat_version}
           keycapAvailable={diag?.private_copy?.available}
-          onDecrypt={() => void runDecrypt()} onPaste={() => show('paste')} />
+          hardened={mac && diag?.capabilities.wechat_hardened === true}
+          initialMethod={liveMethod} onBusyChange={setCaptureBusy}
+          onDecrypt={act(() => { setKeySource('capture'); return runDecrypt(); })} onPaste={() => show('paste')} />
       );
       break;
     case 'paste':
       title = '手动粘贴密钥';
-      body = diag && <MacPasteKey diag={diag} onSubmit={k => void submitMacKey(k)} onLive={openLive} />;
+      body = diag && <MacPasteKey diag={diag} onSubmit={k => void guard.run(() => submitMacKey(k))} onLive={() => openLive()} />;
       break;
     case 'extracting':
       title = '正在读取密钥…';
@@ -385,7 +402,7 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
       break;
     case 'decrypt':
       title = '重新解密';
-      body = <DecryptStep onRun={force => void runDecrypt({ force })} />;
+      body = <DecryptStep canForce={canForceDecrypt(diag)} onRun={force => void guard.run(() => runDecrypt({ force }))} />;
       break;
     case 'decrypting':
       title = '正在解密最新数据…';
@@ -393,16 +410,16 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
       break;
     case 'done':
       title = '一切就绪';
-      body = <DoneStep mac={mac} onEnter={() => { onClose(); onDone?.(); }} />;
+      body = <DoneStep keyPath={savedKeyPath(platform, keySource)} onEnter={() => { onClose(); onDone?.(); }} />;
       break;
     case 'error':
     default:
       title = `卡在「${STEP_LABEL[fail?.step ?? 'check']}」这一步`;
       body = fail && (
         <StepError code={fail.code} raw={fail.raw} log={fail.log}
-          onRetry={() => retry(fail)}
+          onRetry={act(() => retry(fail))}
           actions={fail.step !== 'check' ? (
-            <Button variant="ghost" onClick={() => void runCheck()}>重新检测环境</Button>
+            <Button variant="ghost" onClick={act(runCheck)}>重新检测环境</Button>
           ) : undefined} />
       );
       break;
@@ -414,6 +431,9 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
       onClose={onClose}
       size="lg"
       accent
+      // While something runs, Esc / ✕ would close the onboarding and mark it
+      // as seen with the job still going — keep it open until it settles.
+      dismissible={!busy}
       closeOnScrim={false}
       closeLabel="跳过引导（不推荐）"
       className="ob-dialog"
@@ -422,7 +442,7 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
     >
       <div className="ob-layout" ref={layoutRef}>
         <StepRail steps={steps} current={current} done={done} error={screen === 'error'}
-          notes={notes} onStepClick={busy ? undefined : redo} />
+          notes={notes} onStepClick={busy ? undefined : k => void guard.run(() => redo(k))} />
         <div className="ob-main" key={screen}>{body}</div>
       </div>
     </Dialog>
@@ -476,26 +496,49 @@ function Welcome({ initError, initCode, mac, onStart, onPickQQ }: {
   );
 }
 
-function DecryptStep({ onRun }: { onRun: (force: boolean) => void }) {
+function DecryptStep({ canForce, onRun }: { canForce: boolean; onRun: (force: boolean) => void }) {
+  // 「清空后重新解密」 deletes the decrypted folder first: ask once more.
+  const [confirming, setConfirming] = useState(false);
   return (
     <>
       <Lead>用已经保存的密钥，把微信数据库重新解密一遍，覆盖之前的解密结果。</Lead>
-      <Callout tone="info" compact>
-        如果之前报过「数据库损坏（malformed）」，用「清空后重新解密」：会先删掉旧的解密目录再解一次。
-      </Callout>
+      {canForce && !confirming && (
+        <Callout tone="info" compact>
+          如果之前报过「数据库损坏（malformed）」，用「清空后重新解密」：会先删掉旧的解密目录再解一次。
+        </Callout>
+      )}
+      {confirming && (
+        <Callout tone="warning" title="确定先清空再重新解密？">
+          会先<strong>删掉这个账号已经解密好的数据目录</strong>，再用保存的密钥从微信原始数据重新解一遍；微信本身的聊天记录不受影响。数据多的话要几分钟，期间 Murmur 里看不到数据。
+        </Callout>
+      )}
       <div className="ob-actions">
-        <Button variant="primary" size="lg" block onClick={() => onRun(false)}>重新解密</Button>
-        <Button variant="secondary" size="lg" block onClick={() => onRun(true)}>清空后重新解密</Button>
+        {confirming ? (
+          <>
+            <Button variant="danger" size="lg" block onClick={() => onRun(true)}>确定清空并重新解密</Button>
+            <Button variant="ghost" block onClick={() => setConfirming(false)}>取消</Button>
+          </>
+        ) : (
+          <>
+            <Button variant="primary" size="lg" block onClick={() => onRun(false)}>重新解密</Button>
+            {canForce && (
+              <Button variant="secondary" size="lg" block onClick={() => setConfirming(true)}>清空后重新解密…</Button>
+            )}
+          </>
+        )}
       </div>
     </>
   );
 }
 
-function DoneStep({ mac, onEnter }: { mac: boolean; onEnter: () => void }) {
+function DoneStep({ keyPath, onEnter }: { keyPath: string | null; onEnter: () => void }) {
   return (
     <>
       <Callout tone="success" title="一切就绪 —— 你的关系档案已经就位">
-        密钥保存在 <code>{mac ? '~/.murmur/decrypted_keys.json' : '~/.murmur/config.json'}</code>，下次启动直接读取，不用再重新抓。想换账号或重新抓密钥，点左边对应的步骤即可。
+        {keyPath
+          ? <>密钥保存在 <code>{keyPath}</code>，下次启动直接读取，不用再重新抓。</>
+          : <>密钥已经保存在本机的 <code>~/.murmur/</code> 目录里，下次启动直接读取，不用再重新抓。</>}
+        想换账号或重新抓密钥，点左边对应的步骤即可。
       </Callout>
       <div className="ob-actions">
         <Button variant="primary" size="lg" block onClick={onEnter}>进入年代记</Button>

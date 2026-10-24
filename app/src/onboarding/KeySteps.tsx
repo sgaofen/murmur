@@ -5,24 +5,26 @@ import { useState } from 'react';
 import type { Diagnose } from '../data/api';
 import { Button, Callout, Card } from '../ui';
 import { IconRefresh } from '../ui/icons';
-import { buildChecks, liveRecommended } from './flow';
+import { buildChecks, liveRecommended, privateCopyShortcut } from './flow';
 import { CheckList, InlineError, Lead } from './parts';
 
 // ———————————————————————— Mac: 授权/重签 ————————————————————————
 
-export function AuthStep({ diag, onResign, onNext, onPaste, onLive, onOpenFda }: {
+export function AuthStep({ diag, onResign, onNext, onPaste, onPrivateCopy, onOpenFda }: {
   diag: Diagnose;
   onResign: () => void;
   onNext: () => void;
   onPaste: () => void;
-  onLive: () => void;
+  /** Skip the re-sign: open 实时抓取 directly on the 免 Frida (private copy) method. */
+  onPrivateCopy: () => void;
   onOpenFda: () => void;
 }) {
   const rows = buildChecks(diag)
     .filter(r => r.id === 'fda' || r.id === 'sign')
     .map(r => (r.id === 'fda' ? r : { ...r, action: undefined }));
   const signed = diag.capabilities.wechat_hardened === false;
-  const liveFirst = liveRecommended(diag);
+  // The Frida-free way needs no re-sign — but only if the capture dylib shipped.
+  const skipResign = liveRecommended(diag) && privateCopyShortcut(diag);
 
   return (
     <>
@@ -63,8 +65,8 @@ export function AuthStep({ diag, onResign, onNext, onPaste, onLive, onOpenFda }:
           </Callout>
           <div className="ob-actions">
             <Button variant="primary" size="lg" block onClick={onResign}>开始重签名</Button>
-            {liveFirst && (
-              <Button variant="secondary" size="lg" block onClick={onLive}>
+            {skipResign && (
+              <Button variant="secondary" size="lg" block onClick={onPrivateCopy}>
                 先不重签：用免 Frida 方式取得密钥
               </Button>
             )}

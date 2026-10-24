@@ -1,5 +1,6 @@
 // Checks app/src/onboarding/flow.ts — the onboarding decision tree and the
-// self-check rows — against hand-written /api/diagnose payloads.
+// self-check rows — against hand-written /api/diagnose payloads, plus the
+// busy / resume rules (capture.ts) and the double-click guard (guard.ts).
 // Run by tests/test_onboarding_flow_frontend.py via `node --experimental-strip-types`
 // (Node >= 22.6) or `bun`; can also be run by hand:
 //   bun tests/js/onboarding_flow_check.mjs
@@ -9,8 +10,12 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
-const flow = await import(pathToFileURL(join(root, 'app', 'src', 'onboarding', 'flow.ts')).href);
+const load = name => import(pathToFileURL(join(root, 'app', 'src', 'onboarding', name)).href);
+const flow = await load('flow.ts');
 const { routeAfterCheck, routeStep, stepsFor, buildChecks, blockingCount, liveRecommended, VIEW_STEP } = flow;
+const { dialogBusy, privateCopyShortcut, fridaNeedsResign, canForceDecrypt, savedKeyPath, keyExtractFailureCode } = flow;
+const { liveBusy, privateCopyBusy, resumeMethod } = await load('capture.ts');
+const { createActionGuard } = await load('guard.ts');
 
 const failures = [];
 let checks = 0;
@@ -94,6 +99,70 @@ eq('windows, WeChat not running → warn + recheck',
 eq('saved key → ok', row(diag({ saved_key: true }), 'key').status, 'ok');
 eq('blocking count', blockingCount(buildChecks(diag({ profiles: [] }, { tcc_blocked: true }))), 2);
 eq('healthy mac has nothing blocking', blockingCount(buildChecks(diag())), 0);
+
+// ——— #47 review: busy while a capture round runs ———
+eq('spinner screens are busy', ['resigning', 'extracting', 'decrypting'].map(v => dialogBusy(v, false, false)), [true, true, true]);
+eq('checking is busy', dialogBusy('check', true, false), true);
+eq('live screen busy only while a capture runs', [dialogBusy('live', false, true), dialogBusy('live', false, false)], [true, false]);
+eq('capture flag ignored off the live screen', dialogBusy('auth', false, true), false);
+eq('welcome / error never busy', [dialogBusy('welcome', false, true), dialogBusy('error', false, true)], [false, false]);
+
+const live = (job, install = false) => ({ job: { running: job }, install: { running: install } });
+const pc = job => ({ job: { running: job } });
+eq('liveBusy: Frida round', liveBusy(live(true)), true);
+eq('liveBusy: Frida install', liveBusy(live(false, true)), true);
+eq('liveBusy: idle / unknown', [liveBusy(live(false)), liveBusy(null)], [false, false]);
+eq('privateCopyBusy', [privateCopyBusy(pc(true)), privateCopyBusy(pc(false)), privateCopyBusy(undefined)], [true, false, false]);
+eq('resume: nothing running → chooser', resumeMethod(live(false), pc(false)), null);
+eq('resume: Frida round → frida', resumeMethod(live(true), pc(false)), 'frida');
+eq('resume: Frida install → frida', resumeMethod(live(false, true), null), 'frida');
+eq('resume: private copy → private-copy', resumeMethod(live(false), pc(true)), 'private-copy');
+eq('resume: status unknown → chooser', resumeMethod(null, null), null);
+
+// ——— #47 review: smaller decisions ———
+eq('免 Frida shortcut needs the bundled dylib',
+  [privateCopyShortcut(diag()), privateCopyShortcut(diag({ private_copy: { available: false, copy_exists: false } })),
+    privateCopyShortcut(diag({ private_copy: null }))], [true, false, false]);
+eq('Frida card: needs re-sign only while hardened on Mac',
+  [fridaNeedsResign(diag({}, { wechat_hardened: true })), fridaNeedsResign(diag()),
+    fridaNeedsResign(diag({ platform: 'windows' }, { wechat_hardened: true }))], [true, false, false]);
+eq('清空后重新解密 only with a saved key', [canForceDecrypt(diag({ saved_key: true })), canForceDecrypt(diag()), canForceDecrypt(null)],
+  [true, false, false]);
+eq('key path: Mac pasted key lives in config.json', savedKeyPath('macos', 'paste'), '~/.murmur/config.json');
+eq('key path: Mac captured keys', savedKeyPath('macos', 'capture'), '~/.murmur/decrypted_keys.json');
+eq('key path: Mac, saved before this run → unknown', savedKeyPath('macos', null), null);
+eq('key path: Windows', [savedKeyPath('windows', 'capture'), savedKeyPath('windows', null)],
+  ['~/.murmur/config.json', '~/.murmur/config.json']);
+eq('extract failure: explicit empty answer → KEY_NOT_FOUND', keyExtractFailureCode({ code: null, log: '' }, false), 'KEY_NOT_FOUND');
+eq('extract failure: backend code kept', keyExtractFailureCode({ code: 'WECHAT_HARDENED' }, false), 'WECHAT_HARDENED');
+eq('extract failure: Windows hook install → WIN_HOOK_FAILED',
+  keyExtractFailureCode({ code: 'KEY_NOT_FOUND', log: '[X] Hook install failed: x' }, true), 'WIN_HOOK_FAILED');
+eq('extract failure: Mac log never remapped to the Windows hook code',
+  keyExtractFailureCode({ code: null, log: 'hook install failed' }, false), 'KEY_NOT_FOUND');
+
+// ——— #47 review: double clicks send one request ———
+{
+  const g = createActionGuard();
+  let calls = 0;
+  let release;
+  const slow = () => { calls++; return new Promise(r => { release = r; }); };
+  const first = g.run(slow);
+  g.run(slow);              // double click while the first is in flight
+  g.run(() => { calls++; }); // any other action too
+  eq('guard: second call dropped while pending', [calls, g.pending], [1, true]);
+  release();
+  await first;
+  eq('guard: free again once settled', g.pending, false);
+  await g.run(() => { calls++; });
+  eq('guard: next action runs', calls, 2);
+  const failing = g.run(() => Promise.reject(new Error('boom')));
+  let rejected = false;
+  await failing.catch(() => { rejected = true; });
+  eq('guard: a failed action frees it and still rejects', [rejected, g.pending], [true, false]);
+  let threw = false;
+  try { await g.run(() => { throw new Error('sync'); }); } catch { threw = true; }
+  eq('guard: a throwing action frees it', [threw, g.pending], [true, false]);
+}
 
 for (const f of failures) console.log(f);
 console.log(`onboardingFlow: ${checks} checks, ${failures.length} failures`);

@@ -62,6 +62,16 @@ export const VIEW_STEP: Record<View, StepKey> = {
 /** Screens that run something in the background (spinner, no buttons). */
 export const BUSY_VIEWS: ReadonlySet<View> = new Set<View>(['resigning', 'extracting', 'decrypting']);
 
+/** Is the onboarding busy (step rail and Esc / close disabled)? Besides the
+ * spinner screens, the live-capture screen is busy while a Frida round, the
+ * Frida install or a private-copy round runs (LiveKeyCapture reports it):
+ * re-signing or a memory scan then would kill WeChat under that round. */
+export function dialogBusy(screen: View | 'welcome' | 'error', checking: boolean, captureBusy: boolean): boolean {
+  if (checking) return true;
+  if (screen === 'welcome' || screen === 'error') return false;
+  return BUSY_VIEWS.has(screen) || (screen === 'live' && captureBusy);
+}
+
 export type Route =
   | { kind: 'view'; view: View }
   /** Key is already saved — decrypt right away (old behaviour). */
@@ -231,4 +241,46 @@ export function buildChecks(d: Diagnose): CheckRow[] {
 /** Rows that block the next step (shown as 「n 项需要处理」). */
 export function blockingCount(rows: CheckRow[]): number {
   return rows.filter(r => r.status === 'bad').length;
+}
+
+// ———————————————————————— small decisions the screens make ————————————————————————
+
+/** 授权/重签 → 「先不重签：用免 Frida 方式」: only when the capture dylib is bundled. */
+export function privateCopyShortcut(d: Diagnose | null | undefined): boolean {
+  return d?.private_copy?.available === true;
+}
+
+/** Frida (and the memory scan) can't attach to a WeChat that still has hardened runtime. */
+export function fridaNeedsResign(d: Diagnose | null | undefined): boolean {
+  return d?.platform === 'macos' && d.capabilities.wechat_hardened === true;
+}
+
+/** 「清空后重新解密」 deletes the decrypted dir; only offer it when a key is saved
+ * (otherwise there is nothing to decrypt it again with). */
+export function canForceDecrypt(d: Diagnose | null | undefined): boolean {
+  return !!d?.saved_key;
+}
+
+/** How the key that was just used got saved: pasted by hand (config.json) or
+ * captured by Murmur (Mac: decrypted_keys.json · Windows: config.json). */
+export type KeySource = 'paste' | 'capture' | null;
+
+/** Where the key lives, for the 完成 screen. null = not sure (it was already
+ * saved before this run). */
+export function savedKeyPath(platform: Platform | null | undefined, source: KeySource): string | null {
+  if (platform !== 'macos') return '~/.murmur/config.json';
+  if (source === 'paste') return '~/.murmur/config.json';
+  if (source === 'capture') return '~/.murmur/decrypted_keys.json';
+  return null;
+}
+
+const HOOK_INSTALL_FAILED = /hook (setup|install) failed|wx_key\.dll|注入到微信进程/i;
+
+/** Error code for an /api/extract-key answer that came back `ok: false`.
+ * Only an explicit failure falls back to KEY_NOT_FOUND — network / backend
+ * errors keep their own code (see describeError). */
+export function keyExtractFailureCode(r: { code?: string | null; log?: string | null }, windows: boolean): string {
+  let code = r.code || 'KEY_NOT_FOUND';
+  if (windows && code !== 'WIN_HOOK_FAILED' && HOOK_INSTALL_FAILED.test(r.log || '')) code = 'WIN_HOOK_FAILED';
+  return code;
 }

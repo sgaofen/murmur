@@ -127,6 +127,12 @@ export const ERROR_CATALOG: Record<string, ErrorEntry> = {
     reason: '抓取子进程意外退出（日志里的 exit-N 是它的退出码）。',
     fix: '再试一次；仍然失败就展开日志，复制诊断信息发 issue。',
   },
+  KEY_CAPTURE_BUSY: {
+    level: 'retry',
+    title: '实时抓取还在进行',
+    reason: '一轮实时抓取（Frida 或免 Frida 副本）正在跑。这时候重签名或扫内存会把微信关掉、打断这一轮，或者再弹一次管理员密码窗。',
+    fix: '进「实时抓取」看正在跑的这一轮：等它结束，或点「提前结束这一轮」，再回来重试这一步。',
+  },
 
   // ---- 解密与数据 ----
   NO_DECRYPTED_DATA: {

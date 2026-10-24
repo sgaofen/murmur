@@ -11,7 +11,8 @@ import { usePrivacy } from '../utils/usePrivacy';
 import { LiveKeyCapture } from '../components/LiveKeyCapture';
 import { Button, Callout, Card, Dialog, Stepper } from '../ui';
 import type { StepItem } from '../ui';
-import { liveRecommended } from '../onboarding/flow';
+import { keyExtractFailureCode, liveRecommended } from '../onboarding/flow';
+import { createActionGuard } from '../onboarding/guard';
 import { describeError, Lead, logTail, StepError, Working } from '../onboarding/parts';
 import { MacKeyChoice } from '../onboarding/KeySteps';
 
@@ -23,8 +24,6 @@ interface Props {
 
 type Phase = 'intro' | 'restarting' | 'waiting-login' | 'success' | 'error' | 'live';
 type Platform = 'windows' | 'macos' | 'linux';
-
-const HOOK_INSTALL_FAILED = /hook (setup|install) failed|wx_key\.dll|注入到微信进程/i;
 
 const STEPS: StepItem[] = [
   { key: 'prep', label: '准备' },
@@ -49,6 +48,10 @@ export function ExtractKeyDialog({ open, onClose, onSuccess }: Props) {
   const [platform, setPlatform] = useState<Platform | null>(null);
   const [macKeysCount, setMacKeysCount] = useState(0);
   const [liveReason, setLiveReason] = useState<'scan-empty' | 'version' | 'manual'>('manual');
+  // A Frida round / Frida install / private-copy round is running (LiveKeyCapture).
+  const [captureBusy, setCaptureBusy] = useState(false);
+  // Drops a second 「开始」 click while the first extract request is in flight.
+  const [guard] = useState(createActionGuard);
   const elapsedTimer = useRef<number | null>(null);
   const mainRef = useRef<HTMLDivElement>(null);
 
@@ -133,9 +136,8 @@ export function ExtractKeyDialog({ open, onClose, onSuccess }: Props) {
         setLiveReason('scan-empty');
         setPhase('live');
       } else {
-        let code = r.code ?? 'KEY_NOT_FOUND';
-        if (!mac && code !== 'WIN_HOOK_FAILED' && HOOK_INSTALL_FAILED.test(r.log || '')) code = 'WIN_HOOK_FAILED';
-        failWith(code, logTail(r.log, 6));
+        // An explicit 「没拿到」 answer: KEY_NOT_FOUND unless the backend said more.
+        failWith(keyExtractFailureCode(r, !mac), logTail(r.log, 6));
       }
     } catch (e) {
       stopTimer();
@@ -149,7 +151,8 @@ export function ExtractKeyDialog({ open, onClose, onSuccess }: Props) {
     setPhase('live');
   }
 
-  const busy = phase === 'restarting' || phase === 'waiting-login';
+  const busy = phase === 'restarting' || phase === 'waiting-login' || (phase === 'live' && captureBusy);
+  const start = () => { void guard.run(handleStart); };
   const current = phase === 'intro' ? 'prep' : phase === 'success' ? 'done' : 'read';
 
   let title: string;
@@ -164,9 +167,9 @@ export function ExtractKeyDialog({ open, onClose, onSuccess }: Props) {
           )}
           <MacKeyChoice version={diag?.wechat_version} liveFirst={liveRecommended(diag)}
             hardened={diag?.capabilities.wechat_hardened === true}
-            onScan={() => void handleStart()} onLive={openLive} />
+            onScan={start} onLive={openLive} />
         </>
-      ) : <WinIntro onStart={() => void handleStart()} />;
+      ) : <WinIntro onStart={start} />;
       break;
     case 'restarting':
       title = isMac ? '正在扫描微信内存…' : '正在安装微信 hook…';
@@ -185,6 +188,8 @@ export function ExtractKeyDialog({ open, onClose, onSuccess }: Props) {
       body = (
         <LiveKeyCapture reason={liveReason} wechatVersion={diag?.wechat_version}
           keycapAvailable={diag?.private_copy?.available}
+          hardened={isMac && diag?.capabilities.wechat_hardened === true}
+          onBusyChange={setCaptureBusy}
           onDecrypt={() => { onSuccess?.(); onClose(); }} />
       );
       break;
@@ -194,9 +199,11 @@ export function ExtractKeyDialog({ open, onClose, onSuccess }: Props) {
       break;
     case 'error':
     default:
-      title = '没读到密钥';
+      title = '读取密钥没有完成';
       body = (
-        <StepError code={errCode ?? 'KEY_NOT_FOUND'} raw={error} log={log}
+        // errCode is whatever actually failed: the backend's code, KEY_NOT_FOUND
+        // for an explicit empty answer, or the network / HTTP error's own code.
+        <StepError code={errCode} raw={error} log={log}
           retryLabel="再试一次" onRetry={() => setPhase('intro')} />
       );
       break;
@@ -208,6 +215,8 @@ export function ExtractKeyDialog({ open, onClose, onSuccess }: Props) {
       onClose={onClose}
       size="md"
       accent
+      // Busy (scan / capture running): Esc / ✕ stay off until it settles.
+      dismissible={!busy}
       closeOnScrim={false}
       className="ob-dialog ob-dialog--key"
       eyebrow="初始化 · 读取密钥"

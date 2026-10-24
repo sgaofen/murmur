@@ -71,7 +71,9 @@ export function StepRail({ steps, current, done, error, onStepClick, notes }: St
       <nav className="ob-rail ob-rail--v" aria-label="初始化步骤">
         <Stepper steps={items} current={at} orientation="vertical" onStepClick={click} />
         <div className="ob-rail__hint">
-          {current ? '点已完成的步骤可以单独重做，不用从头再来。' : '大约需要 2–5 分钟，全部在你的电脑上完成。'}
+          {!current ? '大约需要 2–5 分钟，全部在你的电脑上完成。'
+            : onStepClick ? '点已完成的步骤可以单独重做，不用从头再来。'
+              : '这一步正在进行，结束后才能切换到别的步骤。'}
         </div>
       </nav>
       <nav className="ob-rail ob-rail--h" aria-label="初始化步骤">

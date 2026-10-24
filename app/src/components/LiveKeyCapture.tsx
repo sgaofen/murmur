@@ -10,7 +10,7 @@
 // existing decrypt flow.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { cancelLiveKey, getLiveKeyStatus, installFrida, startLiveKey } from '../data/api';
+import { cancelLiveKey, getLiveKeyStatus, getPrivateCopyStatus, installFrida, startLiveKey } from '../data/api';
 import type { LiveKeyStatus } from '../data/api';
 import { Button, Callout, Card, Chip, SegmentedControl } from '../ui';
 import { IconCheck, IconFolder, IconKey } from '../ui/icons';
@@ -18,6 +18,8 @@ import { PrivateCopyCapture } from './PrivateCopyCapture';
 import { lookupError } from '../data/errorCatalog';
 import { maskText } from '../utils/privacy';
 import { InlineError } from '../onboarding/parts';
+import { liveBusy, resumeMethod } from '../onboarding/capture';
+import type { CaptureMethod } from '../onboarding/capture';
 
 interface Props {
   /** Keys are saved — run the existing decrypt flow. */
@@ -30,6 +32,14 @@ interface Props {
   /** From /api/diagnose `private_copy.available`: is the 免 Frida capture dylib
    * bundled? Shown on the method chooser; undefined = not known. */
   keycapAvailable?: boolean | null;
+  /** WeChat still has hardened runtime: the Frida card says it needs a re-sign. */
+  hardened?: boolean;
+  /** Open this method directly instead of the chooser (e.g. 「先不重签：用免 Frida 方式」). */
+  initialMethod?: CaptureMethod | null;
+  /** Told whenever a Frida round, the Frida install or a private-copy round
+   * starts / ends, so the dialog can lock its step rail and Esc. Pass a
+   * stable function (e.g. a state setter). */
+  onBusyChange?: (busy: boolean) => void;
 }
 
 const DURATIONS = [60, 90, 180];
@@ -47,7 +57,9 @@ const TODO: Array<[string, string]> = [
   ['打开收藏、表情面板，发一张图片', '收藏 / 表情 / 媒体库'],
 ];
 
-export function LiveKeyCapture({ onDecrypt, reason = 'manual', wechatVersion, onPaste, keycapAvailable }: Props) {
+export function LiveKeyCapture({
+  onDecrypt, reason = 'manual', wechatVersion, onPaste, keycapAvailable, hardened, initialMethod, onBusyChange,
+}: Props) {
   const [st, setSt] = useState<LiveKeyStatus | null>(null);
   const [seconds, setSeconds] = useState(90);
   const [err, setErr] = useState<string | null>(null);
@@ -56,8 +68,12 @@ export function LiveKeyCapture({ onDecrypt, reason = 'manual', wechatVersion, on
   const [busy, setBusy] = useState(false);
   // Entry point: let the user pick the Frida flow (below) or the Frida-free
   // "private copy" flow (PrivateCopyCapture). null = chooser not answered yet.
-  const [method, setMethod] = useState<'frida' | 'private-copy' | null>(null);
+  const [method, setMethod] = useState<CaptureMethod | null>(initialMethod ?? null);
+  // First status read done (decides whether a running job skips the chooser).
+  const [probed, setProbed] = useState(false);
+  const [pcBusy, setPcBusy] = useState(false);
   const pollRef = useRef<number | null>(null);
+  const startingRef = useRef(false);
 
   const refresh = useCallback(async (coverage = false) => {
     try {
@@ -71,10 +87,27 @@ export function LiveKeyCapture({ onDecrypt, reason = 'manual', wechatVersion, on
     }
   }, []);
 
-  useEffect(() => { void refresh(true); }, [refresh]);
+  // A round (or the Frida install) may still be running from before — the
+  // backend keeps going when the screen changes. Open that method directly
+  // instead of asking 「选一种方式」 again.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const [live, pc] = await Promise.all([refresh(true), getPrivateCopyStatus().catch(() => null)]);
+      if (cancelled) return;
+      const resume = resumeMethod(live, pc);
+      if (resume) setMethod(resume);
+      setProbed(true);
+    })();
+    return () => { cancelled = true; };
+  }, [refresh]);
 
   const running = !!st?.job.running;
   const installing = !!st?.install.running;
+  const anyBusy = liveBusy(st) || busy || (method === 'private-copy' && pcBusy);
+
+  useEffect(() => { onBusyChange?.(anyBusy); }, [anyBusy, onBusyChange]);
+  useEffect(() => () => onBusyChange?.(false), [onBusyChange]);
 
   // Poll while a round or the Frida install is in flight; re-read coverage
   // once it finishes so the totals include this round.
@@ -91,6 +124,8 @@ export function LiveKeyCapture({ onDecrypt, reason = 'manual', wechatVersion, on
   }, [running, installing, refresh]);
 
   async function start() {
+    if (startingRef.current) return;  // double click: one start request only
+    startingRef.current = true;
     setErr(null);
     setBusy(true);
     try {
@@ -103,11 +138,13 @@ export function LiveKeyCapture({ onDecrypt, reason = 'manual', wechatVersion, on
     } catch (e: any) {
       setErr(e?.message || String(e));
     } finally {
+      startingRef.current = false;
       setBusy(false);
     }
   }
 
   async function install() {
+    if (installing) return;
     setErr(null);
     try {
       const r = await installFrida();
@@ -119,11 +156,12 @@ export function LiveKeyCapture({ onDecrypt, reason = 'manual', wechatVersion, on
   }
 
   if (method === 'private-copy') {
-    return <PrivateCopyCapture onDecrypt={onDecrypt} onBack={() => setMethod(null)} />;
+    return <PrivateCopyCapture onDecrypt={onDecrypt} onBack={() => setMethod(null)} onBusyChange={setPcBusy} />;
   }
   if (method === null) {
+    if (!probed) return <div className="ob-working__sub" role="status">正在检查实时抓取环境…</div>;
     return <MethodChooser reason={reason} wechatVersion={wechatVersion} frida={st?.frida}
-      keycapAvailable={keycapAvailable} onPick={setMethod} onPaste={onPaste} />;
+      keycapAvailable={keycapAvailable} hardened={hardened} onPick={setMethod} onPaste={onPaste} />;
   }
 
   if (!st) {
@@ -203,19 +241,19 @@ export function LiveKeyCapture({ onDecrypt, reason = 'manual', wechatVersion, on
 
       {err && <InlineError code={errCode} raw={err} className="ui-mt-3" />}
 
-      {onPaste && !job.running && (
+      {onPaste && !anyBusy && (
         <Button variant="ghost" block className="ui-mt-2" onClick={onPaste}>或者：手动粘贴密钥</Button>
       )}
     </>
   );
 }
 
-function MethodChooser({ reason, wechatVersion, frida, keycapAvailable, onPick, onPaste }: {
+function MethodChooser({ reason, wechatVersion, frida, keycapAvailable, hardened, onPick, onPaste }: {
   reason: Props['reason']; wechatVersion?: string | null;
-  frida?: LiveKeyStatus['frida']; keycapAvailable?: boolean | null;
-  onPick: (m: 'frida' | 'private-copy') => void; onPaste?: () => void;
+  frida?: LiveKeyStatus['frida']; keycapAvailable?: boolean | null; hardened?: boolean;
+  onPick: (m: CaptureMethod) => void; onPaste?: () => void;
 }) {
-  const card = (m: 'frida' | 'private-copy', icon: ReactNode, title: ReactNode, desc: string, chips: ReactNode) => (
+  const card = (m: CaptureMethod, icon: ReactNode, title: ReactNode, desc: string, chips: ReactNode) => (
     <Card variant="sunken" padding="sm" interactive role="button" tabIndex={0}
       onClick={() => onPick(m)}
       onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onPick(m); } }}>
@@ -237,6 +275,7 @@ function MethodChooser({ reason, wechatVersion, frida, keycapAvailable, onPick, 
         {card('frida', <IconKey size={16} />, 'Frida 实时抓取',
           '挂钩正在运行的微信。需要装一次 Frida，并会弹一次系统密码窗（管理员权限）。不改动微信本体，但微信要先重签名。',
           <>
+            {hardened && <Chip size="sm" tone="warning">微信需要先重签名</Chip>}
             {frida && (frida.installed
               ? <Chip size="sm" tone="success" icon={<IconCheck size={11} />}>Frida 已安装</Chip>
               : <Chip size="sm" tone="warning">{frida.installable ? '需要先装 Frida（约 45 MB）' : '这个版本没带 Frida'}</Chip>)}
