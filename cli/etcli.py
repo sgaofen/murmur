@@ -155,6 +155,7 @@ import paths as _paths  # noqa: E402  (cross-platform discovery helper)
 import error_codes as _ec  # noqa: E402  (stable API error codes)
 import diag_redact as _redact  # noqa: E402  (diag bundle scrubbing)
 import live_key as _live_key  # noqa: E402  (macOS live key capture via Frida)
+import mac_private_copy as _private_copy  # noqa: E402  (Frida-free/root-free capture)
 
 
 def _flutter_prefs_path() -> Path:
@@ -213,6 +214,7 @@ def _spawn_mac_extract_key_args(tmp_dir: Path, *args: str) -> list[str]:
 
 _LIVE_KEY_JOB = None
 _FRIDA_INSTALLER = None
+_PRIVATE_COPY_JOB = None
 
 
 def _live_key_job():
@@ -220,6 +222,26 @@ def _live_key_job():
     if _LIVE_KEY_JOB is None:
         _LIVE_KEY_JOB = _live_key.LiveKeyJob()
     return _LIVE_KEY_JOB
+
+
+def _private_copy_job():
+    global _PRIVATE_COPY_JOB
+    if _PRIVATE_COPY_JOB is None:
+        _PRIVATE_COPY_JOB = _private_copy.PrivateCopyJob()
+    return _PRIVATE_COPY_JOB
+
+
+def _private_copy_status(with_coverage: bool = False) -> dict:
+    out = {
+        "platform_ok": _paths.IS_MAC,
+        "job": _private_copy_job().status(),
+    }
+    if with_coverage and _paths.IS_MAC:
+        try:
+            out["coverage"] = _private_copy_job().coverage()
+        except Exception as e:
+            out["coverage"] = {"total": 0, "known": 0, "error": str(e)}
+    return out
 
 
 def _frida_installer():
@@ -1144,9 +1166,14 @@ def _account_slug() -> str:
     return "default"
 
 
+# Set by `etcli mcp`: read the app's on-disk analysis cache but never write to it.
+_DISK_CACHE_READONLY = False
+
+
 def _disk_cache_dir() -> Path:
     p = Path.home() / "Documents" / "Murmur" / "cache" / _account_slug()
-    p.mkdir(parents=True, exist_ok=True)
+    if not _DISK_CACHE_READONLY:
+        p.mkdir(parents=True, exist_ok=True)
     return p
 
 def _agent_workspace_root() -> Path:
@@ -1238,6 +1265,8 @@ def _disk_load(key: str) -> dict | None:
         return None
 
 def _disk_save(key: str, payload) -> None:
+    if _DISK_CACHE_READONLY:
+        return
     p = _disk_cache_dir() / f"{_safe_filename(key)}.json"
     try:
         p.write_text(json.dumps({"_ts": _time.time(), "_payload": payload},
@@ -1246,6 +1275,8 @@ def _disk_save(key: str, payload) -> None:
         pass
 
 def _disk_clear() -> None:
+    if _DISK_CACHE_READONLY:
+        return
     try:
         for f in _disk_cache_dir().glob("*.json"):
             f.unlink(missing_ok=True)
@@ -2890,6 +2921,12 @@ def main(argv=None):
     sp.add_argument("--host", default="127.0.0.1")
     sp.add_argument("--export-dir", help="AI 分析包默认输出目录（默认 ~/Desktop/Murmur）")
 
+    sp = sub.add_parser("mcp", help="启动 MCP 服务（stdio，只读），给 Claude Code / Codex 等 AI 助手用")
+    sp.add_argument("--privacy", action="store_true",
+                    help="隐私模式：名字/wxid/手机号等脱敏成「朋友 AB」「wxid_1234」")
+    sp.add_argument("--max-rows", type=int, default=500,
+                    help="单次调用最多返回多少条（默认 500）")
+
     sp = sub.add_parser("refresh", help="(PyInstaller) 调用 refresh.py 主函数解密")
     sp.add_argument("--wxid", default=None)
     sp.add_argument("--key", default=None)
@@ -2917,6 +2954,10 @@ def main(argv=None):
 
     if args.cmd == "serve":
         return _run_server(args)
+
+    if args.cmd == "mcp":
+        import mcp_server as _mcp
+        return _mcp.main(args, et=sys.modules[__name__])
 
     if args.cmd == "refresh":
         import refresh as _refresh
@@ -4465,7 +4506,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         # Bootstrap mode: only a small allowlist works without decrypted data.
         _NO_STORE_GET = {"/api/info", "/api/agents", "/api/diagnose", "/api/reports", "/api/log-tail",
                           "/api/scan-disks/status", "/api/profiles", "/api/diag-bundle",
-                          "/api/search/semantic/status", "/api/live-key/status",
+                          "/api/search/semantic/status", "/api/live-key/status", "/api/private-copy/status",
                           "/api/live-sync/status"}
         # QQ endpoints have their own data lifecycle (separate stores keyed by
         # qq number) so they bypass the WeChat-store bootstrap gate entirely.
@@ -4663,6 +4704,10 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             # macOS live key capture (Frida) — polled by the onboarding UI.
             return self._send_json(_live_key_status(with_coverage=qs.get("coverage", ["0"])[0] == "1"))
 
+        if path == "/api/private-copy/status":
+            # macOS Frida-free/root-free capture (private WeChat copy).
+            return self._send_json(_private_copy_status(with_coverage=qs.get("coverage", ["0"])[0] == "1"))
+
         # Onboarding gate: data-needing endpoints return 503 until store is ready.
         # Endpoints that work without a store stay above this gate.
         # NOTE: keep this allowlist in sync with `_NO_STORE_GET` above. They
@@ -4672,7 +4717,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         # opened the Reports page on a fresh install.
         _gate_pass = (path in {"/api/diagnose", "/api/agents", "/api/reports", "/api/log-tail",
                                 "/api/scan-disks/status", "/api/profiles", "/api/diag-bundle",
-                                "/api/search/semantic/status", "/api/live-key/status"}
+                                "/api/search/semantic/status", "/api/live-key/status", "/api/private-copy/status"}
                       or path.startswith("/api/report/"))
         if _gate_pass:
             pass  # these don't need store, fall through to their handlers
@@ -4942,6 +4987,12 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     "recommended": _live_key.version_needs_live_capture(_paths.wechat_app_version()),
                     "frida": _live_key.frida_status(),
                 } if _paths.IS_MAC else None),
+                "private_copy": ({
+                    # Frida-free/root-free alternative; available once the
+                    # capture dylib has been built/bundled.
+                    "available": _private_copy.keycap_dylib_path() is not None,
+                    "copy_exists": _private_copy.copy_app_path().exists(),
+                } if _paths.IS_MAC else None),
             })
         if path == "/api/annual-report":
             try:
@@ -5165,6 +5216,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                            "/api/open-folder", "/api/resign-wechat", "/api/open-fda",
                            "/api/scan-disks", "/api/scan-disks/cancel", "/api/active-profile",
                            "/api/live-key/start", "/api/live-key/cancel", "/api/live-key/install-frida",
+                           "/api/private-copy/start", "/api/private-copy/cancel", "/api/private-copy/delete",
                            "/api/live-sync"}
         if path == "/api/active-profile":
             length = int(self.headers.get("Content-Length") or 0)
@@ -6184,6 +6236,22 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 return self._send_json({"ok": False, "error": "frida-missing"})
             try:
                 return self._send_json(_live_key_job().start(int(opts.get("seconds") or _live_key.DEFAULT_SECONDS)))
+            except Exception as e:
+                return self._send_json({"ok": False, "error": f"{type(e).__name__}: {e}"})
+
+        if path in ("/api/private-copy/start", "/api/private-copy/cancel", "/api/private-copy/delete"):
+            if not _paths.IS_MAC:
+                return self._send_json({"ok": False, "error": "macOS only"}, 400)
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length) if length else b"{}"
+            opts = json.loads(body.decode("utf-8") or "{}")
+            if path == "/api/private-copy/cancel":
+                return self._send_json(_private_copy_job().cancel())
+            if path == "/api/private-copy/delete":
+                return self._send_json(_private_copy_job().delete_copy())
+            try:
+                return self._send_json(_private_copy_job().start(
+                    int(opts.get("seconds") or _private_copy.DEFAULT_SECONDS)))
             except Exception as e:
                 return self._send_json({"ok": False, "error": f"{type(e).__name__}: {e}"})
 

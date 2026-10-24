@@ -681,6 +681,61 @@ export async function installFrida(): Promise<{ ok: boolean; started?: boolean; 
   return j('/api/live-key/install-frida', { method: 'POST' });
 }
 
+// ---- macOS Frida-free / root-free capture (private WeChat copy) ----
+
+export type PrivateCopyPhase =
+  | 'idle' | 'starting' | 'copying' | 'launching' | 'capturing' | 'done' | 'error';
+
+export interface PrivateCopyJob {
+  running: boolean;
+  phase: PrivateCopyPhase;
+  seconds: number;
+  remaining: number | null;
+  total: number;
+  known: number;
+  matched_count: number;
+  new: string[];
+  passphrase_found: boolean;
+  /** 'no-keys' | free text */
+  error: string | null;
+  log: string;
+  round: number;
+  /** a private WeChat copy is on disk (can be deleted) */
+  copy_exists: boolean;
+  /** the capture dylib was built / bundled */
+  dylib_available: boolean;
+}
+
+export interface PrivateCopyStatus {
+  platform_ok: boolean;
+  job: PrivateCopyJob;
+  coverage?: { total: number; known: number; pending?: string[]; error?: string };
+}
+
+export async function getPrivateCopyStatus(opts: { coverage?: boolean } = {}): Promise<PrivateCopyStatus> {
+  return j(`/api/private-copy/status${opts.coverage ? '?coverage=1' : ''}`);
+}
+
+export async function startPrivateCopy(seconds: number): Promise<{
+  ok: boolean; started?: boolean; complete?: boolean; already_running?: boolean; error?: string;
+  /** 'copy-running' | 'original-running' */
+  code?: string;
+}> {
+  return j('/api/private-copy/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ seconds }),
+  });
+}
+
+export async function cancelPrivateCopy(): Promise<{ ok: boolean }> {
+  return j('/api/private-copy/cancel', { method: 'POST' });
+}
+
+export async function deletePrivateCopy(): Promise<{ ok: boolean; deleted?: boolean; error?: string; pids?: number[] }> {
+  return j('/api/private-copy/delete', { method: 'POST' });
+}
+
 export async function saveKey(key: string): Promise<{ ok: boolean; path?: string; error?: string; code?: string }> {
   return j('/api/save-key', {
     method: 'POST',
