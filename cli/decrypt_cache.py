@@ -55,6 +55,29 @@ def _safe_size(p: Path) -> int:
         return 0
 
 
+def db_signature(src: Path) -> tuple:
+    """Change fingerprint of an encrypted DB: ((mtime_ns, size) of the .db,
+    (mtime_ns, size) of its -wal or None).
+
+    Nanosecond mtime + size of both files — WeChat often appends WAL frames
+    without touching the main file, and on some filesystems two writes inside
+    the same second keep the float mtime identical, so size is checked too.
+    The -shm is deliberately excluded: readers (WeChat itself) touch it too.
+    """
+    out = []
+    for p in (src, src.with_name(src.name + "-wal")):
+        try:
+            st = p.stat()
+            out.append((int(st.st_mtime_ns), int(st.st_size)))
+        except OSError:
+            out.append(None)
+    return tuple(out)
+
+
+def _sig_jsonable(sig) -> list:
+    return [list(x) if x else None for x in sig]
+
+
 class DecryptCache:
     """Per-account decrypt skip cache.
 
@@ -113,6 +136,11 @@ class DecryptCache:
         entry = self._loaded["entries"].get(rel)
         if not entry:
             return False
+        if entry.get("sig") is not None:
+            if entry["sig"] != _sig_jsonable(db_signature(src)):
+                return False
+            return (self.dst_dir / src.name).exists()
+        # Legacy (pre-live-sync) entry: float mtimes only.
         wal = src.with_suffix(src.suffix + "-wal")
         cur_db_mtime = _safe_mtime(src)
         cur_wal_mtime = _safe_mtime(wal)
@@ -128,14 +156,23 @@ class DecryptCache:
             return False
         return True
 
-    def mark_done(self, src: Path) -> None:
-        """Record that `src` was successfully decrypted with the current key."""
+    def mark_done(self, src: Path, sig: Optional[tuple] = None) -> None:
+        """Record that `src` was successfully decrypted with the current key.
+
+        `sig` is the `db_signature()` of the source *as it was snapshotted*.
+        Pass it whenever the decrypt read a snapshot: if WeChat wrote again
+        between the snapshot and now, recording the current stat would mark
+        the newer (not yet decrypted) state as fresh and lose that update.
+        """
         rel = self._rel_key(src)
         wal = src.with_suffix(src.suffix + "-wal")
+        if sig is None:
+            sig = db_signature(src)
         self._loaded["entries"][rel] = {
             "db_mtime": _safe_mtime(src),
             "wal_mtime": _safe_mtime(wal),
             "size": _safe_size(src),
+            "sig": _sig_jsonable(sig),
             "decrypted_at": int(time.time()),
         }
 

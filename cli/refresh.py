@@ -16,6 +16,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import NamedTuple, Optional
 
 # Force utf-8 stdio so multi-account auto-detect's `print("✓ 匹配")` doesn't
 # UnicodeEncodeError on Chinese Windows (PyInstaller etcli.exe ignores
@@ -32,7 +33,7 @@ from paths import (
     IS_WINDOWS, IS_MAC, native_dir, load_config,
     discover_wechat_profiles, decrypted_root_for, WeChatProfile,
 )
-from decrypt_cache import DecryptCache
+from decrypt_cache import DecryptCache, db_signature
 
 SKIP = {'message_fts.db', 'contact_fts.db', 'favorite_fts.db', 'message_resource.db'}
 
@@ -95,14 +96,19 @@ def load_dll():
     return lib
 
 
-def decrypt(lib, src: Path, dst: Path, key: bytes) -> str | None:
+def decrypt(lib, src: Path, dst: Path, key, *, pre_derived: bool = False) -> str | None:
     """Decrypt one .db file. Uses Win DLL when available, else pure-Python.
+
+    `key` is the 64-hex key as str or ascii bytes. `pre_derived=True` means it
+    is a per-DB AES key (macOS WCDB path) — only the pure-Python decryptor
+    understands that, so callers pass lib=None alongside it.
 
     Returns None on success, or an error string. The caller should set lib=None
     on Mac/Linux to force the Python implementation.
     """
-    if lib is not None:
-        ret = lib.DecryptDatabase(str(src).encode('utf-8'), str(dst).encode('utf-8'), key)
+    if lib is not None and not pre_derived:
+        key_b = key.encode('ascii') if isinstance(key, str) else key
+        ret = lib.DecryptDatabase(str(src).encode('utf-8'), str(dst).encode('utf-8'), key_b)
         if ret is None or ret == 0:
             return None
         err = ctypes.string_at(ret).decode('utf-8', errors='replace')
@@ -112,9 +118,10 @@ def decrypt(lib, src: Path, dst: Path, key: bytes) -> str | None:
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         from decrypt_py import decrypt_db
-        decrypt_db(src, dst, key.decode('ascii') if isinstance(key, bytes) else key)
+        decrypt_db(src, dst, key.decode('ascii') if isinstance(key, bytes) else key,
+                   pre_derived=pre_derived)
         return None
-    except Exception as e:
+    except (Exception, SystemExit) as e:  # decrypt_py SystemExits without cryptography
         return f"{type(e).__name__}: {e}"
 
 
@@ -254,10 +261,26 @@ def _apply_wal_best_effort(src_db: Path, dst_db: Path, key_hex: str,
     wal_path = src_db.with_suffix(src_db.suffix + "-wal")
     if not wal_path.exists():
         return 0, None
+    # Cheap pre-check (no crypto): a WAL with no committed frames of the
+    # current generation — empty, freshly checkpointed, or only stale frames
+    # from an older salt cycle — has nothing to replay. Skips the full-DB
+    # backup copy below, which matters for the live-sync poller.
+    try:
+        from wal_frames import valid_wal_frames
+        with wal_path.open("rb") as wf:
+            if not valid_wal_frames(wf.read()):
+                return 0, None
+    except OSError as e:
+        return 0, str(e)
+    try:
+        from decrypt_py import decrypt_wal
+    except (ImportError, SystemExit) as e:
+        # decrypt_py raises SystemExit when `cryptography` is missing; never
+        # let that kill a caller thread (live sync runs in-process).
+        return 0, f"decrypt_py unavailable: {e}"
     backup = dst_db.with_name(dst_db.name + ".pre-wal")
     try:
         shutil.copy2(dst_db, backup)
-        from decrypt_py import decrypt_wal
         applied = decrypt_wal(src_db, wal_path, dst_db, key_hex, pre_derived=pre_derived)
         if applied and not _sqlite_quick_check_ok(dst_db):
             shutil.copy2(backup, dst_db)
@@ -277,14 +300,162 @@ def _apply_wal_best_effort(src_db: Path, dst_db: Path, key_hex: str,
             pass
 
 
+def list_source_dbs(encrypted_root: Path) -> list:
+    """Every encrypted .db under db_storage that refresh decrypts."""
+    return sorted(p for p in encrypted_root.rglob("*.db") if p.name not in SKIP)
+
+
+def per_db_fingerprint(per_db: dict) -> bytes:
+    """Stable bytes identifying a decrypted_keys.json key set, used as the
+    DecryptCache key fingerprint on the macOS per-DB path (any key change
+    invalidates the whole cache, same as a global-key change on Windows)."""
+    import json
+    payload = {
+        "keys_by_db": per_db.get("keys_by_db") or {},
+        "keys_by_salt": per_db.get("keys_by_salt") or {},
+    }
+    return json.dumps(payload, sort_keys=True).encode("utf-8")
+
+
+def key_for_db(src: Path, encrypted_root: Path, per_db: dict) -> Optional[str]:
+    """macOS per-DB key lookup: by db_storage-relative path, then by page-1 salt."""
+    keys_by_name = per_db.get("keys_by_db") or {}
+    keys_by_salt = per_db.get("keys_by_salt") or {}
+    try:
+        rel = str(src.relative_to(encrypted_root)).replace("\\", "/")
+    except ValueError:
+        rel = src.name
+    key_hex = keys_by_name.get(rel)
+    if key_hex:
+        return key_hex
+    try:
+        with open(src, "rb") as f:
+            return keys_by_salt.get(f.read(16).hex())
+    except OSError:
+        return None
+
+
+def snapshot_db(src: Path, dst_dir: Path, *, attempts: int = 4,
+                settle_s: float = 0.05) -> tuple:
+    """Copy `src` plus its -wal / -shm into `dst_dir` as one consistent set.
+
+    WeChat keeps writing while we read. Decrypting the live .db and then
+    reading the live -wal seconds later can pair a main file and a WAL from
+    different moments (chatlog-keeper snapshots all three first for the same
+    reason). We stat (db, wal) before and after copying and retry until the
+    two agree.
+
+    Returns (snapshot_db_path, signature, consistent). `signature` is the
+    `db_signature()` the copy corresponds to, or None when no attempt was
+    stable — callers must then not record the source as fresh. The copy is
+    still usable: WAL replay only takes salt-matching committed frames
+    (wal_frames.py) and is rolled back if quick_check fails.
+    """
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    snap = dst_dir / src.name
+    for attempt in range(max(1, attempts)):
+        before = db_signature(src)
+        for suffix in ("", "-wal", "-shm"):
+            sp = src.with_name(src.name + suffix)
+            dp = snap.with_name(snap.name + suffix)
+            try:
+                if sp.exists():
+                    shutil.copyfile(sp, dp)
+                elif dp.exists():
+                    dp.unlink()
+            except OSError:
+                if suffix == "":
+                    raise
+                # -wal/-shm vanishing mid-copy (checkpoint) is fine: drop the
+                # partial sidecar and let the signature check decide.
+                try:
+                    dp.unlink()
+                except OSError:
+                    pass
+        if db_signature(src) == before:
+            return snap, before, True
+        if attempt < attempts - 1:
+            time.sleep(settle_s)
+    return snap, None, False
+
+
+def swap_into_place(staged: Path, dst_f: Path) -> None:
+    """Atomically replace `dst_f` with `staged`.
+
+    Copy into a sibling .swap-tmp on the destination filesystem (so
+    os.replace is atomic), then rename. Avoids the window where dst doesn't
+    exist that `unlink → shutil.move` opens, and the half-written-DB case if
+    Murmur is killed mid-way. Raises OSError (e.g. Windows file lock).
+    """
+    dst_dir = dst_f.parent
+    tmp_f = dst_dir / (dst_f.name + ".swap-tmp")
+    try:
+        # Clean up companion files left from the previous decrypt.
+        for ext in ('-wal', '-shm', '-journal'):
+            sc = dst_dir / (dst_f.name + ext)
+            if sc.exists():
+                sc.unlink()
+        if tmp_f.exists():
+            tmp_f.unlink()
+        shutil.copy2(staged, tmp_f)  # cross-filesystem-safe write
+        os.replace(tmp_f, dst_f)     # atomic same-fs rename
+    except OSError:
+        if tmp_f.exists():
+            try:
+                tmp_f.unlink()
+            except OSError:
+                pass
+        raise
+
+
+class DbResult(NamedTuple):
+    src: Path
+    ok: bool                     # decrypted AND swapped into dst_dir
+    error: Optional[str]         # decrypt / snapshot / swap error text
+    swap_failed: bool
+    wal_frames: int
+    wal_error: Optional[str]
+    signature: Optional[tuple]   # source state the new output reflects (None = unknown)
+
+
+def process_db(src: Path, *, dst_dir: Path, staging: Path, key_hex: str,
+               pre_derived: bool = False, lib=None) -> DbResult:
+    """Snapshot → decrypt → WAL merge → atomic swap for ONE database.
+
+    Shared by the manual refresh (both key modes) and the live-sync poller
+    (cli/live_sync.py) so there is a single decrypt pipeline.
+    WAL frames are merged into the staged copy *before* the swap, so readers
+    never see a half-patched file.
+    """
+    work = Path(tempfile.mkdtemp(prefix="db_", dir=str(staging)))
+    try:
+        try:
+            snap, sig, _consistent = snapshot_db(src, work / "src")
+        except OSError as e:
+            return DbResult(src, False, f"snapshot: {e}", False, 0, None, None)
+        out = work / src.name
+        err = decrypt(lib, snap, out, key_hex, pre_derived=pre_derived)
+        if err:
+            return DbResult(src, False, err, False, 0, None, None)
+        applied, wal_err = _apply_wal_best_effort(snap, out, key_hex, pre_derived=pre_derived)
+        try:
+            swap_into_place(out, dst_dir / src.name)
+        except OSError as e:
+            return DbResult(src, False, str(e), True, applied, wal_err, None)
+        return DbResult(src, True, None, False, applied, wal_err, sig)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def _print_wal(res: DbResult) -> None:
+    if res.wal_frames:
+        print(f"      WAL: 合并 {res.wal_frames} 帧")
+    elif res.wal_error:
+        print(f"      WAL: 跳过（{res.wal_error}）")
+
+
 def _decrypt_per_db(profile: WeChatProfile, per_db: dict, *, force: bool = False) -> int:
     """Mac fast-path: each DB has its own pre-derived AES key, no PBKDF2."""
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from decrypt_py import decrypt_db as _decrypt_one  # noqa: E402
-
-    keys_by_name: dict[str, str] = per_db.get("keys_by_db") or {}
-    keys_by_salt: dict[str, str] = per_db.get("keys_by_salt") or {}
-
     dst_dir = decrypted_root_for(profile)
     dst_dir.mkdir(parents=True, exist_ok=True)
     if force:
@@ -293,91 +464,68 @@ def _decrypt_per_db(profile: WeChatProfile, per_db: dict, *, force: bool = False
     print(f"[INFO] 解密目标: {dst_dir}")
     print(f"[INFO] 模式: 每库独立 AES key（macOS WCDB 路径，跳过 PBKDF2）")
 
-    src_dbs = sorted(p for p in profile.encrypted_root.rglob("*.db") if p.name not in SKIP)
+    src_dbs = list_source_dbs(profile.encrypted_root)
+    # Same incremental cache as the global-key path, fingerprinted by the
+    # whole per-DB key set. Shared with live sync so neither redoes the
+    # other's work.
+    cache = DecryptCache(dst_dir, per_db_fingerprint(per_db), src_root=profile.encrypted_root)
     staging = Path(tempfile.mkdtemp(prefix='murmur_refresh_'))
     print(f"[INFO] 临时目录: {staging}")
-    print(f"[INFO] 共 {len(src_dbs)} 个加密 DB 待处理\n")
+    print(f"[INFO] 共 {len(src_dbs)} 个加密 DB 待处理（缓存命中将跳过）\n")
 
-    results = []
+    n_ok = n_fail = swap_failed = skipped_cached = 0
+    present: set = set()
     t_total = time.time()
-    for i, src in enumerate(src_dbs, 1):
-        out = staging / src.name
-        size_mb = src.stat().st_size / 1e6
-        rel = str(src.relative_to(profile.encrypted_root)).replace("\\", "/")
-        # Try by name, then by salt
-        key_hex = keys_by_name.get(rel)
-        if not key_hex:
-            try:
-                with open(src, "rb") as f:
-                    salt_hex = f.read(16).hex()
-                key_hex = keys_by_salt.get(salt_hex)
-            except OSError:
-                pass
-        if not key_hex:
-            print(f"  [{i:2d}/{len(src_dbs)}] SKIP ({size_mb:6.1f} MB) {rel}: 这个 DB 在 WCDB 缓存里没找到，请在微信里点开它对应的对话/页面后重抓 key")
-            results.append((src.name, False, src))
-            continue
-        t0 = time.time()
-        try:
-            _decrypt_one(src, out, key_hex, pre_derived=True)
+    try:
+        for i, src in enumerate(src_dbs, 1):
+            size_mb = src.stat().st_size / 1e6
+            rel = str(src.relative_to(profile.encrypted_root)).replace("\\", "/")
+            if not force and cache.is_fresh(src):
+                print(f"  [{i:2d}/{len(src_dbs)}] CACHE ({size_mb:6.1f} MB) {src.name}")
+                skipped_cached += 1
+                present.add(src.name)
+                continue
+            key_hex = key_for_db(src, profile.encrypted_root, per_db)
+            if not key_hex:
+                print(f"  [{i:2d}/{len(src_dbs)}] SKIP ({size_mb:6.1f} MB) {rel}: 这个 DB 在 WCDB 缓存里没找到，请在微信里点开它对应的对话/页面后重抓 key")
+                n_fail += 1
+                continue
+            t0 = time.time()
+            res = process_db(src, dst_dir=dst_dir, staging=staging, key_hex=key_hex, pre_derived=True)
             dt = time.time() - t0
+            if res.swap_failed:
+                print(f"  [SWAP-FAIL] {src.name}: {res.error}")
+                swap_failed += 1
+                n_ok += 1
+                cache.forget(src)
+                continue
+            if not res.ok:
+                print(f"  [{i:2d}/{len(src_dbs)}] FAIL ({size_mb:6.1f} MB, {dt:5.2f}s) {rel}: {friendly_error(res.error or '')}")
+                n_fail += 1
+                cache.forget(src)
+                continue
             print(f"  [{i:2d}/{len(src_dbs)}] OK   ({size_mb:6.1f} MB, {dt:5.2f}s) {src.name}")
-            results.append((src.name, True, src))
+            _print_wal(res)
+            n_ok += 1
+            present.add(src.name)
+            if res.signature is not None:
+                cache.mark_done(src, res.signature)
+            else:
+                cache.forget(src)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+        try:
+            cache.save()
         except Exception as e:
-            dt = time.time() - t0
-            print(f"  [{i:2d}/{len(src_dbs)}] FAIL ({size_mb:6.1f} MB, {dt:5.2f}s) {rel}: {friendly_error(str(e))}")
-            results.append((src.name, False, src))
+            print(f"[WARN] 缓存写入失败: {e}")
 
     print(f"\n[INFO] 解密耗时 {time.time() - t_total:.2f}s")
-    print("\n[INFO] swap 到目标目录...")
-    moved = 0
-    swap_failed = 0
-    for fname, ok, src_path in results:
-        if not ok:
-            continue
-        src_f = staging / fname
-        dst_f = dst_dir / fname
-        tmp_f = dst_dir / (fname + ".swap-tmp")
-        try:
-            for ext in ('-wal', '-shm', '-journal'):
-                sc = dst_dir / (fname + ext)
-                if sc.exists():
-                    sc.unlink()
-            if tmp_f.exists():
-                tmp_f.unlink()
-            shutil.copy2(src_f, tmp_f)
-            os.replace(tmp_f, dst_f)
-            src_f.unlink(missing_ok=True)
-            moved += 1
-            rel = str(src_path.relative_to(profile.encrypted_root)).replace("\\", "/")
-            key_hex = keys_by_name.get(rel)
-            if not key_hex:
-                with open(src_path, "rb") as f:
-                    key_hex = keys_by_salt.get(f.read(16).hex())
-            if key_hex:
-                applied, wal_err = _apply_wal_best_effort(src_path, dst_f, key_hex, pre_derived=True)
-                if applied:
-                    print(f"      WAL: 合并 {applied} 帧")
-                elif wal_err:
-                    print(f"      WAL: 跳过（{wal_err}）")
-        except OSError as e:
-            print(f"  [SWAP-FAIL] {fname}: {e}")
-            if tmp_f.exists():
-                try:
-                    tmp_f.unlink()
-                except OSError:
-                    pass
-            swap_failed += 1
-    shutil.rmtree(staging, ignore_errors=True)
-    n_ok = sum(1 for _, ok, _ in results if ok)
-    n_fail = len(results) - n_ok
     print(
-        f"\n[DONE] 解密 {n_ok} 个，swap {moved} 个，失败 {n_fail} 个"
+        f"\n[DONE] 解密 {n_ok} 个，缓存命中 {skipped_cached} 个，失败 {n_fail} 个"
         + (f"，swap 失败 {swap_failed}" if swap_failed else "")
     )
     core = {"session.db", "contact.db"}
-    moved_names = {fname for fname, ok, _ in results if ok}
-    missing_core = sorted(core - moved_names)
+    missing_core = sorted(core - present)
     if missing_core:
         print(f"[ERR] 核心数据库未解密: {', '.join(missing_core)}")
         return 1
@@ -390,6 +538,28 @@ def _decrypt_per_db(profile: WeChatProfile, per_db: dict, *, force: bool = False
             "已保留可用核心数据；如果缺消息或朋友圈，请回微信多点开几个聊天/朋友圈后重新抓密钥。"
         )
     return 0
+
+
+class KeyPlan(NamedTuple):
+    mode: str                 # "per_db" (macOS WCDB AES keys) | "global" (one SQLCipher key)
+    per_db: Optional[dict]
+    key_hex: Optional[str]
+
+
+def resolve_key_plan(profile: WeChatProfile, override: Optional[str] = None) -> Optional[KeyPlan]:
+    """Which key mode refresh uses for `profile` — shared with live sync.
+
+    Mac WCDB path: if extract_key_mac.py left per-DB keys, use them (skips
+    PBKDF2 — much faster and works with the AES keys WCDB caches). Otherwise
+    the single global key (Windows, or Mac with a raw key). None = no key.
+    """
+    per_db = _load_per_db_keys()
+    if per_db and not override:
+        return KeyPlan("per_db", per_db, None)
+    key_hex = find_decrypt_key(profile, override=override)
+    if not key_hex:
+        return None
+    return KeyPlan("global", None, key_hex)
 
 
 def main():
@@ -413,13 +583,11 @@ def main():
     print(f"[INFO] 账号: {profile.wxid}")
     print(f"[INFO] 加密源: {profile.encrypted_root}")
 
-    # Mac WCDB path: if extract_key_mac.py left per-DB keys, use them
-    # (skips PBKDF2 — much faster and works with the AES keys WCDB caches).
-    per_db = _load_per_db_keys()
-    if per_db and not args.key:
-        return _decrypt_per_db(profile, per_db, force=args.force)
+    plan = resolve_key_plan(profile, override=args.key)
+    if plan is not None and plan.mode == "per_db":
+        return _decrypt_per_db(profile, plan.per_db, force=args.force)
 
-    key_hex = find_decrypt_key(profile, override=args.key)
+    key_hex = plan.key_hex if plan is not None else None
     if not key_hex:
         if IS_MAC:
             raise SystemExit(
@@ -445,9 +613,9 @@ def main():
     print(f"[INFO] 解密目标: {dst_dir}")
 
     lib = load_dll()
-    src_dbs = sorted(p for p in profile.encrypted_root.rglob("*.db") if p.name not in SKIP)
+    src_dbs = list_source_dbs(profile.encrypted_root)
 
-    # Incremental cache: skip files whose source mtime + size + WAL mtime are
+    # Incremental cache: skip files whose source (db, wal) signature is
     # unchanged since the last successful decrypt with the same key. --force
     # bypasses the cache entirely (and the destination is already nuked above).
     cache = DecryptCache(dst_dir, key_bytes, src_root=profile.encrypted_root)
@@ -457,80 +625,44 @@ def main():
     print(f"[INFO] 临时目录: {staging}")
     print(f"[INFO] 共 {len(src_dbs)} 个加密 DB 待处理（缓存命中将跳过）\n")
 
-    results = []
+    n_ok = n_fail = moved = swap_failed = skipped_cached = 0
     t_total = time.time()
-    swap_failed = 0
-    skipped_cached = 0
     try:
         for i, src in enumerate(src_dbs, 1):
             size_mb = src.stat().st_size / 1e6
             if not bypass_cache and cache.is_fresh(src):
-                # Output is still valid — don't re-decrypt, don't queue for swap.
+                # Output is still valid — don't re-decrypt, don't swap.
                 print(f"  [{i:2d}/{len(src_dbs)}] CACHE ({size_mb:6.1f} MB) {src.name}")
                 skipped_cached += 1
                 continue
-            out = staging / src.name
             t0 = time.time()
-            err = decrypt(lib, src, out, key_bytes)
+            # Per file: snapshot db+wal+shm → decrypt → WAL merge → atomic swap.
+            res = process_db(src, dst_dir=dst_dir, staging=staging, key_hex=key_hex, lib=lib)
             dt = time.time() - t0
-            if err:
-                print(f"  [{i:2d}/{len(src_dbs)}] FAIL ({size_mb:6.1f} MB, {dt:5.2f}s) {src.relative_to(profile.encrypted_root)}: {friendly_error(err)}")
-                results.append((src.name, False, err, src))
+            if res.swap_failed:
+                print(f"  [SWAP-FAIL] {src.name}: {res.error}")
+                n_ok += 1
+                swap_failed += 1
+                cache.forget(src)
+            elif not res.ok:
+                print(f"  [{i:2d}/{len(src_dbs)}] FAIL ({size_mb:6.1f} MB, {dt:5.2f}s) {src.relative_to(profile.encrypted_root)}: {friendly_error(res.error or '')}")
+                n_fail += 1
                 # Cache may now be lying about this file — drop it so the next
                 # refresh actually retries instead of marking it as fresh.
                 cache.forget(src)
             else:
                 print(f"  [{i:2d}/{len(src_dbs)}] OK   ({size_mb:6.1f} MB, {dt:5.2f}s) {src.name}")
-                results.append((src.name, True, None, src))
-
-        print(f"\n[INFO] 解密耗时 {time.time() - t_total:.2f}s")
-
-        # Atomic per-file swap: copy into a sibling .tmp on the destination
-        # filesystem (so os.replace is atomic), then rename. Avoids the brief
-        # window where dst doesn't exist that `unlink → shutil.move` opens, and
-        # eliminates the corrupt-half-decrypted-DB case if Murmur is killed
-        # between unlink and move.
-        print("\n[INFO] swap 到目标目录...")
-        moved = 0
-        for fname, ok, _, src_path in results:
-            if not ok:
-                continue
-            src_f = staging / fname
-            dst_f = dst_dir / fname
-            tmp_f = dst_dir / (fname + ".swap-tmp")
-            try:
-                # Clean up companion files left from the previous decrypt.
-                for ext in ('-wal', '-shm', '-journal'):
-                    sc = dst_dir / (fname + ext)
-                    if sc.exists():
-                        sc.unlink()
-                if tmp_f.exists():
-                    tmp_f.unlink()
-                shutil.copy2(src_f, tmp_f)  # cross-filesystem-safe write
-                os.replace(tmp_f, dst_f)    # atomic same-fs rename
-                src_f.unlink(missing_ok=True)
+                _print_wal(res)
+                n_ok += 1
                 moved += 1
-                # Replay any pending WAL frames into the freshly-swapped DB so
-                # the user sees post-checkpoint messages. WAL is encrypted with
-                # the same key+salt as the main DB; failure to apply is silent
-                # (best-effort) since plain SQLite would just open without WAL.
-                applied, wal_err = _apply_wal_best_effort(src_path, dst_f, key_hex)
-                if applied:
-                    print(f"      WAL: 合并 {applied} 帧")
-                elif wal_err:
-                    print(f"      WAL: 跳过（{wal_err}）")
-                # Only mark cache after the swap actually landed — otherwise a
-                # crash between decrypt and swap would leave the cache thinking
-                # this file is fresh while the dst is still the old version.
-                cache.mark_done(src_path)
-            except OSError as e:
-                print(f"  [SWAP-FAIL] {fname}: {e}")
-                if tmp_f.exists():
-                    try:
-                        tmp_f.unlink()
-                    except OSError:
-                        pass
-                swap_failed += 1
+                # Only mark after the swap landed, and with the snapshot's
+                # signature (not the current stat) so a write that raced the
+                # snapshot is picked up next time.
+                if res.signature is not None:
+                    cache.mark_done(src, res.signature)
+                else:
+                    cache.forget(src)
+        print(f"\n[INFO] 解密耗时 {time.time() - t_total:.2f}s")
     finally:
         # Always clean staging — even on Ctrl-C — so we don't leak GBs of
         # decrypted scratch data into TMPDIR.
@@ -541,8 +673,6 @@ def main():
         except Exception as e:
             print(f"[WARN] 缓存写入失败: {e}")
 
-    n_ok = sum(1 for _, ok, _, _ in results if ok)
-    n_fail = len(results) - n_ok
     summary = (
         f"\n[DONE] 新解密 {n_ok}，缓存命中 {skipped_cached}，swap {moved}，失败 {n_fail}"
         + (f"，swap 失败 {swap_failed}" if swap_failed else "")

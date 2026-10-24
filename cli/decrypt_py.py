@@ -168,10 +168,18 @@ def decrypt_db(src_path: Path, dst_path: Path, key_hex: str, *, pre_derived: boo
         raise
 
 
-_WAL_HEADER_SIZE = 32
-_WAL_FRAME_HEADER_SIZE = 24
-_WAL_MAGIC_LE = 0x377F0682
-_WAL_MAGIC_BE = 0x377F0683
+try:
+    from wal_frames import (  # noqa: E402
+        WAL_HEADER_SIZE as _WAL_HEADER_SIZE,
+        WAL_FRAME_HEADER_SIZE as _WAL_FRAME_HEADER_SIZE,
+        valid_wal_frames,
+    )
+except ImportError:  # imported as cli.decrypt_py
+    from cli.wal_frames import (  # type: ignore[no-redef]  # noqa: E402
+        WAL_HEADER_SIZE as _WAL_HEADER_SIZE,
+        WAL_FRAME_HEADER_SIZE as _WAL_FRAME_HEADER_SIZE,
+        valid_wal_frames,
+    )
 
 
 def decrypt_wal(src_db: Path, src_wal: Path, dst_db: Path, key_hex: str,
@@ -220,7 +228,12 @@ def decrypt_wal(src_db: Path, src_wal: Path, dst_db: Path, key_hex: str,
         if len(key_hex) != 64:
             return 0
         try:
-            key_bytes = key_hex.encode("utf-8") if isinstance(key_hex, str) else key_hex
+            # Same passphrase bytes as decrypt_db(): the 32 raw key bytes, NOT
+            # the 64 ASCII hex chars. (Deriving from the ASCII form never
+            # matched the page HMAC, so WAL merge silently applied 0 frames
+            # on the global-key / Windows path.)
+            hex_str = key_hex.decode("ascii") if isinstance(key_hex, bytes) else key_hex
+            key_bytes = bytes.fromhex(hex_str)
             aes_key, hmac_key = _derive_keys(key_bytes, salt)
         except Exception:
             return 0
@@ -230,25 +243,22 @@ def decrypt_wal(src_db: Path, src_wal: Path, dst_db: Path, key_hex: str,
     if len(wal) < _WAL_HEADER_SIZE:
         return 0
 
-    import struct
-    magic = struct.unpack(">I", wal[0:4])[0]
-    if magic not in (_WAL_MAGIC_LE, _WAL_MAGIC_BE):
-        return 0
-    page_size = struct.unpack(">I", wal[8:12])[0]
-    if page_size != PAGE_SIZE:
+    # Only replay committed frames of the *current* WAL generation: after a
+    # checkpoint SQLite rewrites the -wal from the top with new salts, and the
+    # tail still holds older-generation frames that pass the page HMAC but
+    # would roll pages back to stale content. See wal_frames.py.
+    frames = valid_wal_frames(wal, PAGE_SIZE)
+    if not frames:
         return 0
 
     backend = default_backend()
     frame_total = _WAL_FRAME_HEADER_SIZE + PAGE_SIZE
-    n_frames = (len(wal) - _WAL_HEADER_SIZE) // frame_total
 
     applied = 0
     with dst_db.open("r+b") as df:
-        for fi in range(n_frames):
-            offset = _WAL_HEADER_SIZE + fi * frame_total
-            page_no = struct.unpack(">I", wal[offset:offset + 4])[0]
-            if page_no <= 0:
-                break
+        for fr in frames:
+            offset = fr.offset
+            page_no = fr.page_no
             page_data = wal[offset + _WAL_FRAME_HEADER_SIZE: offset + frame_total]
             if len(page_data) != PAGE_SIZE:
                 break
