@@ -161,8 +161,10 @@ class FridaInstaller:
 # ------------------------------------------------------------ DB pages ----
 
 def _verify(page1: bytes, key_hex: str) -> bool:
+    # Same page-1 HMAC check as decrypt_py, but hashlib-only (no
+    # `cryptography` import) so it also works in a bare test env.
     sys.path.insert(0, str(CLI_DIR))
-    from decrypt_py import verify_candidate_key
+    from hook_cc_key_frida import verify_candidate_key
     try:
         return verify_candidate_key(page1, bytes.fromhex(key_hex))
     except ValueError:
