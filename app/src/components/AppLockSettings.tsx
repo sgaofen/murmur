@@ -5,7 +5,7 @@ import type { FormEvent, ReactNode } from 'react';
 import { Button, Callout, Card, CardHeader, Chip, SegmentedControl, Skeleton } from '../ui';
 import { IconEye, IconEyeOff } from '../ui/icons';
 import {
-  APP_LOCK_STATUS_EVENT, IDLE_LABEL, disableAppLock, getAppLockStatus, lockApp, resetHint,
+  APP_LOCK_STATUS_EVENT, IDLE_LABEL, disableAppLock, getAppLockStatus, requestLock, resetHint,
   setAppLockIdle, setAppLockPassword,
 } from '../data/appLock';
 import type { AppLockResult, AppLockStatus } from '../data/appLock';
@@ -124,7 +124,7 @@ export function AppLockSettings() {
               />
             ) : (
               <div className="app-lock-settings__actions">
-                <Button size="sm" variant="primary" onClick={() => lockApp()}>立即锁定</Button>
+                <Button size="sm" variant="primary" onClick={requestLock}>立即锁定</Button>
                 <Button size="sm" variant="secondary" onClick={() => { setNotice(null); setMode('change'); }}>修改密码</Button>
                 <Button size="sm" variant="ghost" onClick={() => { setNotice(null); setMode('disable'); }}>关闭应用锁</Button>
                 {notice && <span className="app-lock-settings__ok">{notice}</span>}

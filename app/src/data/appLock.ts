@@ -75,8 +75,16 @@ async function post(path: string, body: object): Promise<AppLockResult> {
   return result;
 }
 
+/** Ask AppLockGate to lock now (it retries until the backend confirms). */
+export const APP_LOCK_REQUEST_EVENT = 'murmur:app-lock-request';
+export function requestLock(): void {
+  window.dispatchEvent(new Event(APP_LOCK_REQUEST_EVENT));
+}
+
 export const unlockApp = (password: string) => post('/api/app-lock/unlock', { password });
 export const lockApp = () => post('/api/app-lock/lock', {});
+/** Report user input; the backend auto-locks after idle_minutes without it. */
+export const reportActivity = () => post('/api/app-lock/activity', {});
 export const setAppLockPassword = (password: string, currentPassword?: string, idleMinutes?: number) =>
   post('/api/app-lock/set', { password, current_password: currentPassword, idle_minutes: idleMinutes });
 export const disableAppLock = (currentPassword: string) =>

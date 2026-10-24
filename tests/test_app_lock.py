@@ -1,5 +1,7 @@
 """App lock: hashing, back-off, the 423 gate on the HTTP API, unlock / disable."""
+import hashlib
 import json
+import os
 import sqlite3
 import sys
 import tempfile
@@ -53,6 +55,21 @@ class HashTest(unittest.TestCase):
         for rec in ({}, {"algo": "md5"}, {"algo": "pbkdf2_sha256", "iterations": "x", "salt": "zz", "hash": ""},
                     {"algo": "pbkdf2_sha256", "iterations": 0, "salt": "00", "hash": "00"}):
             self.assertFalse(app_lock.verify_password("pw1234", rec))
+
+    def test_nfc_normalized(self) -> None:
+        composed, decomposed = "café!", "café!"
+        rec = app_lock.hash_password(decomposed, iterations=FAST)
+        self.assertTrue(app_lock.verify_password(composed, rec))
+        self.assertTrue(app_lock.verify_password(decomposed, rec))
+
+    def test_legacy_unnormalized_hash_still_verifies(self) -> None:
+        # A record hashed from the raw (decomposed) string, as before NFC.
+        decomposed = "café!"
+        salt = b"\x01" * 16
+        rec = {"algo": "pbkdf2_sha256", "iterations": FAST, "salt": salt.hex(),
+               "hash": hashlib.pbkdf2_hmac("sha256", decomposed.encode("utf-8"), salt, FAST).hex()}
+        self.assertTrue(app_lock.verify_password(decomposed, rec))
+        self.assertFalse(app_lock.verify_password("cafe!", rec))
 
     def test_codes_registered(self) -> None:
         for code in (app_lock.APP_LOCKED, app_lock.APP_LOCK_WRONG_PASSWORD,
@@ -149,6 +166,79 @@ class AppLockStateTest(unittest.TestCase):
         self.assertFalse(lock.is_locked())
         self.assertEqual(lock.status()["failed_attempts"], 0)
 
+    def test_delay_never_overflows(self) -> None:
+        self.assertEqual(app_lock.retry_delay(10 ** 6), app_lock.MAX_DELAY)
+
+    def test_clock_rollback_caps_wait(self) -> None:
+        lock = self.make()
+        lock.set_password("pw1234")
+        lock.lock()
+        for _ in range(app_lock.FREE_ATTEMPTS + 6):
+            try:
+                lock.unlock("nope")
+            except app_lock.AppLockError:
+                pass
+            self.clock.t += app_lock.MAX_DELAY
+        with self.assertRaises(app_lock.AppLockError):
+            lock.unlock("nope")  # starts a fresh MAX_DELAY wait
+        self.clock.t -= 10 ** 7  # wall clock jumps back ~4 months
+        self.assertLessEqual(lock.status()["retry_after"], app_lock.MAX_DELAY)
+        self.assertLessEqual(self.make().status()["retry_after"], app_lock.MAX_DELAY)
+        self.clock.t += app_lock.MAX_DELAY
+        lock.unlock("pw1234")
+        self.assertFalse(lock.is_locked())
+
+    def test_backend_idle_autolock(self) -> None:
+        lock = self.make()
+        lock.set_password("pw1234", idle_minutes=5)
+        self.clock.t += 299
+        self.assertFalse(lock.is_locked())
+        self.assertTrue(lock.touch())
+        self.clock.t += 299
+        self.assertFalse(lock.is_locked())
+        self.clock.t += 2
+        self.assertTrue(lock.is_locked())
+        self.assertTrue(lock.status()["locked"])
+        self.assertFalse(lock.touch())  # activity can't undo the lock
+        self.assertTrue(lock.is_locked())
+        lock.unlock("pw1234")
+        self.clock.t += 299
+        self.assertFalse(lock.is_locked())
+
+    def test_idle_never(self) -> None:
+        lock = self.make()
+        lock.set_password("pw1234", idle_minutes=0)
+        self.clock.t += 10 ** 6
+        self.assertFalse(lock.is_locked())
+
+    def test_idle_clock_rollback_restarts_window(self) -> None:
+        lock = self.make()
+        lock.set_password("pw1234", idle_minutes=5)
+        self.clock.t -= 10 ** 6
+        self.assertFalse(lock.is_locked())
+        self.clock.t += 299
+        self.assertFalse(lock.is_locked())
+        self.clock.t += 2
+        self.assertTrue(lock.is_locked())
+
+    def test_overlong_password_is_a_failed_attempt(self) -> None:
+        lock = self.make()
+        lock.set_password("pw1234")
+        lock.lock()
+        with self.assertRaises(app_lock.AppLockError) as cm:
+            lock.unlock("x" * (app_lock.MAX_PASSWORD_LEN + 1))
+        self.assertEqual(cm.exception.code, app_lock.APP_LOCK_WRONG_PASSWORD)
+        self.assertEqual(lock.status()["failed_attempts"], 1)
+        with self.assertRaises(app_lock.AppLockError):
+            lock.set_password("y" * (app_lock.MAX_PASSWORD_LEN + 1))
+
+    @unittest.skipIf(os.name == "nt", "POSIX file modes")
+    def test_lock_file_is_private(self) -> None:
+        lock = self.make()
+        lock.set_password("pw1234")
+        self.assertEqual(os.stat(self.path).st_mode & 0o777, 0o600)
+        self.assertFalse(self.path.with_name(self.path.name + ".tmp").exists())
+
     def test_delay_is_capped(self) -> None:
         self.assertEqual(app_lock.retry_delay(0), 0)
         self.assertEqual(app_lock.retry_delay(100), app_lock.MAX_DELAY)
@@ -185,6 +275,17 @@ class AppLockStateTest(unittest.TestCase):
         self.assertEqual(self.make().idle_minutes, 0)
         with self.assertRaises(app_lock.AppLockError):
             lock.set_idle_minutes(10)
+
+
+class ReleaseBuildTest(unittest.TestCase):
+    def test_release_build_has_no_devtools(self) -> None:
+        # With the webview inspector in release builds, anyone at the lock
+        # screen could open Inspect and call Tauri commands behind the lock.
+        cargo = (ROOT / "app" / "src-tauri" / "Cargo.toml").read_text(encoding="utf-8")
+        deps = [ln for ln in cargo.splitlines() if ln.strip().startswith("tauri ")
+                or ln.strip().startswith("tauri=")]
+        self.assertEqual(len(deps), 1, deps)
+        self.assertNotIn("devtools", deps[0])
 
 
 class ApiGateTest(unittest.TestCase):
@@ -309,6 +410,51 @@ class ApiGateTest(unittest.TestCase):
         self.assertEqual(self.call("/api/app-lock/lock", {})[1]["locked"], False)
         self.assertEqual(self.call("/api/info")[0], 200)
 
+    def raw_post(self, path: str, body: bytes):
+        port = self.server.server_address[1]
+        req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=body,
+                                     headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return resp.status, json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read().decode("utf-8"))
+
+    def test_body_size_limit(self) -> None:
+        self.call("/api/app-lock/set", {"password": "pw1234"})
+        self.call("/api/app-lock/lock", {})
+        big = json.dumps({"password": "a" * (app_lock.MAX_BODY_BYTES + 10)}).encode("utf-8")
+        status, body = self.raw_post("/api/app-lock/unlock", big)
+        self.assertEqual((status, body["code"]), (413, ec.APP_LOCK_INVALID))
+        self.assertEqual(self.call("/api/app-lock/status")[1]["failed_attempts"], 0)
+        # Fits in 4 KB but is longer than any password: a failed attempt.
+        status, body = self.call("/api/app-lock/unlock", {"password": "a" * 1000})
+        self.assertEqual((status, body["code"]), (401, ec.APP_LOCK_WRONG_PASSWORD))
+        self.assertEqual(self.call("/api/app-lock/status")[1]["failed_attempts"], 1)
+
+    def test_backend_idle_lock_ignores_data_polling(self) -> None:
+        self.call("/api/app-lock/set", {"password": "pw1234", "idle_minutes": 5})
+        self.clock.t += 200
+        self.assertEqual(self.call("/api/info")[0], 200)  # a poll, not activity
+        self.clock.t += 101
+        status, body = self.call("/api/info")
+        self.assertEqual((status, body["code"]), (423, ec.APP_LOCKED))
+        self.assertTrue(self.call("/api/app-lock/status")[1]["locked"])
+
+    def test_activity_heartbeat_keeps_unlocked(self) -> None:
+        self.call("/api/app-lock/set", {"password": "pw1234", "idle_minutes": 5})
+        for _ in range(3):
+            self.clock.t += 250
+            status, body = self.call("/api/app-lock/activity", {})
+            self.assertEqual(status, 200)
+            self.assertFalse(body["locked"])
+        self.assertEqual(self.call("/api/info")[0], 200)
+        self.clock.t += 301
+        # Once locked, a heartbeat is refused and does not unlock.
+        status, body = self.call("/api/app-lock/activity", {})
+        self.assertEqual((status, body["code"]), (423, ec.APP_LOCKED))
+        self.assertEqual(self.call("/api/info")[0], 423)
+
     def test_bad_input(self) -> None:
         status, body = self.call("/api/app-lock/set", {"password": "ab"})
         self.assertEqual((status, body["code"]), (400, ec.APP_LOCK_INVALID))
@@ -316,6 +462,10 @@ class ApiGateTest(unittest.TestCase):
         self.assertEqual((status, body["code"]), (400, ec.APP_LOCK_INVALID))
         status, _ = self.call("/api/app-lock/nope", {})
         self.assertEqual(status, 404)
+        # JSON false is not "0 minutes" (bool is an int subclass in Python).
+        status, body = self.call("/api/app-lock/set", {"password": "pw1234", "idle_minutes": False})
+        self.assertEqual(status, 200)
+        self.assertEqual(body["idle_minutes"], app_lock.DEFAULT_IDLE_MINUTES)
 
 
 if __name__ == "__main__":

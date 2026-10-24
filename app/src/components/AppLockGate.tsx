@@ -12,7 +12,8 @@ import type { FormEvent, ReactNode } from 'react';
 import { Button } from '../ui';
 import { IconEye, IconEyeOff } from '../ui/icons';
 import {
-  APP_LOCK_STATUS_EVENT, APP_LOCKED_EVENT, getAppLockStatus, lockApp, resetHint, unlockApp,
+  APP_LOCK_REQUEST_EVENT, APP_LOCK_STATUS_EVENT, APP_LOCKED_EVENT, getAppLockStatus, lockApp, reportActivity,
+  resetHint, unlockApp,
 } from '../data/appLock';
 import type { AppLockStatus } from '../data/appLock';
 import './AppLock.css';
@@ -50,49 +51,123 @@ export function AppLockGate({ children }: { children: ReactNode }) {
     return () => { cancelled = true; window.clearTimeout(timer); window.clearTimeout(firstTry); };
   }, [apply]);
 
-  // Changes made in Settings, and 423s seen by any request.
+  // Lock locally first (data disappears immediately), then make sure the
+  // backend agrees. If that request fails, keep retrying while the lock
+  // screen says so: until the backend is locked, a reload would show data.
+  // (The backend also locks itself after idle_minutes without activity, so
+  // an idle lock holds even if every retry fails.)
+  const [lockSync, setLockSync] = useState<'ok' | 'pending' | 'failed'>('ok');
+  const syncing = lockSync !== 'ok';
+  const engageLock = useCallback(() => {
+    setPhase('locked');
+    setLockSync('pending');
+  }, []);
   useEffect(() => {
-    const onStatus = (e: Event) => apply((e as CustomEvent<AppLockStatus>).detail);
-    const onLocked = () => { getAppLockStatus().then(apply).catch(() => setPhase('locked')); };
+    if (phase !== 'locked' || !syncing) return;
+    let cancelled = false;
+    let timer = 0;
+    const attempt = async () => {
+      const r = await lockApp();
+      if (cancelled) return;
+      if (r.ok && r.lock) {
+        setLockSync('ok');
+        apply(r.lock);
+        return;
+      }
+      setLockSync('failed');
+      timer = window.setTimeout(attempt, 2000);
+    };
+    attempt();
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [phase, syncing, apply]);
+
+  // Changes made in Settings, 423s seen by any request, and "lock now".
+  useEffect(() => {
+    const onStatus = (e: Event) => {
+      const s = (e as CustomEvent<AppLockStatus>).detail;
+      setStatus(s);
+      // A stale "unlocked" status must not undo a lock still being synced.
+      setPhase(p => (s.enabled && s.locked ? 'locked' : p === 'locked' && s.enabled ? p : 'open'));
+    };
+    const onLocked = () => {
+      setPhase('locked');
+      getAppLockStatus().then(s => { setStatus(s); if (!s.locked) setLockSync('pending'); }).catch(() => {});
+    };
     window.addEventListener(APP_LOCK_STATUS_EVENT, onStatus);
     window.addEventListener(APP_LOCKED_EVENT, onLocked);
+    window.addEventListener(APP_LOCK_REQUEST_EVENT, engageLock);
     return () => {
       window.removeEventListener(APP_LOCK_STATUS_EVENT, onStatus);
       window.removeEventListener(APP_LOCKED_EVENT, onLocked);
+      window.removeEventListener(APP_LOCK_REQUEST_EVENT, engageLock);
     };
-  }, [apply]);
+  }, [engageLock]);
 
-  // Idle auto-lock. Checked on an interval (not a single long timeout) so a
-  // laptop waking from sleep past the deadline locks right away.
+  // Idle auto-lock (the backend enforces the same timeout on its own).
+  // Checked on an interval and, crucially, the moment the window becomes
+  // visible or focused again — after sleep or un-minimizing, the lock goes
+  // up before the next interval tick could.
   const lastActive = useRef(Date.now());
+  const lastBeat = useRef(0);
   const enabled = !!status?.enabled;
   const idleMinutes = status?.idle_minutes ?? 0;
   useEffect(() => {
     if (phase !== 'open' || !enabled) return;
     lastActive.current = Date.now();
-    const bump = () => { lastActive.current = Date.now(); };
+    lastBeat.current = 0;
+    const idleExpired = () => idleMinutes > 0 && Date.now() - lastActive.current >= idleMinutes * 60_000;
+    const beat = () => {
+      // Tell the backend someone is here, at most every 30 s.
+      if (Date.now() - lastBeat.current < 30_000) return;
+      lastBeat.current = Date.now();
+      reportActivity().then(r => { if (r.code === 'APP_LOCKED') window.dispatchEvent(new Event(APP_LOCKED_EVENT)); });
+    };
+    const check = () => {
+      if (idleExpired()) { engageLock(); return; }
+      // The backend may have locked on its own (idle, another window, restart).
+      getAppLockStatus().then(s => { if (s.enabled && s.locked) { setStatus(s); setPhase('locked'); } }).catch(() => {});
+    };
+    const bump = () => {
+      // Input after the deadline (e.g. the first keypress after wake) must
+      // not count as activity before the lock has gone up.
+      if (idleExpired()) { engageLock(); return; }
+      lastActive.current = Date.now();
+      beat();
+    };
+    const onVisible = () => { if (document.visibilityState === 'visible') check(); };
+    beat();
     for (const ev of ACTIVITY_EVENTS) window.addEventListener(ev, bump, { passive: true, capture: true });
-    const tick = window.setInterval(() => {
-      if (idleMinutes > 0 && Date.now() - lastActive.current >= idleMinutes * 60_000) {
-        setPhase('locked');  // hide data first, then tell the backend
-        lockApp().then(r => { if (r.lock) apply(r.lock); });
-        return;
-      }
-      // Another window (or a restart) may have locked the backend.
-      getAppLockStatus().then(s => { if (s.enabled && s.locked) apply(s); }).catch(() => {});
-    }, 10_000);
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', check);
+    window.addEventListener('pageshow', check);
+    const tick = window.setInterval(check, 10_000);
     return () => {
       for (const ev of ACTIVITY_EVENTS) window.removeEventListener(ev, bump, { capture: true });
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', check);
+      window.removeEventListener('pageshow', check);
       window.clearInterval(tick);
     };
-  }, [phase, enabled, idleMinutes, apply]);
+  }, [phase, enabled, idleMinutes, engageLock]);
 
   if (phase === 'probing') return <div className="app-lock-blank" />;
-  if (phase === 'locked') return <LockScreen initialRetry={status?.retry_after ?? 0} onUnlocked={apply} />;
+  if (phase === 'locked') {
+    return (
+      <LockScreen
+        initialRetry={status?.retry_after ?? 0}
+        syncFailed={lockSync === 'failed'}
+        onUnlocked={(s) => { setLockSync('ok'); apply(s); }}
+      />
+    );
+  }
   return <>{children}</>;
 }
 
-function LockScreen({ initialRetry, onUnlocked }: { initialRetry: number; onUnlocked: (s: AppLockStatus) => void }) {
+function LockScreen({ initialRetry, syncFailed, onUnlocked }: {
+  initialRetry: number;
+  syncFailed: boolean;
+  onUnlocked: (s: AppLockStatus) => void;
+}) {
   const [password, setPassword] = useState('');
   const [show, setShow] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -145,6 +220,9 @@ function LockScreen({ initialRetry, onUnlocked }: { initialRetry: number; onUnlo
         </svg>
         <h1 id="app-lock-title" className="app-lock__title">Murmur 已锁定</h1>
         <p className="app-lock__lede">输入应用锁密码继续</p>
+        {syncFailed && (
+          <p className="app-lock__sync" role="status">还没能通知本地服务上锁，正在重试…</p>
+        )}
 
         <div className="app-lock-field">
           <input

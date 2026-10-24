@@ -4518,9 +4518,27 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             cls.app_lock = _app_lock.AppLock()
         return cls.app_lock
 
-    def _read_json_opts(self) -> dict:
-        length = int(self.headers.get("Content-Length") or 0)
-        body = self.rfile.read(length) if length else b"{}"
+    def _read_json_opts(self, limit: Optional[int] = None) -> dict:
+        """Parse a small JSON object body. With ``limit``, an oversized or
+        malformed Content-Length raises ``_app_lock.AppLockError`` (413/400)
+        before anything is read."""
+        raw_len = self.headers.get("Content-Length") or "0"
+        try:
+            length = int(raw_len)
+        except ValueError:
+            length = -1
+        if limit is not None and length < 0:
+            self.close_connection = True
+            raise _app_lock.AppLockError(_ec.APP_LOCK_INVALID, "请求格式不对", 400)
+        if limit is not None and length > limit:
+            self.close_connection = True
+            # Drain a moderately sized body so closing the socket doesn't
+            # reset the connection before the client reads the 413; anything
+            # bigger is left unread.
+            if length <= 64 * 1024:
+                self.rfile.read(length)
+            raise _app_lock.AppLockError(_ec.APP_LOCK_INVALID, "请求太大", 413)
+        body = self.rfile.read(length) if length > 0 else b"{}"
         try:
             opts = json.loads(body.decode("utf-8") or "{}")
         except (json.JSONDecodeError, UnicodeDecodeError):
@@ -4555,20 +4573,26 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 return self._send_json(lock.status())
             if method != "POST":
                 return self._send_json({"error": "method not allowed"}, 405)
-            opts = self._read_json_opts()
+            opts = self._read_json_opts(limit=_app_lock.MAX_BODY_BYTES)
+            idle = opts.get("idle_minutes")
+            if isinstance(idle, bool) or not isinstance(idle, int):
+                idle = None
             if path == "/api/app-lock/unlock":
                 lock.unlock(opts.get("password"))
             elif path == "/api/app-lock/lock":
                 lock.lock()
+            elif path == "/api/app-lock/activity":
+                # User input reported by the frontend (throttled). This, not
+                # ordinary data requests, keeps the idle timer from firing:
+                # pages poll job status in the background, which must not
+                # count as someone sitting at the keyboard.
+                lock.touch()
             elif path == "/api/app-lock/set":
-                idle = opts.get("idle_minutes")
-                lock.set_password(opts.get("password"), opts.get("current_password"),
-                                  idle if isinstance(idle, int) else None)
+                lock.set_password(opts.get("password"), opts.get("current_password"), idle)
             elif path == "/api/app-lock/disable":
                 lock.disable(opts.get("current_password"))
             elif path == "/api/app-lock/idle":
-                idle = opts.get("idle_minutes")
-                lock.set_idle_minutes(idle if isinstance(idle, int) else -1)
+                lock.set_idle_minutes(idle if idle is not None else -1)
             else:
                 return self._send_json({"error": "not found"}, 404)
         except _app_lock.AppLockError as e:
