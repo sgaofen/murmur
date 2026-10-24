@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { cancelLiveKey, getLiveKeyStatus, installFrida, startLiveKey } from '../data/api';
 import type { LiveKeyStatus } from '../data/api';
+import { PrivateCopyCapture } from './PrivateCopyCapture';
 
 interface Props {
   /** Keys are saved — run the existing decrypt flow. */
@@ -41,6 +42,9 @@ export function LiveKeyCapture({ onDecrypt, reason = 'manual', wechatVersion, on
   const [seconds, setSeconds] = useState(90);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Entry point: let the user pick the Frida flow (below) or the Frida-free
+  // "private copy" flow (PrivateCopyCapture). null = chooser not answered yet.
+  const [method, setMethod] = useState<'frida' | 'private-copy' | null>(null);
   const pollRef = useRef<number | null>(null);
 
   const refresh = useCallback(async (coverage = false) => {
@@ -99,6 +103,14 @@ export function LiveKeyCapture({ onDecrypt, reason = 'manual', wechatVersion, on
     } catch (e: any) {
       setErr(e?.message || String(e));
     }
+  }
+
+  if (method === 'private-copy') {
+    return <PrivateCopyCapture onDecrypt={onDecrypt} onBack={() => setMethod(null)} />;
+  }
+  if (method === null) {
+    return <MethodChooser reason={reason} wechatVersion={wechatVersion}
+      onPick={setMethod} onPaste={onPaste} />;
   }
 
   if (!st) {
@@ -189,6 +201,46 @@ export function LiveKeyCapture({ onDecrypt, reason = 'manual', wechatVersion, on
     </>
   );
 }
+
+function MethodChooser({ reason, wechatVersion, onPick, onPaste }: {
+  reason: Props['reason']; wechatVersion?: string | null;
+  onPick: (m: 'frida' | 'private-copy') => void; onPaste?: () => void;
+}) {
+  return (
+    <>
+      <Intro reason={reason} wechatVersion={wechatVersion} />
+      <div className="et-meta" style={{ marginBottom: 10 }}>选一种抓取方式：</div>
+      <button onClick={() => onPick('frida')} style={methodCard}>
+        <div style={{ fontWeight: 600, fontSize: 14, color: 'var(--et-ink)' }}>Frida 实时抓取</div>
+        <div className="et-meta" style={{ marginTop: 4, lineHeight: 1.6 }}>
+          挂钩正在运行的微信。需要装一次 Frida，并会弹一次系统密码窗（管理员权限）。不改动微信本体。
+        </div>
+      </button>
+      <button onClick={() => onPick('private-copy')} style={{ ...methodCard, marginTop: 10 }}>
+        <div style={{ fontWeight: 600, fontSize: 14, color: 'var(--et-ink)' }}>
+          免 Frida 方式 <span style={{ color: 'var(--et-orange)', fontSize: 12 }}>推荐给不想装 Frida / 不想输管理员密码的人</span>
+        </div>
+        <div className="et-meta" style={{ marginTop: 4, lineHeight: 1.6 }}>
+          把微信复制一份到 Murmur 自己的目录、重签名后打开这份副本来抓。不装 Frida、不用管理员密码，不动 /Applications/WeChat.app。
+        </div>
+      </button>
+      {onPaste && (
+        <button onClick={onPaste} style={{
+          all: 'unset', cursor: 'pointer', display: 'block', width: '100%', textAlign: 'center',
+          padding: '12px 0', marginTop: 10, fontSize: 12, color: 'var(--et-mute)',
+        }}>
+          或者：手动粘贴密钥
+        </button>
+      )}
+    </>
+  );
+}
+
+const methodCard: React.CSSProperties = {
+  all: 'unset', cursor: 'pointer', display: 'block', width: '100%', boxSizing: 'border-box',
+  padding: '12px 14px', borderRadius: 8,
+  background: 'var(--et-paper-2)', border: '0.5px solid var(--et-line-2)',
+};
 
 function Intro({ reason, wechatVersion }: { reason: Props['reason']; wechatVersion?: string | null }) {
   return (
