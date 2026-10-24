@@ -6323,7 +6323,11 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
 
         if path == "/api/qq/extract-key":
             timeout = int(opts.get("timeout", 240))
-            r = _qdec.extract_key_via_powershell(timeout=timeout)
+            prefer_qq = str(opts.get("qq", "") or "").strip() or None
+            # Every candidate the script captures is HMAC-checked against
+            # nt_msg.db; only a verified key is returned (issue #5).
+            dbs = _qdec.verify_dbs_for_profiles(_qpaths.discover_qq_profiles(), prefer_qq)
+            r = _qdec.extract_key_via_powershell(timeout=timeout, verify_dbs=dbs)
             return self._send_json(r)
 
         if path == "/api/qq/save-key":
@@ -6331,6 +6335,15 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             key = str(opts.get("key", "")).strip()
             if not qq or not key:
                 return self._send_json({"ok": False, "error": "qq + key required"}, 400)
+            # Verify before persisting so a wrong key never gets saved and
+            # then fails later at decrypt time. Verification failures are
+            # 200 + ok:false so the UI can show the Chinese error verbatim.
+            prof = next((p for p in _qpaths.discover_qq_profiles() if p.qq_number == qq), None)
+            if not prof:
+                return self._send_json({"ok": False, "error": f"没找到 QQ {qq} 的数据目录，无法校验 key，未保存。"})
+            ok, err = _qdec.verify_key_for_db(Path(prof.nt_db_dir) / "nt_msg.db", key)
+            if not ok:
+                return self._send_json({"ok": False, "error": f"{err}（未保存）"})
             cfg = self._qq_load_keys_config()
             cfg[qq] = key
             self._qq_save_keys_config(cfg)

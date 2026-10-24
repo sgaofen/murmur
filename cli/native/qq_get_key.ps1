@@ -21,6 +21,27 @@
 .PARAMETER NoDebugForKey
     If specified, skips launching QQ.exe with a debugger. Only performs static analysis.
 
+.PARAMETER TimeoutSeconds
+    Hard limit for the whole debugging session. QQ is terminated when it elapses.
+
+.PARAMETER SettleSeconds
+    After the first plausible 16-char candidate is seen, keep collecting for this
+    many more seconds (the message-DB key usually shows up after login.db's), then stop.
+
+.PARAMETER MaxHits
+    Stop after this many breakpoint hits.
+
+.NOTES (Murmur, issue #5)
+    The breakpointed function is not always the real sqlite3_key_v2: on some
+    wrapper.node builds it is a logging wrapper and R8 holds zDb or the global
+    login.db key instead of pKey. So we do NOT stop at the first hit and do NOT
+    trust a single register. Every hit, we read printable ASCII from the
+    pointers in RCX/RDX/R8/R9 and the stack argument slots, and print each
+    distinct string as
+        MURMUR_KEY_CANDIDATE source=<where> len=<n> hex=<ascii-as-hex>
+    The Python side (cli/qq_decrypt.py) HMAC-verifies every candidate against
+    nt_msg.db page 1 and keeps only the one that decrypts.
+
 .EXAMPLE
     .\v2.ps1
     # Auto-detects installed QQ, analyzes wrapper.node, and extracts the encryption key
@@ -34,7 +55,7 @@
     # Auto-detects QQ, analyzes wrapper.node, but skips debugging to extract the key
 
 .OUTPUTS
-    PSCustomObject with FunctionRVA, LeaInstructionRVA, and optionally Key properties.
+    PSCustomObject with FunctionRVA, LeaInstructionRVA and Candidates (unverified key candidates).
 
 .NOTES
     This script uses Write-Host intentionally for interactive colored output.
@@ -46,7 +67,16 @@ param(
     [string]$WrapperNodePath,
 
     [Parameter()]
-    [switch]$NoDebugForKey
+    [switch]$NoDebugForKey,
+
+    [Parameter()]
+    [int]$TimeoutSeconds = 180,
+
+    [Parameter()]
+    [int]$SettleSeconds = 20,
+
+    [Parameter()]
+    [int]$MaxHits = 400
 )
 
 Set-StrictMode -Version 2.0
@@ -346,15 +376,45 @@ namespace DebugApi
         private bool _breakpointActive;
         private Dictionary<uint, ulong> _steppingThreads = new Dictionary<uint, ulong>();
 
+        // Candidate collection (issue #5): never stop at the first hit.
+        private const string LoginDbFixedKey = "BD156D6710D54D8782F4";
+        private const int MaxCandidates = 300;
+        private readonly int _timeoutMs;
+        private readonly int _settleMs;
+        private readonly int _maxHits;
+        private readonly List<string> _candidates = new List<string>();
+        private readonly HashSet<string> _seen = new HashSet<string>();
+        private readonly Dictionary<string, int> _hitCountOf = new Dictionary<string, int>();
+        private readonly Dictionary<string, int> _lastHitOf = new Dictionary<string, int>();
+        private readonly System.Diagnostics.Stopwatch _clock = new System.Diagnostics.Stopwatch();
+        private long _firstUsefulMs = -1;
+        private int _hits;
+
         public KeyExtractor(string qqExePath, ulong functionRva, Action<string> log, Action<string> logVerbose)
+            : this(qqExePath, functionRva, log, logVerbose, 180, 20, 400)
+        {
+        }
+
+        public KeyExtractor(string qqExePath, ulong functionRva, Action<string> log, Action<string> logVerbose,
+                            int timeoutSeconds, int settleSeconds, int maxHits)
         {
             _qqExePath = qqExePath;
             _functionRva = functionRva;
             _log = log ?? (s => { });
             _logVerbose = logVerbose ?? (s => { });
+            _timeoutMs = Math.Max(10, timeoutSeconds) * 1000;
+            _settleMs = Math.Max(1, settleSeconds) * 1000;
+            _maxHits = Math.Max(1, maxHits);
         }
 
-        public string ExtractKey()
+        public int HitCount { get { return _hits; } }
+
+        /// <summary>
+        /// Launch QQ under the debugger and collect every distinct ASCII string
+        /// seen at the breakpoint. Returns them all; the caller verifies which
+        /// one is the real key (HMAC check against nt_msg.db).
+        /// </summary>
+        public string[] ExtractCandidates()
         {
             _log("正在启动 QQ 进程并附加调试器...");
             _log("QQ.exe 路径: " + _qqExePath);
@@ -367,11 +427,14 @@ namespace DebugApi
 
             _log("QQ 进程已启动。PID: " + _processId);
             _log("等待 wrapper.node 加载...");
-            _log("请在 QQ 窗口中登录目标 QQ 账号。");
+            _log("请在 QQ 窗口中登录目标 QQ 账号。登录后等聊天列表加载出来，脚本会再收集 "
+                 + (_settleMs / 1000) + " 秒后自动结束（最长 " + (_timeoutMs / 1000) + " 秒）。");
 
+            _clock.Start();
             try
             {
-                return DebugLoop();
+                DebugLoop();
+                return _candidates.ToArray();
             }
             finally
             {
@@ -485,22 +548,43 @@ namespace DebugApi
             _breakpointActive = true;
         }
 
-        private string DebugLoop()
+        private void DebugLoop()
         {
             DEBUG_EVENT debugEvent;
             bool shouldContinue = true;
-            string extractedKey = null;  // Store key here instead of returning immediately
+            bool terminating = false;
+            long terminateRequestedMs = 0;
 
             while (shouldContinue)
             {
-                // Wait for debug event with 10 second timeout (like Rust implementation)
-                if (!Native.WaitForDebugEvent(out debugEvent, 10000))
+                // Decide whether we have collected enough. Unlike the upstream
+                // script we never stop at the first hit: the first hits are
+                // login.db (global fixed key) and, on some builds, R8 is not
+                // pKey at all (issue #5).
+                if (!terminating)
+                {
+                    string why = StopReason();
+                    if (why != null)
+                    {
+                        _log(why + "，结束 QQ 进程（共命中断点 " + _hits + " 次，收集到 " + _candidates.Count + " 个候选值）。");
+                        Native.TerminateProcess(_hProcess, 0);
+                        terminating = true;
+                        terminateRequestedMs = _clock.ElapsedMilliseconds;
+                    }
+                }
+                else if (_clock.ElapsedMilliseconds - terminateRequestedMs > 15000)
+                {
+                    _log("等待 QQ 进程退出超时，直接结束调试。");
+                    break;
+                }
+
+                // Short wait so the time-based stop conditions above are checked often.
+                if (!Native.WaitForDebugEvent(out debugEvent, 1000))
                 {
                     int error = Marshal.GetLastWin32Error();
                     // Timeout (ERROR_SEM_TIMEOUT = 121) is normal, continue waiting
-                    if (error == 121)
-                        continue;
-                    _logVerbose("WaitForDebugEvent failed with error: " + error);
+                    if (error != 121)
+                        _logVerbose("WaitForDebugEvent failed with error: " + error);
                     continue;
                 }
 
@@ -564,20 +648,11 @@ namespace DebugApi
                             {
                                 _logVerbose("软件断点在 0x" + exceptionAddress.ToString("X") + " 处被触发");
 
-                                // Restore original byte first
+                                // Restore the original byte, harvest candidates, then
+                                // single-step over the instruction and re-arm the
+                                // breakpoint (see EXCEPTION_SINGLE_STEP below).
                                 RestoreOriginalByte();
-
-                                string foundKey = HandleBreakpoint(debugEvent.dwThreadId);
-                                if (foundKey != null)
-                                {
-                                    // Restore breakpoint before termination (like Rust)
-                                    ReinstallBreakpoint();
-                                    // Store key and request termination
-                                    extractedKey = foundKey;
-                                    Native.TerminateProcess(_hProcess, 0);
-                                    _log("已请求目标进程终止。等待进程退出...");
-                                    // Don't return here - continue processing to receive EXIT_PROCESS_DEBUG_EVENT
-                                }
+                                HandleBreakpoint(debugEvent.dwThreadId);
                             }
                             // System breakpoint or other breakpoints - just continue
                         }
@@ -587,7 +662,8 @@ namespace DebugApi
                             {
                                 _logVerbose("线程 " + debugEvent.dwThreadId + " 中发生单步异常");
                                 ClearTrapFlag(debugEvent.dwThreadId);
-                                ReinstallBreakpoint();
+                                if (!terminating)
+                                    ReinstallBreakpoint();
                                 _steppingThreads.Remove(debugEvent.dwThreadId);
                                 _logVerbose("断点已恢复到 0x" + _breakpointAddress.ToString("X"));
                             }
@@ -617,21 +693,137 @@ namespace DebugApi
                 Native.ContinueDebugEvent(debugEvent.dwProcessId, debugEvent.dwThreadId, continueStatus);
             }
 
-            if (extractedKey != null)
-            {
-                _log("任务完成。");
-                return extractedKey;
-            }
+            _log("调试结束：共命中断点 " + _hits + " 次，收集到 " + _candidates.Count + " 个候选值。");
+        }
 
-            _log("调试循环已退出，未找到密钥");
+        private string StopReason()
+        {
+            long now = _clock.ElapsedMilliseconds;
+            if (now >= _timeoutMs)
+                return "已到总超时 " + (_timeoutMs / 1000) + " 秒";
+            if (_hits >= _maxHits)
+                return "断点命中次数达到上限 " + _maxHits;
+            if (_candidates.Count >= MaxCandidates)
+                return "候选值数量达到上限 " + MaxCandidates;
+            if (_firstUsefulMs >= 0 && now - _firstUsefulMs >= _settleMs)
+                return "16 位候选在多次命中中重复出现后，已继续收集 " + (_settleMs / 1000) + " 秒";
             return null;
         }
 
-        private string HandleBreakpoint(uint threadId)
+        private static bool LooksLikeNonKey(string s)
         {
+            // login.db's global key (or a prefix of it) and 20-hex zDb names
+            // are never the message-DB key.
+            if (s.Length >= 8 && LoginDbFixedKey.StartsWith(s, StringComparison.Ordinal)) return true;
+            if (s.Length != 20) return false;
+            foreach (char c in s)
+            {
+                bool hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+                if (!hex) return false;
+            }
+            return true;
+        }
+
+        private void Emit(string source, byte[] buf, int len, bool countsForSettle)
+        {
+            if (len <= 0 || len > buf.Length) return;
+            for (int i = 0; i < len; i++)
+            {
+                if (buf[i] < 0x20 || buf[i] > 0x7E) return;
+            }
+            string s = Encoding.ASCII.GetString(buf, 0, len);
+            if (_seen.Add(s))
+            {
+                _candidates.Add(s);
+                StringBuilder hex = new StringBuilder(len * 2);
+                for (int i = 0; i < len; i++) hex.Append(buf[i].ToString("X2"));
+                // Machine-readable line parsed by cli/qq_decrypt.py. Printed as soon
+                // as it is found so a killed/timed-out run still yields candidates.
+                _log("MURMUR_KEY_CANDIDATE source=" + source + " len=" + len + " hex=" + hex.ToString());
+            }
+
+            // Settle trigger: after login QQ opens several DBs (nt_msg, profile_info,
+            // group_info, ...) with the same key, so a plausible 16-char value that
+            // shows up in two different hits means the key has been seen. A single
+            // stray string before login must not end the session early.
+            if (!countsForSettle || len != 16 || LooksLikeNonKey(s)) return;
+            int last;
+            if (_lastHitOf.TryGetValue(s, out last) && last == _hits) return;
+            _lastHitOf[s] = _hits;
+            int count;
+            _hitCountOf.TryGetValue(s, out count);
+            count++;
+            _hitCountOf[s] = count;
+            if (count >= 2 && _firstUsefulMs < 0)
+            {
+                _firstUsefulMs = _clock.ElapsedMilliseconds;
+                _log("已多次看到同一个 16 位候选值，再收集 " + (_settleMs / 1000) + " 秒后结束。");
+            }
+        }
+
+        private bool TryRead(ulong ptr, byte[] buf, out int got)
+        {
+            got = 0;
+            // Only plausible user-mode pointers; small integers (e.g. nKey) are skipped.
+            if (ptr < 0x10000 || ptr > 0x7FFFFFFFFFFFUL) return false;
+            UIntPtr read;
+            if (Native.ReadProcessMemory(_hProcess, new IntPtr((long)ptr), buf, new UIntPtr((uint)buf.Length), out read)
+                && (ulong)read > 0)
+            {
+                got = (int)(ulong)read;
+                return true;
+            }
+            // The full read may cross into an unmapped page: retry up to the page end.
+            int toPageEnd = (int)(0x1000 - (ptr & 0xFFF));
+            if (toPageEnd >= buf.Length) return false;
+            if (Native.ReadProcessMemory(_hProcess, new IntPtr((long)ptr), buf, new UIntPtr((uint)toPageEnd), out read)
+                && (ulong)read > 0)
+            {
+                got = (int)(ulong)read;
+                return true;
+            }
+            return false;
+        }
+
+        private void CollectFromPointer(string source, ulong ptr, ulong nKeyHint)
+        {
+            byte[] buf = new byte[128];
+            int got;
+            if (!TryRead(ptr, buf, out got)) return;
+
+            // 1) Bounded by the following argument when it looks like nKey.
+            if (nKeyHint >= 8 && nKeyHint <= 64 && (int)nKeyHint <= got)
+                Emit(source + "/nKey", buf, (int)nKeyHint, true);
+
+            // 2) NUL-terminated string of plausible length.
+            int nul = Array.IndexOf(buf, (byte)0, 0, got);
+            if (nul >= 8 && nul <= 64)
+                Emit(source, buf, nul, true);
+
+            // 3) The passphrase is 16 ASCII bytes and need not be NUL-terminated,
+            //    so also take the first 16 bytes -- unless the whole string is a
+            //    known non-key (login.db constant / 20-hex zDb name).
+            bool knownNonKey = nul == 20 && LooksLikeNonKey(Encoding.ASCII.GetString(buf, 0, 20));
+            if (got >= 16 && (nul < 0 || nul > 16) && !knownNonKey)
+                Emit(source + "/16", buf, 16, false);
+        }
+
+        private ulong ReadStackSlot(ulong rsp, int offset)
+        {
+            byte[] b = new byte[8];
+            UIntPtr read;
+            if (!Native.ReadProcessMemory(_hProcess, new IntPtr((long)(rsp + (ulong)offset)), b, new UIntPtr(8), out read)
+                || (ulong)read != 8)
+                return 0;
+            return BitConverter.ToUInt64(b, 0);
+        }
+
+        private void HandleBreakpoint(uint threadId)
+        {
+            _hits++;
             IntPtr hThread = Native.OpenThread(Native.THREAD_ALL_ACCESS, false, threadId);
             if (hThread == IntPtr.Zero)
-                return null;
+                return;
 
             try
             {
@@ -643,58 +835,40 @@ namespace DebugApi
                 if (!Native.GetThreadContext(hThread, ref ctx))
                 {
                     _logVerbose("获取线程上下文失败");
-                    return null;
+                    return;
                 }
 
                 // Decrement RIP to point back to original instruction
                 ctx.Rip = ctx.Rip - 1;
 
-                // R8 contains the key pointer
-                ulong r8Value = ctx.R8;
-                _logVerbose("R8 = 0x" + r8Value.ToString("X"));
-
-                // Read string from R8
-                byte[] stringBuffer = new byte[256];
-                UIntPtr bytesRead;
-                if (!Native.ReadProcessMemory(_hProcess, (IntPtr)r8Value, stringBuffer, new UIntPtr(256), out bytesRead) || (ulong)bytesRead == 0)
+                // At function entry: RCX, RDX, R8, R9 are args 1-4; [RSP] is the
+                // return address, [RSP+0x08..0x20] the shadow space, and args 5/6
+                // live at [RSP+0x28]/[RSP+0x30]. We don't know which slot holds
+                // pKey on this build, so read them all; each slot's successor is
+                // used as an nKey hint.
+                string[] names = new string[] { "RCX", "RDX", "R8", "R9", "RSP+20", "RSP+28", "RSP+30" };
+                ulong[] vals = new ulong[]
                 {
-                    _logVerbose("从 R8 读取字符串失败");
-                    SetSingleStep(hThread, ref ctx, threadId);
-                    return null;
-                }
+                    ctx.Rcx, ctx.Rdx, ctx.R8, ctx.R9,
+                    ReadStackSlot(ctx.Rsp, 0x20), ReadStackSlot(ctx.Rsp, 0x28), ReadStackSlot(ctx.Rsp, 0x30)
+                };
+                _logVerbose("命中 #" + _hits + ": RCX=0x" + ctx.Rcx.ToString("X") + " RDX=0x" + ctx.Rdx.ToString("X")
+                            + " R8=0x" + ctx.R8.ToString("X") + " R9=0x" + ctx.R9.ToString("X"));
 
-                int nullIndex = Array.IndexOf(stringBuffer, (byte)0);
-                if (nullIndex < 0) nullIndex = (int)(ulong)bytesRead;
-
-                string keyString = Encoding.ASCII.GetString(stringBuffer, 0, nullIndex);
-
-                // Check if it's a valid 16-char ASCII key
-                bool isValidKey = keyString.Length == 16;
-                if (isValidKey)
+                try
                 {
-                    foreach (char c in keyString)
+                    for (int i = 0; i < vals.Length; i++)
                     {
-                        if (c < 32 || c > 126)
-                        {
-                            isValidKey = false;
-                            break;
-                        }
+                        ulong hint = (i + 1 < vals.Length) ? vals[i + 1] : 0;
+                        CollectFromPointer(names[i], vals[i], hint);
                     }
                 }
-
-                if (isValidKey)
+                finally
                 {
-                    _log("");
-                    _log("========================================");
-                    _log("找到密钥: " + keyString);
-                    _log("========================================");
-                    return keyString;
-                }
-                else
-                {
-                    _logVerbose("非目标调用，R8 字符串: " + keyString + " (长度: " + keyString.Length + ")");
+                    // Always let the debuggee continue: write back the
+                    // decremented RIP, step over the original instruction, and
+                    // re-arm the breakpoint on EXCEPTION_SINGLE_STEP.
                     SetSingleStep(hThread, ref ctx, threadId);
-                    return null;
                 }
             }
             finally
@@ -1200,7 +1374,7 @@ Write-Host "函数 RVA: 0x$($functionBeginRVA.ToString('X'))" -ForegroundColor G
 $result = [PSCustomObject]@{
     FunctionRVA       = $functionBeginRVA
     LeaInstructionRVA = [uint64]$leaInstructionRVA
-    Key               = $null
+    Candidates        = @()
 }
 
 Write-Host ""
@@ -1230,27 +1404,32 @@ if (-not $qqInfo) {
 $logAction = [Action[string]] { param($msg) Write-Host $msg -ForegroundColor Cyan }
 $logVerboseAction = [Action[string]] { param($msg) Write-Verbose $msg }
 
-# Create and run the key extractor
+# Create and run the key extractor. It keeps QQ running after the first hit
+# and collects candidates until -SettleSeconds after the first plausible one,
+# -MaxHits, or -TimeoutSeconds; the caller HMAC-verifies them (issue #5).
 $extractor = New-Object DebugApi.KeyExtractor(
     $qqInfo.QQExePath,
     [uint64]$functionBeginRVA,
     $logAction,
-    $logVerboseAction
+    $logVerboseAction,
+    [int]$TimeoutSeconds,
+    [int]$SettleSeconds,
+    [int]$MaxHits
 )
 
 try {
-    $key = $extractor.ExtractKey()
-
-    if ($key) {
-        $result.Key = $key
-        Write-Host ""
-        Write-Host "=== 最终结果 ===" -ForegroundColor Yellow
-        Write-Host "函数 RVA:        0x$($result.FunctionRVA.ToString('X'))" -ForegroundColor Green
-        Write-Host "LEA 指令 RVA: 0x$($result.LeaInstructionRVA.ToString('X'))" -ForegroundColor Green
-        Write-Host "加密密钥:      $($result.Key)" -ForegroundColor Green
+    $candidates = $extractor.ExtractCandidates()
+    $result.Candidates = $candidates
+    Write-Host ""
+    Write-Host "=== 最终结果 ===" -ForegroundColor Yellow
+    Write-Host "函数 RVA:        0x$($result.FunctionRVA.ToString('X'))" -ForegroundColor Green
+    Write-Host "LEA 指令 RVA: 0x$($result.LeaInstructionRVA.ToString('X'))" -ForegroundColor Green
+    Write-Host "MURMUR_KEY_SUMMARY hits=$($extractor.HitCount) candidates=$($candidates.Count)" -ForegroundColor Green
+    if ($candidates.Count -eq 0) {
+        Write-Host "没有收集到任何候选值（断点没有命中，或 QQ 没有登录完成）" -ForegroundColor Red
     }
     else {
-        Write-Host "提取加密密钥失败" -ForegroundColor Red
+        Write-Host "候选值已输出（MURMUR_KEY_CANDIDATE 行），需要用 nt_msg.db 做 HMAC 校验才能确定哪个是真 key。" -ForegroundColor Green
     }
 }
 catch {
