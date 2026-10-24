@@ -23,20 +23,15 @@ needs neither Frida nor root. Instead of attaching a debugger to the real
      process running out of the copy dir) and deleting candidates.txt; the
      copy itself can be deleted when done.
 
-Data directory (UNVERIFIED on a real Mac — must be confirmed before merge):
-the original WeChat 4.x is sandboxed (com.apple.security.app-sandbox) and
-keeps its data in ~/Library/Containers/com.tencent.xinWeChat/Data/
-Documents/xwechat_files. The re-signed copy has no app-sandbox entitlement,
-so macOS gives it no container: NSHomeDirectory() is the real home. Static
-strings in WeChat 4.1.15's wechat.dylib ("Library/Containers", "Data/
-Documents", "Data/Library/Application Support" next to their non-"Data/"
-twins) suggest WeChat rebuilds the container path itself when unsandboxed —
-i.e. the copy would open the SAME xwechat_files (possibly behind a macOS 14+
-"access data from other apps" prompt, since the signature differs). If it
-falls back to ~/Documents/xwechat_files instead, the copy needs a fresh login
-and creates a second data set. Either way, two WeChats writing the same
-SQLCipher DBs concurrently must never happen, so start() refuses while the
-original is running.
+Data directory (verified on a real Mac, WeChat 4.1.15, 2026-10-23): the
+original WeChat 4.x is sandboxed and keeps its data in ~/Library/Containers/
+com.tencent.xinWeChat/Data/Documents/xwechat_files. The re-signed copy has no
+app-sandbox entitlement, yet it opens that SAME container xwechat_files and
+app_data (lsof), with no "access data from other apps" prompt; only crash
+info / a log mmap land in ~/Documents/app_data. It does show the login
+screen once (scan / confirm on the phone), but no second data set is
+created. So the copy and the original share one set of SQLCipher DBs and
+must never run together: start() refuses while the original is running.
 
 Everything that touches the filesystem or spawns a process is injectable so
 the tests never copy or re-sign the user's real WeChat.
@@ -275,22 +270,29 @@ def derive_db_key(passphrase: bytes, page1: bytes, prf: int = 5, rounds: int = 2
         return None
 
 
-def match_candidates(candidates: dict, pending: dict) -> dict:
+def match_candidates(candidates: dict, pending: dict,
+                     verified: Optional[list] = None) -> dict:
     """Turn parsed candidates into {rel: key_hex} for the still-missing DBs
     in `pending` ({rel: page1}). A verified passphrase derives the key of
     every pending DB at once; a raw 32-byte key matches only the DB it
-    belongs to."""
+    belongs to. Passphrases that verified against at least one DB are
+    appended to `verified` in live_key's format ({hex, prf, rounds})."""
     found: dict[str, str] = {}
     remaining = dict(pending)
     # Passphrases first — one usually unlocks everything.
     for pb in candidates.get("pbkdf", []):
         if not remaining:
             break
+        hit = False
         for rel, page1 in list(remaining.items()):
             key = derive_db_key(pb["pw"], page1, pb.get("prf", 5), pb.get("rounds", 256000))
             if key is not None:
                 found[rel] = key.hex()
                 del remaining[rel]
+                hit = True
+        if hit and verified is not None:
+            verified.append({"hex": pb["pw"].hex(), "prf": pb.get("prf", 5),
+                             "rounds": pb.get("rounds", 256000)})
     # Then any raw keys CCCrypt* revealed directly.
     for k in candidates.get("keys", []):
         if not remaining:
@@ -401,11 +403,13 @@ class PrivateCopyJob:
         import live_key as _live_key
         return _live_key.split_pending(salt_map, self._load_keys())
 
-    def _merge(self, new_keys: dict, salt_by_rel: dict, wxid):
+    def _merge(self, new_keys: dict, salt_by_rel: dict, wxid,
+               passphrase: Optional[dict] = None):
         sys.path.insert(0, str(CLI_DIR))
         import live_key as _live_key
         with _MERGE_LOCK:
-            _live_key.merge_keys(new_keys, salt_by_rel, wxid, self._kpath())
+            _live_key.merge_keys(new_keys, salt_by_rel, wxid, self._kpath(),
+                                 passphrase=passphrase)
 
     def coverage(self) -> dict:
         profiles = self._profiles()
@@ -648,12 +652,16 @@ class PrivateCopyJob:
             cands = parse_candidates(text)
             if cands.get("pbkdf"):
                 passphrase_found = True
-            newly = match_candidates(cands, remaining)
+            verified: list = []
+            newly = match_candidates(cands, remaining, verified)
             if newly:
                 found.update(newly)
                 for rel in newly:
                     remaining.pop(rel, None)
-                self._merge(newly, salt_by_rel, wxid)
+                # Save the verified passphrase too, so DBs WeChat creates
+                # later (new message shards) are derived without another round.
+                self._merge(newly, salt_by_rel, wxid,
+                            passphrase=verified[0] if verified else None)
                 self._set(new=sorted(found.keys()),
                           matched_count=self.state["known"] + len(found),
                           passphrase_found=passphrase_found)

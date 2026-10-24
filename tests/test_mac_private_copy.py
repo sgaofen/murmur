@@ -186,8 +186,19 @@ class DeriveTest(unittest.TestCase):
             key = hashlib.pbkdf2_hmac("sha512", pw, salt, rounds, 32)
             pending[f"db{i}/x.db"] = make_page1(key, salt)
         cands = {"keys": [], "pbkdf": [{"pw": pw, "prf": 5, "rounds": rounds}]}
-        found = mpc.match_candidates(cands, pending)
+        verified = []
+        found = mpc.match_candidates(cands, pending, verified)
         self.assertEqual(set(found), {"db0/x.db", "db1/x.db", "db2/x.db"})
+        self.assertEqual(verified, [{"hex": pw.hex(), "prf": 5, "rounds": rounds}])
+
+    def test_match_candidates_wrong_passphrase_not_reported(self):
+        salt = bytes(range(16))
+        key = hashlib.pbkdf2_hmac("sha512", b"right", salt, 2, 32)
+        pending = {"a/b.db": make_page1(key, salt)}
+        verified = []
+        cands = {"keys": [], "pbkdf": [{"pw": b"wrong", "prf": 5, "rounds": 2}]}
+        self.assertEqual(mpc.match_candidates(cands, pending, verified), {})
+        self.assertEqual(verified, [])
 
     def test_match_candidates_raw_key(self):
         salt = bytes(range(16))
@@ -265,6 +276,9 @@ class JobTest(unittest.TestCase):
         # Keys merged into the keys file.
         saved = json.loads(self.keys_file.read_text())
         self.assertEqual(set(saved["keys_by_db"]), {"db0/x.db", "db1/x.db"})
+        # The verified passphrase is saved too (real-Mac run: it was found but
+        # dropped), so later DBs derive without another round.
+        self.assertIn(pw.hex(), json.dumps(saved))
         # The source app was never modified; the copy exists + was re-signed.
         self.assertTrue((self.copy_dir / "WeChat.app").exists())
         self.assertTrue((self.copy_dir / "entitlements.plist").exists())
