@@ -274,7 +274,7 @@ export interface FridaStatus {
   frozen: boolean;
 }
 
-export type LiveKeyPhase = 'idle' | 'starting' | 'auth' | 'attaching' | 'capturing' | 'done' | 'error';
+export type LiveKeyPhase = 'idle' | 'starting' | 'auth' | 'attaching' | 'capturing' | 'waiting-wechat' | 'done' | 'error';
 
 export interface LiveKeyJob {
   running: boolean;
@@ -290,6 +290,8 @@ export interface LiveKeyJob {
   /** DBs matched this round (relative paths) */
   new: string[];
   hits: number;
+  /** account passphrase seen in CCKeyDerivationPBKDF — every DB key derived from it */
+  passphrase_found: boolean;
   elevated: boolean;
   /** 'frida-missing' | 'attach-denied' | 'auth-cancelled' | 'exit-N' | free text */
   error: string | null;
