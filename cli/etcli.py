@@ -919,7 +919,8 @@ def _find_msg_with_kw(msgs: list, kws: list[str], limit: int = 3) -> list:
 
 
 _SNS_SIGNALS_CACHE = {"data": None, "ts": 0}
-_GRAPH_CACHE: dict[str, tuple[float, dict]] = {}        # key=qs-hash → (ts, payload)
+_GRAPH_CACHE: dict[str, tuple[float, str, dict]] = {}   # graph key → (ts, db fingerprint, graph)
+_GRAPH_RAW_CACHE: dict[str, tuple[float, str, dict]] = {}  # raw key → (ts, db fingerprint, raw summary)
 _FF_MOMENTS_CACHE = {"data": None, "ts": 0}             # friend↔friend SNS pairs
 _CONN_CACHE: dict[str, tuple[float, dict]] = {}         # per-wxid connections
 _FRIEND_DETAIL_CACHE: dict[str, tuple[float, dict]] = {}    # per-wxid friend_detail
@@ -1119,12 +1120,84 @@ def get_friend_mentions_cached(store: EchoStore, top_n: int = 50,
         return mentions
 
 
+_GRAPH_RAW_VERSION = 1
+
+
+def _graph_source_fingerprint(store) -> str:
+    """Cheap identity of the decrypted DB files a graph is built from.
+
+    Stat-only (name / size / mtime of every top-level *.db), so it can run on
+    every /api/graph request. Any re-decrypt, QQ index build or other rewrite
+    of those files changes it and invalidates the graph caches. -wal / -shm
+    sidecars are left out on purpose: plain read-only opens can create or
+    remove them, which would make the fingerprint flap without data changing.
+    """
+    parts = [type(store).__name__, str(getattr(store, "dir", "")), str(getattr(store, "me", "") or "")]
+    try:
+        files = sorted(p for p in Path(store.dir).iterdir() if p.name.endswith(".db"))
+    except (OSError, TypeError, AttributeError):
+        files = []
+    for p in files:
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        parts.append(f"{p.name}:{st.st_size}:{st.st_mtime_ns}")
+    return hashlib.sha1("\n".join(parts).encode("utf-8", "replace")).hexdigest()
+
+
+def _graph_raw_cache_key(recent_days: int) -> str:
+    # The raw summary is independent of scope / min_private / top_n /
+    # show_clusters — only the message window matters. Account isolation
+    # comes from _disk_cache_dir() (per-account folder) + the fingerprint.
+    return f"graph_raw_v{_GRAPH_RAW_VERSION}:{recent_days}"
+
+
+def get_graph_raw_cached(store: EchoStore, *, recent_days: int = 365,
+                         fingerprint: str | None = None) -> dict:
+    """Memory → disk → DB lookup for the graph raw summary (#24).
+
+    An entry is reused only while it is younger than _CACHE_TTL and was built
+    from DB files with the same fingerprint.
+    """
+    fp = fingerprint or _graph_source_fingerprint(store)
+    ck = _graph_raw_cache_key(recent_days)
+
+    def _mem_hit():
+        cached = _GRAPH_RAW_CACHE.get(ck)
+        if cached and cached[1] == fp and (_time.time() - cached[0]) < _CACHE_TTL:
+            return cached[2]
+        return None
+
+    raw = _mem_hit()
+    if raw is not None:
+        return raw
+    disk = _disk_load(ck)
+    if disk and (_time.time() - disk.get("_ts", 0)) < _CACHE_TTL:
+        payload = disk.get("_payload") or {}
+        raw = payload.get("raw")
+        if (payload.get("fp") == fp and isinstance(raw, dict)
+                and raw.get("version") == _GRAPH_RAW_VERSION):
+            _GRAPH_RAW_CACHE[ck] = (disk["_ts"], fp, raw)
+            return raw
+    with _STORE_READ_LOCK:
+        raw = _mem_hit()  # another thread may have built it while we waited
+        if raw is not None:
+            return raw
+        raw = collect_graph_raw(store, recent_days=recent_days)
+    _GRAPH_RAW_CACHE[ck] = (_time.time(), fp, raw)
+    _disk_save(ck, {"fp": fp, "raw": raw})
+    return raw
+
+
 def _graph_cache_key(scope: str, min_private: int, recent_days: int,
                      top_n: int, show_clusters: bool) -> str:
     # v4 bumps the cache key so the new core-circle / bridge topology fields
     # (label propagation + Brandes betweenness) reach existing installs even
     # though older v3 cache entries on disk are technically still loadable.
-    return f"graph_v4:{scope}:{min_private}:{recent_days}:{top_n}:{show_clusters}"
+    # v5: entries carry the DB fingerprint ({"fp", "graph"}) so they expire
+    # together with the raw summary they were assembled from.
+    return f"graph_v5:{scope}:{min_private}:{recent_days}:{top_n}:{show_clusters}"
 
 
 def get_relationship_graph_cached(store: EchoStore, *,
@@ -1133,21 +1206,32 @@ def get_relationship_graph_cached(store: EchoStore, *,
                                   recent_days: int = 365,
                                   top_n: int = 600,
                                   show_clusters: bool = False) -> dict:
+    """Finished-graph cache on top of the shared raw summary.
+
+    A miss here no longer rescans the DB: every (scope, min_private, top_n,
+    show_clusters) variant is assembled in memory from the one raw summary
+    for `recent_days` (see get_graph_raw_cached).
+    """
+    fp = _graph_source_fingerprint(store)
     ck = _graph_cache_key(scope, min_private, recent_days, top_n, show_clusters)
     cached = _GRAPH_CACHE.get(ck)
-    if cached and (_time.time() - cached[0]) < _CACHE_TTL:
-        return cached[1]
+    if cached and cached[1] == fp and (_time.time() - cached[0]) < _CACHE_TTL:
+        return cached[2]
     disk = _disk_load(ck)
-    if disk and (_time.time() - disk["_ts"]) < _CACHE_TTL:
-        _GRAPH_CACHE[ck] = (disk["_ts"], disk["_payload"])
-        return disk["_payload"]
+    if disk and (_time.time() - disk.get("_ts", 0)) < _CACHE_TTL:
+        payload = disk.get("_payload") or {}
+        if payload.get("fp") == fp and isinstance(payload.get("graph"), dict):
+            _GRAPH_CACHE[ck] = (disk["_ts"], fp, payload["graph"])
+            return payload["graph"]
+    raw = get_graph_raw_cached(store, recent_days=recent_days, fingerprint=fp)
     with _STORE_READ_LOCK:
-        graph = build_relationship_graph(
-            store, scope=scope, min_private=min_private,
+        # Mentions / Moments lookups inside may still touch the store.
+        graph = build_graph_from_raw(
+            store, raw, scope=scope, min_private=min_private,
             recent_days=recent_days, top_n=top_n, show_clusters=show_clusters,
         )
-    _GRAPH_CACHE[ck] = (_time.time(), graph)
-    _disk_save(ck, graph)
+    _GRAPH_CACHE[ck] = (_time.time(), fp, graph)
+    _disk_save(ck, {"fp": fp, "graph": graph})
     return graph
 
 
@@ -5971,7 +6055,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         Most caches are global (module-level dicts) — they're keyed by wxid only
         and would otherwise serve stale WeChat data when the user switched to QQ.
         """
-        for cache in (_GRAPH_CACHE, _CONN_CACHE, _FRIEND_DETAIL_CACHE,
+        for cache in (_GRAPH_CACHE, _GRAPH_RAW_CACHE, _CONN_CACHE, _FRIEND_DETAIL_CACHE,
                        _FRIENDS_LIST_CACHE, _YEARBOOK_CACHE):
             try:
                 cache.clear()
@@ -6816,27 +6900,40 @@ def extract_friend_mentions(store: EchoStore, top_n: int = 50,
     return result
 
 
-def build_relationship_graph(store: EchoStore, *,
-                               scope: str = "private",
-                               min_private: int = 10,
-                               recent_days: int = 365,
-                               top_n: int = 100,
-                               show_clusters: bool = False) -> dict:
-    """Build the relationship graph: nodes = people, edges with real interaction signals.
+class _RawContact:
+    """Minimal stand-in for Contact inside a graph raw summary.
 
-    scope filters:
-      "private" (default) — Only people you have a 1-on-1 with msg_count >= min_private,
-                            OR who you've been recently active with (last `recent_days`).
-                            Strangers from groups are dropped. <= ~115 nodes for typical user.
-      "recent"            — Same as private but with stricter recent_days threshold.
-      "all"               — Everyone who appeared anywhere (the old behavior, ~575+ nodes).
+    Graph assembly only reads `is_real_friend` and `display()`, so the raw
+    summary keeps just those two bits per contact instead of the full row.
+    """
+    __slots__ = ("_name", "is_real_friend")
 
-    Edge types:
-    - private: self ↔ each friend you have a 1-on-1 with (weight = msg count)
-    - co_group: friend ↔ friend who appear in same group (lightest signal)
-    - mutual_reply: friend A replied to friend B's group msg within 5 min (real interaction)
+    def __init__(self, name: str, is_real_friend: bool):
+        self._name = name
+        self.is_real_friend = is_real_friend
 
-    Also nodes carry: msgs_in_groups (their public activity), sns_interaction (Moments back/out)
+    def display(self) -> str:
+        return self._name
+
+
+def collect_graph_raw(store: EchoStore, *, recent_days: int = 365) -> dict:
+    """Slow half of the relationship graph: scan the DB once, return a JSON-safe summary.
+
+    Nothing in here depends on scope / min_private / top_n / show_clusters, so a
+    single summary serves every graph variant for the same `recent_days` window
+    (#24). `build_graph_from_raw` turns it into a graph purely in memory.
+
+    Shape (all lists keep the exact iteration order the old one-pass builder
+    used, so the assembled graph is byte-identical):
+      now_ts          build time; reused as "now" when assembling the graph
+      groups          [[group_username, [[sender, msg_count], ...]], ...]
+                      senders in first-seen order
+      mutual_reply    [[a, b, dampened_count], ...]
+      private         [[wxid, private_msg_count], ...]
+      session_last_ts {wxid: last_timestamp} for private peers
+      contacts        {username: [display_name, is_real_friend]} for every
+                      username graph assembly can look up
+      contacts_has_self  whether the literal id "self" is a contact
     """
     contacts = store.contacts()
     sessions = store.sessions()
@@ -6844,9 +6941,8 @@ def build_relationship_graph(store: EchoStore, *,
     # Step 1: For each group, scan messages to find:
     #   (a) which wxids spoke (active members)
     #   (b) mutual replies — who replied to whom within 5 min
-    group_members: dict[str, set[str]] = {}
     group_msg_count: dict[str, dict[str, int]] = {}  # group → {wxid: msg count}
-    mutual_reply: dict[tuple[str, str], int] = {}  # (a,b) sorted → reply count
+    mutual_reply: dict[tuple[str, str], float] = {}  # (a,b) sorted → reply count
 
     # Track per-pair, per-group counts so we can dampen large-group noise after collection.
     mutual_reply_per_group: dict[str, dict[tuple[str, str], int]] = {}
@@ -6864,7 +6960,7 @@ def build_relationship_graph(store: EchoStore, *,
     for s in sessions:
         if not s.is_group:
             continue
-        senders: set[str] = set()
+        # per_user doubles as the active-member set; dict keys keep first-seen order.
         per_user: dict[str, int] = {}
         prev_msgs: list[tuple[int, str]] = []
         per_group_pairs: dict[tuple[str, str], int] = {}
@@ -6873,7 +6969,6 @@ def build_relationship_graph(store: EchoStore, *,
         for m in store.messages(s.username, text_only=False, since=_msg_since):
             if m.sender_wxid == "self" or not m.sender_wxid:
                 continue
-            senders.add(m.sender_wxid)
             per_user[m.sender_wxid] = per_user.get(m.sender_wxid, 0) + 1
 
             cutoff = m.create_time - 300  # 5 min
@@ -6888,17 +6983,15 @@ def build_relationship_graph(store: EchoStore, *,
             if msgs_processed >= _PER_GROUP_MAX:
                 break
 
-        if senders:
-            group_members[s.username] = senders
+        if per_user:
             group_msg_count[s.username] = per_user
             mutual_reply_per_group[s.username] = per_group_pairs
 
     # Aggregate mutual_reply with size-aware dampening.
     # Big groups (50+ members) inflate co-presence noise: 2 random people in a 200-person
     # group will cross paths often. Cap each group's contribution by a logarithmic factor.
-    import math
     for gname, pair_counts in mutual_reply_per_group.items():
-        size = len(group_members.get(gname, ()))
+        size = len(group_msg_count.get(gname, ()))
         # Damp factor: 1.0 for ≤10 members, fades to ~0.3 for 200+ members.
         damp = 1.0 if size <= 10 else max(0.3, 10 / size)
         # Also cap each individual pair's contribution to keep the strongest groups from dominating
@@ -6907,7 +7000,7 @@ def build_relationship_graph(store: EchoStore, *,
             contribution = min(n, per_pair_cap) * damp
             mutual_reply[pair] = mutual_reply.get(pair, 0) + contribution
     # Round (was floats now)
-    mutual_reply = {p: int(round(v)) for p, v in mutual_reply.items() if v >= 1}
+    mutual_reply_rounded = {p: int(round(v)) for p, v in mutual_reply.items() if v >= 1}
 
     # Step 2: Private chat strengths
     private_strength: dict[str, int] = {}
@@ -6917,6 +7010,74 @@ def build_relationship_graph(store: EchoStore, *,
         cnt = fast_message_count(store, s.username)
         if cnt > 0:
             private_strength[s.username] = cnt
+
+    sessions_by_wxid = {s.username: s for s in sessions}
+    session_last_ts = {w: sessions_by_wxid[w].last_timestamp
+                       for w in private_strength if w in sessions_by_wxid}
+
+    # Every username assembly may look up: candidates (private peers + group
+    # speakers), group names (legacy cluster labels), self.
+    wanted = set(private_strength)
+    wanted.update(group_msg_count)
+    for per_user in group_msg_count.values():
+        wanted.update(per_user)
+    if store.me:
+        wanted.add(store.me)
+    raw_contacts = {}
+    for u in wanted:
+        c = contacts.get(u)
+        if c is not None:
+            raw_contacts[u] = [c.display(), bool(c.is_real_friend)]
+
+    return {
+        "version": _GRAPH_RAW_VERSION,
+        "recent_days": recent_days,
+        # Taken after the scan, like the old one-pass builder's recency cutoff.
+        "now_ts": datetime.now(CST).timestamp(),
+        "groups": [[g, [[w, n] for w, n in per_user.items()]]
+                   for g, per_user in group_msg_count.items()],
+        "mutual_reply": [[a, b, n] for (a, b), n in mutual_reply_rounded.items()],
+        "private": [[w, n] for w, n in private_strength.items()],
+        "session_last_ts": session_last_ts,
+        "contacts": raw_contacts,
+        "contacts_has_self": "self" in contacts,
+    }
+
+
+def build_graph_from_raw(store: EchoStore, raw: dict, *,
+                         scope: str = "private",
+                         min_private: int = 10,
+                         recent_days: int = 365,
+                         top_n: int = 100,
+                         show_clusters: bool = False) -> dict:
+    """Fast half of the relationship graph: filter / rank / cap / tier / cluster in memory.
+
+    Takes the summary from `collect_graph_raw`; never scans chat tables itself.
+    (Moments signals and friend-mention pairs still come from their own caches,
+    exactly as before.)
+    """
+    contacts: dict = {u: _RawContact(v[0], bool(v[1])) for u, v in raw["contacts"].items()}
+    if raw.get("contacts_has_self") and "self" not in contacts:
+        contacts["self"] = _RawContact("self", False)
+
+    # Rebuild each member set by adding senders one at a time in first-seen
+    # order — exactly how the old one-pass builder grew its sets, so set
+    # iteration order (visible in legacy show_clusters member lists) is
+    # identical. Don't use set(dict): CPython presizes from a dict and the
+    # iteration order changes.
+    group_members: dict[str, set[str]] = {}
+    group_msg_count: dict[str, dict[str, int]] = {}
+    for g, pairs in raw["groups"]:
+        members: set[str] = set()
+        per_user: dict[str, int] = {}
+        for w, n in pairs:
+            members.add(w)
+            per_user[w] = n
+        group_members[g] = members
+        group_msg_count[g] = per_user
+    mutual_reply: dict[tuple[str, str], int] = {(a, b): n for a, b, n in raw["mutual_reply"]}
+    private_strength: dict[str, int] = {w: n for w, n in raw["private"]}
+    session_last_ts: dict[str, int] = raw["session_last_ts"]
 
     # Step 4: Aggregate per-person group activity
     msgs_in_groups: dict[str, int] = {}
@@ -6943,7 +7104,7 @@ def build_relationship_graph(store: EchoStore, *,
 
     # Step 5c: Friend-to-friend Moments interactions (A liked/commented B's post — without you).
     # Strong independent evidence of A↔B relationship. Cached: scanning SnsTimeLine
-    # is the slowest part of build_relationship_graph (~5s on a typical user).
+    # is the slowest part of the graph build (~5s on a typical user).
     if _FF_MOMENTS_CACHE["data"] is not None and (_time.time() - _FF_MOMENTS_CACHE["ts"]) < _CACHE_TTL:
         ff_moments = _FF_MOMENTS_CACHE["data"]
     else:
@@ -6957,9 +7118,10 @@ def build_relationship_graph(store: EchoStore, *,
             sys.stderr.write(f"[ff_moments] failed: {e}\n")
             ff_moments = {}
 
-    # Step 6: Build nodes — apply scope filter to keep graph focused
-    now_ts = datetime.now(CST).timestamp()
-    sessions_by_wxid = {s.username: s for s in store.sessions()}
+    # Step 6: Build nodes — apply scope filter to keep graph focused.
+    # "now" is the summary's build time so the recency cutoff matches the
+    # message window the summary was collected with.
+    now_ts = raw["now_ts"]
     cutoff = now_ts - recent_days * 86400
 
     def keep_wxid(w: str) -> bool:
@@ -6978,8 +7140,8 @@ def build_relationship_graph(store: EchoStore, *,
         if priv >= min_private:
             return True
         if priv > 0:
-            s = sessions_by_wxid.get(w)
-            if s and s.last_timestamp >= cutoff:
+            last_ts = session_last_ts.get(w)
+            if last_ts is not None and last_ts >= cutoff:
                 return True
         if scope == "recent":
             return False
@@ -7213,6 +7375,40 @@ def build_relationship_graph(store: EchoStore, *,
     }
 
 
+def build_relationship_graph(store: EchoStore, *,
+                               scope: str = "private",
+                               min_private: int = 10,
+                               recent_days: int = 365,
+                               top_n: int = 100,
+                               show_clusters: bool = False) -> dict:
+    """Build the relationship graph: nodes = people, edges with real interaction signals.
+
+    Uncached convenience wrapper = `collect_graph_raw` (DB scan) +
+    `build_graph_from_raw` (in-memory assembly). The HTTP API goes through
+    `get_relationship_graph_cached`, which reuses one raw summary across
+    every top_n / scope / show_clusters variant.
+
+    scope filters:
+      "private" (default) — Only people you have a 1-on-1 with msg_count >= min_private,
+                            OR who you've been recently active with (last `recent_days`).
+                            Strangers from groups are dropped. <= ~115 nodes for typical user.
+      "recent"            — Same as private but with stricter recent_days threshold.
+      "all"               — Everyone who appeared anywhere (the old behavior, ~575+ nodes).
+
+    Edge types:
+    - private: self ↔ each friend you have a 1-on-1 with (weight = msg count)
+    - co_group: friend ↔ friend who appear in same group (lightest signal)
+    - mutual_reply: friend A replied to friend B's group msg within 5 min (real interaction)
+
+    Also nodes carry: msgs_in_groups (their public activity), sns_interaction (Moments back/out)
+    """
+    raw = collect_graph_raw(store, recent_days=recent_days)
+    return build_graph_from_raw(
+        store, raw, scope=scope, min_private=min_private,
+        recent_days=recent_days, top_n=top_n, show_clusters=show_clusters,
+    )
+
+
 def _compute_friend_topology(
     nodes: list[dict],
     edges: list[dict],
@@ -7404,18 +7600,12 @@ def _run_server(args) -> int:
             return  # bootstrap mode — nothing to pre-warm
         try:
             t0 = _time.time()
+            # Both default views share one raw summary: the first call scans
+            # the DB (or loads the summary from disk), the second is in-memory.
             for scope, top_n in [("private", 100), ("all", 600)]:
-                ck = _graph_cache_key(scope, 10, 365, top_n, False)
-                disk = _disk_load(ck)
-                if disk:
-                    _GRAPH_CACHE[ck] = (disk["_ts"], disk["_payload"])
-                    sys.stderr.write(f"[etcli serve] [{ck}] hot from disk\n")
-                else:
-                    sys.stderr.write(f"[etcli serve] [{ck}] computing…\n")
-                    with _STORE_READ_LOCK:
-                        g = build_relationship_graph(store, scope=scope, top_n=top_n)
-                    _GRAPH_CACHE[ck] = (_time.time(), g)
-                    _disk_save(ck, g)
+                t1 = _time.time()
+                get_relationship_graph_cached(store, scope=scope, top_n=top_n)
+                sys.stderr.write(f"[etcli serve] [graph {scope} top_n={top_n}] ready in {_time.time()-t1:.1f}s\n")
             # home_summary
             disk_h = _disk_load("home_summary")
             if disk_h:
