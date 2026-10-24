@@ -70,6 +70,7 @@ a = Analysis(
         "qq_store",
         "search_index",
         "semantic_index",
+        "chat_view",
         "media",
         "sns",
         "voice",
