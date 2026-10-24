@@ -1166,9 +1166,14 @@ def _account_slug() -> str:
     return "default"
 
 
+# Set by `etcli mcp`: read the app's on-disk analysis cache but never write to it.
+_DISK_CACHE_READONLY = False
+
+
 def _disk_cache_dir() -> Path:
     p = Path.home() / "Documents" / "Murmur" / "cache" / _account_slug()
-    p.mkdir(parents=True, exist_ok=True)
+    if not _DISK_CACHE_READONLY:
+        p.mkdir(parents=True, exist_ok=True)
     return p
 
 def _agent_workspace_root() -> Path:
@@ -1260,6 +1265,8 @@ def _disk_load(key: str) -> dict | None:
         return None
 
 def _disk_save(key: str, payload) -> None:
+    if _DISK_CACHE_READONLY:
+        return
     p = _disk_cache_dir() / f"{_safe_filename(key)}.json"
     try:
         p.write_text(json.dumps({"_ts": _time.time(), "_payload": payload},
@@ -1268,6 +1275,8 @@ def _disk_save(key: str, payload) -> None:
         pass
 
 def _disk_clear() -> None:
+    if _DISK_CACHE_READONLY:
+        return
     try:
         for f in _disk_cache_dir().glob("*.json"):
             f.unlink(missing_ok=True)
@@ -2912,6 +2921,12 @@ def main(argv=None):
     sp.add_argument("--host", default="127.0.0.1")
     sp.add_argument("--export-dir", help="AI 分析包默认输出目录（默认 ~/Desktop/Murmur）")
 
+    sp = sub.add_parser("mcp", help="启动 MCP 服务（stdio，只读），给 Claude Code / Codex 等 AI 助手用")
+    sp.add_argument("--privacy", action="store_true",
+                    help="隐私模式：名字/wxid/手机号等脱敏成「朋友 AB」「wxid_1234」")
+    sp.add_argument("--max-rows", type=int, default=500,
+                    help="单次调用最多返回多少条（默认 500）")
+
     sp = sub.add_parser("refresh", help="(PyInstaller) 调用 refresh.py 主函数解密")
     sp.add_argument("--wxid", default=None)
     sp.add_argument("--key", default=None)
@@ -2939,6 +2954,10 @@ def main(argv=None):
 
     if args.cmd == "serve":
         return _run_server(args)
+
+    if args.cmd == "mcp":
+        import mcp_server as _mcp
+        return _mcp.main(args, et=sys.modules[__name__])
 
     if args.cmd == "refresh":
         import refresh as _refresh

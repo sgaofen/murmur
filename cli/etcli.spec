@@ -80,6 +80,7 @@ a = Analysis(
         "live_sync",
         "decrypted_media_index",
         "batch_analyze",
+        "mcp_server",
         "live_key",
         "hook_cc_key_frida",
         "mac_private_copy",
