@@ -340,13 +340,22 @@ def read_diagnostic_logs(max_lines: int = 80) -> dict:
     }
 
 
-def _mask_user_paths(s: str, names=()) -> str:
+def _mask_user_paths(s: str, names=(), secrets=()) -> str:
     """Scrub the diag bundle so it can be pasted into a public issue: home dir
-    / OS user name, wxid & account folders, QQ numbers, phone numbers, long
-    hex (keys/salts), nicknames. See cli/diag_redact.py."""
+    / OS user name, wxid & account folders, QQ numbers, e-mail, phone numbers,
+    long hex (keys/salts), 16-char keys, nicknames. See cli/diag_redact.py."""
     if not s:
         return s
-    return _redact.redact(s, names=names)
+    return _redact.redact(s, names=names, secrets=secrets)
+
+
+def _diag_known_secrets() -> list:
+    """Saved QQ keys (16 printable chars, not hex) — blanked literally."""
+    try:
+        return [v for v in _MurmurAPIHandler._qq_load_keys_config().values()
+                if isinstance(v, str) and v]
+    except Exception:
+        return []
 
 
 def _diag_known_names() -> list:
@@ -366,6 +375,17 @@ def _diag_known_names() -> list:
             names += [x for x in (c.nick_name, c.remark, c.alias) if x]
     except Exception:
         pass
+    # QQ numbers: logs mention them bare (no qq: prefix), e.g. in decrypt output.
+    try:
+        names += [str(q) for q in _MurmurAPIHandler._qq_load_keys_config().keys()]
+    except Exception:
+        pass
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import qq_paths as _qpaths
+        names += [q.qq_number for q in _qpaths.discover_qq_profiles() if q.qq_number]
+    except Exception:
+        pass
     return names
 
 
@@ -373,6 +393,7 @@ def _build_diag_bundle() -> str:
     """Compose the markdown blob users paste into a GitHub issue."""
     import platform as _plat
     names = _diag_known_names()
+    secrets = _diag_known_secrets()
     lines: list[str] = []
     lines.append("## Murmur diag bundle")
     lines.append("")
@@ -383,7 +404,7 @@ def _build_diag_bundle() -> str:
                  f"{_mask_user_paths(_MurmurAPIHandler._active_id or '(none)', names)}")
     lines.append(f"- **store loaded**: {_MurmurAPIHandler.store is not None}")
     if _MurmurAPIHandler._init_error:
-        lines.append(f"- **init_error**: `{_mask_user_paths(_MurmurAPIHandler._init_error, names)}`")
+        lines.append(f"- **init_error**: `{_mask_user_paths(_MurmurAPIHandler._init_error, names, secrets)}`")
     # Discovered profiles
     try:
         wprofs = _paths.discover_wechat_profiles()
@@ -415,12 +436,12 @@ def _build_diag_bundle() -> str:
     lines.append("")
     lines.append("### serve.log (last 40)")
     lines.append("```")
-    lines.append(_mask_user_paths(logs.get("serve", "(empty)")))
+    lines.append(_mask_user_paths(logs.get("serve", "(empty)"), names, secrets))
     lines.append("```")
     lines.append("")
     lines.append("### tauri-shell.log (last 40)")
     lines.append("```")
-    lines.append(_mask_user_paths(logs.get("tauri_shell", "(empty)")))
+    lines.append(_mask_user_paths(logs.get("tauri_shell", "(empty)"), names, secrets))
     lines.append("```")
     return "\n".join(lines)
 
@@ -4655,7 +4676,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             if self.store is None:
                 return self._send_json({"error": "no_decrypted_data"}, status=503)
             try:
-                from exporters import http_export_meta, write_export, export_to_dir
+                from exporters import http_export_meta, write_export
                 from export_media import POLICIES as _MEDIA_POLICIES
                 content_type, ext = http_export_meta(fmt)
             except (ImportError, ValueError) as e:
@@ -4663,15 +4684,9 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             if media_policy not in _MEDIA_POLICIES:
                 return self._send_json({"error": f"unknown media policy: {media_policy}"}, status=400)
             if media_policy != "none":
-                # Attachments can't ride along a single download, so write a
-                # folder (chat file + media/ + 导出报告.md) under the export dir
-                # and hand back the report; the UI offers "打开文件夹".
-                try:
-                    report = export_to_dir(self.store, wxid, fmt, media_policy,
-                                           self.export_dir / "聊天导出")
-                except Exception as e:
-                    return self._send_json({"error": f"{type(e).__name__}: {e}"}, status=500)
-                return self._send_json(report)
+                # Exporting with attachments writes a folder to disk, so it is
+                # POST-only: a GET can be fired cross-site by any <img> tag.
+                return self._send_json({"error": "带附件导出请用 POST /api/export"}, status=405)
             import io as _io
             buf = _io.StringIO()
             try:
@@ -5199,6 +5214,40 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 return self._send_json(payload)
         return self._send_json({"error": "Not found", "path": path}, status=404)
 
+    def _post_export_to_dir(self):
+        """POST /api/export {wxid, format, media}: export with attachments.
+        Attachments can't ride along a single download, so write a folder
+        (chat file + media/ + 导出报告.md) under the export dir and hand back
+        the report; the UI offers "打开文件夹". Plain downloads (media=none)
+        stay on GET /api/export."""
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length else b"{}"
+        try:
+            opts = json.loads(body.decode("utf-8") or "{}")
+        except (ValueError, UnicodeDecodeError):
+            return self._send_json({"error": "invalid JSON body"}, status=400)
+        if not isinstance(opts, dict):
+            return self._send_json({"error": "invalid JSON body"}, status=400)
+        wxid = str(opts.get("wxid") or "")
+        fmt = str(opts.get("format") or "json").lower()
+        media_policy = str(opts.get("media") or "none").lower()
+        if not wxid:
+            return self._send_json({"error": "missing wxid"}, status=400)
+        try:
+            from exporters import http_export_meta, export_to_dir
+            from export_media import POLICIES as _MEDIA_POLICIES
+            http_export_meta(fmt)
+        except (ImportError, ValueError) as e:
+            return self._send_json({"error": str(e)}, status=400)
+        if media_policy not in _MEDIA_POLICIES or media_policy == "none":
+            return self._send_json({"error": f"unknown media policy: {media_policy}"}, status=400)
+        try:
+            report = export_to_dir(self.store, wxid, fmt, media_policy,
+                                   self.export_dir / "聊天导出")
+        except Exception as e:
+            return self._send_json({"error": f"{type(e).__name__}: {e}"}, status=500)
+        return self._send_json(report)
+
     def _dispatch_post(self):
         url = urllib.parse.urlparse(self.path)
         path = url.path
@@ -5260,6 +5309,9 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 "message": "解密数据未准备好。请先抓 key 再解密。",
                 "needs_onboarding": True,
             }, status=503)
+
+        if path == "/api/export":
+            return self._post_export_to_dir()
 
         if path == "/api/search/semantic/build":
             import semantic_index as _sem

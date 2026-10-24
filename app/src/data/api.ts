@@ -1117,8 +1117,15 @@ export async function exportFriendChat(
   format: ExportFormat,
   media: MediaPolicy = 'none',
 ): Promise<ExportReport | null> {
-  const url = `${API_BASE}/api/export?wxid=${encodeURIComponent(wxid)}&format=${format}&media=${media}`;
-  const res = await fetch(url);
+  // With attachments the backend writes a folder to disk and returns a report;
+  // that side effect is POST-only. Plain downloads stay on GET.
+  const res = media !== 'none'
+    ? await fetch(`${API_BASE}/api/export`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ wxid, format, media }),
+      })
+    : await fetch(`${API_BASE}/api/export?wxid=${encodeURIComponent(wxid)}&format=${format}`);
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     throw new Error(`导出失败：${res.status} ${text.slice(0, 200)}`);

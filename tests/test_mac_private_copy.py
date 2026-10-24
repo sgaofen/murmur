@@ -349,6 +349,18 @@ class JobTest(unittest.TestCase):
         self.assertEqual(cov["known"], 0)
         self.assertEqual(len(cov["pending"]), 2)
 
+    def test_coverage_uses_this_accounts_saved_passphrase(self):
+        # Two accounts' passphrases on file: only the current wxid's may
+        # derive keys (live_key.passphrase_for), so it must be passed through.
+        pw, rounds = b"pp", 2
+        pp = {"hex": pw.hex(), "prf": 5, "rounds": rounds}
+        other = {"hex": b"other".hex(), "prf": 5, "rounds": rounds}
+        self.keys_file.write_text(json.dumps(
+            {"passphrases": {"wxid_test": pp, "wxid_other": other}}))
+        job = self._make_job(self._salt_map(pw, rounds), lambda *a, **k: FakeProc())
+        cov = job.coverage()
+        self.assertEqual((cov["total"], cov["known"], cov["pending"]), (2, 2, []))
+
     def _wait(self, job, timeout=5):
         end = time.time() + timeout
         while time.time() < end:
