@@ -149,7 +149,7 @@ function DataSection({ data, loading }: { data: Loaded | null; loading: boolean 
       <Row label="Murmur 目录" hint="配置、密钥缓存">
         {loading ? <PathSkeleton /> : <PathValue path={data?.diag?.murmur_home ?? null} />}
       </Row>
-      <Row label="日志" hint="出问题时把 serve.log 附到 issue">
+      <Row label="日志" hint="报问题时附上 serve.log">
         {loading ? <PathSkeleton /> : <PathValue path={data?.logsDir ?? null} />}
       </Row>
     </Card>
