@@ -54,6 +54,14 @@ export function typeLabel(type: string): string {
   return TYPE_LABEL[type] ?? '消息';
 }
 
+/** WeChat 4.x packs appmsg sub-types into the high 32 bits of local_type
+ * ((sub << 32) | 49); the search index labels those `type_<n>` — they are
+ * links / quotes / files, i.e. 「分享」. */
+export function normType(type: string, code?: number): string {
+  if (type.startsWith('type_') && code && code > 0xFFFFFFFF && code % 4294967296 === 49) return 'share';
+  return type;
+}
+
 /** True when `text` is only the backend's "[type]" stub (no real content). */
 export function isStub(text: string, type: string): boolean {
   const t = (text || '').trim();

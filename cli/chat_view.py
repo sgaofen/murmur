@@ -420,6 +420,10 @@ def chat_page(store, chat: str, *, before: Optional[str] = None, after: Optional
     if around not in (None, ""):
         target = parse_cursor(around)
         older_key, newer_key = target, _key_just_before(target)
+        if not echo and target[1]:
+            # A WeChat-style cursor (e.g. a QQ search locator) on a list-backed
+            # store: its db/local_id mean nothing here, so open at its time.
+            older_key = newer_key = _key_at(target[0])
     elif at not in (None, ""):
         older_key = newer_key = _key_at(int(at))
     else:

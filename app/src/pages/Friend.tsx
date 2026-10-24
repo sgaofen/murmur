@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { Avatar } from '../components/Avatar';
 import { MessageCard } from '../components/MessageCard';
 import { RingChart } from '../components/RingChart';
 import { Stamp } from '../components/Stamp';
-import { getFriend, getMessages, getMoments, getReport, getFriendConnections, getInvokeStream, exportFriendChat, openFolder } from '../data/api';
+import { errorCode, getFriend, getMoments, getReport, getFriendConnections, getInvokeStream, exportFriendChat, openFolder } from '../data/api';
 import type { FriendConnection, ExportFormat, ExportReport, MediaPolicy } from '../data/api';
 import type { Friend, FriendStats, Moment } from '../data/types';
 import { AIAssistantDrawer, ReportReadyBanner } from './AIAssistantDrawer';
@@ -15,6 +15,8 @@ import { mdToHtml, MURMUR_MD_CSS } from '../utils/markdown';
 import { displayName, maskedWxid, maskText } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
 import { PageHeader } from '../shell/PageHeader';
+import { ErrorState } from '../ui';
+import { lookupError } from '../data/errorCatalog';
 import { useActivePlatform } from '../utils/activeProfile';
 
 interface Props {
@@ -578,7 +580,7 @@ function ActionDock({ onExportAI, onShowMessages, onExportChat, onOpenYearbook }
   return (
     <div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
-        <Btn icon="📖" label="完整聊天记录" sub="按时间倒序浏览" onClick={onShowMessages} />
+        <Btn icon="📖" label="完整聊天记录" sub="气泡浏览，可跳到某一天" onClick={onShowMessages} />
         <Btn icon="📤" label="导出聊天" sub={pickerOpen ? '选择格式…' : '6 种格式 · 可带附件'} onClick={() => setPickerOpen(v => !v)} />
         <Btn icon="💑" label="双人年代记" sub="按年份的故事时间线" onClick={onOpenYearbook} />
         <Btn icon="🤖" label="导出 AI 分析包" sub="一键打包给 AI 看" primary onClick={onExportAI} />
@@ -709,113 +711,6 @@ function ExportReportCard({ report }: { report: ExportReport }) {
   );
 }
 
-function MessagesDrawer({ open, friend, onClose }: { open: boolean; friend: Friend; onClose: () => void }) {
-  void usePrivacy();
-  const [msgs, setMsgs] = useState<Awaited<ReturnType<typeof getMessages>> | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  useEffect(() => {
-    if (!open) return;
-    setLoading(true);
-    getMessages(friend.id, { limit: 500 })
-      .then(setMsgs)
-      .finally(() => setLoading(false));
-  }, [open, friend.id]);
-
-  useEffect(() => {
-    if (!open) return;
-    function onKeyDown(e: KeyboardEvent) {
-      if (e.key === 'Escape') onClose();
-    }
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [open, onClose]);
-
-  if (!open) return null;
-
-  return (
-    <div onClick={onClose} style={{
-      position: 'fixed', inset: 0, zIndex: 1000,
-      background: 'rgba(20,24,42,0.45)',
-      display: 'flex', justifyContent: 'flex-end',
-    }}>
-      <div onClick={(e) => e.stopPropagation()} style={{
-        width: 540, maxWidth: '92%',
-        background: 'var(--et-paper)',
-        boxShadow: 'var(--et-shadow-3)',
-        height: '100%', overflow: 'auto',
-      }}>
-        <div style={{
-          position: 'sticky', top: 0, zIndex: 1,
-          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-          gap: 12, padding: '20px 24px 14px',
-          background: 'var(--et-paper)', borderBottom: '0.5px solid var(--et-line)',
-        }}>
-          <div>
-            <div className="et-eyebrow">完整聊天记录</div>
-            <div className="et-h2" style={{ marginTop: 4, color: 'var(--et-ink)' }}>和 {displayName(friend.id, friend.name)} 的对话</div>
-          </div>
-          <button onClick={(e) => { e.stopPropagation(); onClose(); }} style={{
-            all: 'unset', cursor: 'pointer', padding: '8px 12px', borderRadius: 8,
-            color: 'var(--et-mute)', background: 'var(--et-paper-2)',
-            border: '0.5px solid var(--et-line-2)', fontSize: 12, fontWeight: 600,
-          }}>关闭</button>
-        </div>
-        {loading && <div className="et-meta" style={{ textAlign: 'center', padding: 40 }}>加载中…</div>}
-        {!loading && msgs && (
-          <div style={{ padding: '16px 24px 24px' }}>
-            <div className="et-meta" style={{ marginBottom: 12, color: 'var(--et-mute)' }}>
-              显示最早 {msgs.length} 条 · 共 {friend.count.toLocaleString()} 条
-              {friend.isGroup && (
-                <span style={{ marginLeft: 8, color: 'var(--et-faint)', fontSize: 10 }}>
-                  · 群里同一个 wxid 永远是同一个人，改名也不会被算成两个人
-                </span>
-              )}
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              {msgs.map((m, i) => {
-                const isSelf = m.from_id === 'self';
-                // For groups, color-code distinct senders consistently by hashing wxid → hue.
-                const hue = friend.isGroup && !isSelf
-                  ? Array.from(m.from_id).reduce((a, c) => a + c.charCodeAt(0), 0) % 360
-                  : null;
-                const labelColor = hue != null
-                  ? `hsl(${hue}, 38%, 38%)`
-                  : 'var(--et-faint)';
-                return (
-                  <div key={i} style={{
-                    display: 'flex', flexDirection: 'column',
-                    alignItems: isSelf ? 'flex-end' : 'flex-start',
-                  }}>
-                    <div className="et-meta" style={{ fontSize: 10, color: labelColor, marginBottom: 2 }}>
-                      <strong>{displayName(m.from_id, m.from)}</strong>
-                      {friend.isGroup && !isSelf && (
-                        <span style={{ opacity: 0.55, marginLeft: 4, fontFamily: 'var(--et-mono)' }}>
-                          ~{maskedWxid(m.from_id)}
-                        </span>
-                      )}
-                      <span style={{ marginLeft: 6, opacity: 0.7 }}>{m.time.slice(5, 16).replace('T', ' ')}</span>
-                    </div>
-                    <div style={{
-                      maxWidth: '78%',
-                      padding: '8px 12px',
-                      background: isSelf ? 'var(--et-orange-soft)' : 'var(--et-paper-2)',
-                      border: '0.5px solid var(--et-line-2)',
-                      borderRadius: 12,
-                      fontSize: 13, color: 'var(--et-ink)',
-                      whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-                    }}>{maskText(m.text)}</div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
 export function FriendPage({ friendId, onBack, onOpenFriend }: Props) {
   void usePrivacy();
   const [friend, setFriend] = useState<Friend | null>(null);
@@ -829,33 +724,29 @@ export function FriendPage({ friendId, onBack, onOpenFriend }: Props) {
   const [readyPack, setReadyPack] = useState<{
     ok: boolean; path: string; size: number; name: string; content: string;
   } | null>(null);
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<unknown>(null);
+  const [loadNonce, setLoadNonce] = useState(0);
   const [tab, setTab] = useState<FriendTab>('story');
   const [agentInvoke, setAgentInvoke] = useState<string | null>(null);  // 'claude' | 'codex' etc, null = idle
   const [reportOpen, setReportOpen] = useState(false);
   const [analysisStream, setAnalysisStream] = useState<{ output: string; stage: string; elapsed: number } | null>(null);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
 
-  const openMessagesDrawer = useCallback(() => setDrawerOpen(true), []);
-
-  function closeMessagesDrawer() {
-    setDrawerOpen(false);
-    setTab(t => t === 'chat' ? 'story' : t);
-  }
+  // 完整对话 opens the chat page (#/chat/<id>); it used to be a side drawer.
+  const openChat = () => { window.location.hash = `#/chat/${encodeURIComponent(friendId)}`; };
 
   useEffect(() => {
     setError(null);
     setStats(null);
     getFriend(friendId)
       .then(d => { setFriend(d); setStats(d.stats); })
-      .catch(e => setError(e?.message || String(e)));
+      .catch(e => setError(e));
     setMomentsLoading(true);
     getMoments(friendId)
       .then(setMoments)
       .catch(() => {})
       .finally(() => setMomentsLoading(false));
-  }, [friendId]);
+  }, [friendId, loadNonce]);
 
   useEffect(() => {
     let cancelled = false;
@@ -930,11 +821,22 @@ export function FriendPage({ friendId, onBack, onOpenFriend }: Props) {
   }
 
   if (error) {
+    const raw = error instanceof Error ? error.message : String(error);
+    const code = errorCode(error);
+    const entry = lookupError(code);
     return (
-      <div style={{ padding: 40 }}>
-        <button onClick={onBack} style={{ all: 'unset', cursor: 'pointer', color: 'var(--et-mute)' }}>← 返回</button>
-        <div style={{ marginTop: 20, color: 'var(--et-rose)' }}>加载失败：{maskText(error)}</div>
-      </div>
+      <>
+        <PageHeader back={{ label: '首页', onClick: onBack }} title="朋友" />
+        <ErrorState
+          layout="page"
+          title={entry?.title ?? '这位朋友的页面没能加载'}
+          code={code ?? undefined}
+          reason={entry?.reason ?? '读取这位朋友的资料时出错了。'}
+          fixes={entry ? [entry.fix] : ['点「重试」再读一次', '还不行就到「设置」里复制诊断信息反馈给我们']}
+          onRetry={() => setLoadNonce(n => n + 1)}
+          details={raw ? <pre>{maskText(raw)}</pre> : undefined}
+        />
+      </>
     );
   }
   if (!friend) {
@@ -953,9 +855,8 @@ export function FriendPage({ friendId, onBack, onOpenFriend }: Props) {
   return (
     <div className="et-root" style={{ background: 'var(--et-bg)', minHeight: '100%', position: 'relative' }}>
       <FriendChromeBar onBack={onBack} friend={friend} />
-      <FriendTabs tab={tab} setTab={setTab} />
+      <FriendTabs tab={tab} setTab={(t) => (t === 'chat' ? openChat() : setTab(t))} />
       {tab === 'media' && <MediaGallery friend={friend} />}
-      {tab === 'chat' && <ChatTabRedirect onOpen={openMessagesDrawer} friend={friend} />}
       {tab === 'story' && (
       <div style={{ padding: '24px 28px 32px', display: 'flex', flexDirection: 'column', gap: 18, maxWidth: 1180, margin: '0 auto' }}>
         <PersonCard friend={friend} stats={stats} />
@@ -983,7 +884,7 @@ export function FriendPage({ friendId, onBack, onOpenFriend }: Props) {
         <MomentsCard moments={moments} loading={momentsLoading} />
         <ActionDock
           onExportAI={() => setExportOpen(true)}
-          onShowMessages={openMessagesDrawer}
+          onShowMessages={openChat}
           onExportChat={handleExportChat}
           onOpenYearbook={() => { window.location.hash = `#yearbook/${friendId}`; }}
         />
@@ -1015,7 +916,6 @@ export function FriendPage({ friendId, onBack, onOpenFriend }: Props) {
           />
         </div>
       )}
-      <MessagesDrawer open={drawerOpen} friend={friend} onClose={closeMessagesDrawer} />
       {reportOpen && friend.aiReport && (
         <ReportViewerOverlay
           relPath={friend.aiReport.path}
@@ -1046,22 +946,6 @@ function FriendTabs({ tab, setTab }: { tab: FriendTab; setTab: (t: FriendTab) =>
           marginBottom: -1,
         }}>{t.label}</button>
       ))}
-    </div>
-  );
-}
-
-function ChatTabRedirect({ onOpen, friend }: { onOpen: () => void; friend: Friend }) {
-  useEffect(() => { onOpen(); }, [friend.id, onOpen]);
-  return (
-    <div style={{ padding: 60, textAlign: 'center' }}>
-      <div className="et-meta">
-        和 {displayName(friend.id, friend.name)} 的完整对话已在右侧抽屉打开。关闭后会回到人物故事页。
-      </div>
-      <button onClick={onOpen} style={{
-        all: 'unset', marginTop: 14, cursor: 'pointer',
-        padding: '8px 16px', borderRadius: 8,
-        background: 'var(--et-orange)', color: '#fff', fontSize: 13, fontWeight: 600,
-      }}>再打开一次</button>
     </div>
   );
 }
