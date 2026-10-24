@@ -5,4 +5,6 @@
 # Install with:
 #   python3.12 -m pip install -r requirements-mac-keyextract.txt
 -r requirements.txt
-frida>=17.0
+# Pinned: hook_cc_key_frida.py uses the frida 17 Module API and was checked
+# against 17.24.3. Bump deliberately.
+frida==17.24.*

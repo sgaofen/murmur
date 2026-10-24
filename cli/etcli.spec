@@ -12,6 +12,9 @@ from pathlib import Path
 
 HERE = Path(SPECPATH)
 
+import importlib.util
+_has_frida = importlib.util.find_spec("frida") is not None
+
 # Bundle native helpers only on Windows → ends up at _internal/native/<file>.
 # Mac/Linux use pure-Python/cryptography paths and should not ship Windows DLL/EXE
 # payloads in the .app resources.
@@ -66,6 +69,12 @@ a = Analysis(
         "live_sync",
         "decrypted_media_index",
         "batch_analyze",
+        "live_key",
+        "hook_cc_key_frida",
+        # macOS live key capture (WeChat 4.1.9+). frida is optional: bundled
+        # when the build env has it (release CI installs it on macOS);
+        # without it the App shows the CLI fallback instead.
+        *(["frida", "frida._frida"] if sys.platform == "darwin" and _has_frida else []),
     ],
     hookspath=[],
     hooksconfig={},
