@@ -227,17 +227,16 @@ class FakeProc:
         self.returncode = None
         self._rc = rc
         self.stdout = None
-        args = argv if argv[0] != "osascript" else None
-        if args is not None and rc == 0:
+        # Elevated runs are ["osascript", "-e", "<script>", *argv] here: the
+        # tests patch live_key._elevated_cmd so the fake never has to parse
+        # an AppleScript string (Windows temp paths don't survive that).
+        args = argv[3:] if argv[0] == "osascript" else argv
+        if rc == 0:
             prog = Path(args[args.index("--progress") + 1])
             out = Path(args[args.index("--out-keys") + 1])
             out.write_text(json.dumps({"keys_by_db": keys}))
             prog.write_text(json.dumps({"phase": "done", "new": sorted(keys), "hits": 7,
                                         "remaining": 0}))
-        elif argv[0] == "osascript" and rc == 0:
-            script = argv[2]
-            out = script.split("--out-keys ")[1].split(" ")[0]
-            Path(out).write_text(json.dumps({"keys_by_db": keys}))
 
     def poll(self):
         self.returncode = self._rc
@@ -279,6 +278,11 @@ class LiveKeyJobTest(unittest.TestCase):
             keys_file=self.keys_file,
             poll_interval=0.01,
         )
+
+        patcher = mock.patch.object(live_key, "_elevated_cmd",
+                                    lambda argv, pythonpath: ["osascript", "-e", "<script>", *argv])
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def tearDown(self):
         self.tmp.cleanup()
