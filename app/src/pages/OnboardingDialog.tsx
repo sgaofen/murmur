@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react';
-import { extractKey, getDiagnose, openFullDiskAccess, refreshData, resignWechat, saveKey, saveWeChatRoot, startDiskScan, getDiskScanStatus, cancelDiskScan } from '../data/api';
+import { errorCode, extractKey, getDiagnose, openFullDiskAccess, refreshData, resignWechat, saveKey, saveWeChatRoot, startDiskScan, getDiskScanStatus, cancelDiskScan } from '../data/api';
 import type { Diagnose, ScanState, ScanFound } from '../data/api';
 import { maskText } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
 import { DiagBundleButton } from '../components/DiagBundleButton';
+import { ErrorExplain } from '../components/ErrorExplain';
+import { lookupError } from '../data/errorCatalog';
 
 interface Props {
   open: boolean;
@@ -24,12 +26,15 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
   const [phase, setPhase] = useState<Phase>('welcome');
   const [diag, setDiag] = useState<Diagnose | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Stable backend error code for `error` (data/errorCatalog.ts); null → raw text only.
+  const [errCode, setErrCode] = useState<string | null>(null);
   const [progress, setProgress] = useState<string>('');
 
   useEffect(() => {
     if (!open) return;
     setPhase('welcome');
     setError(null);
+    setErrCode(null);
   }, [open]);
 
   useEffect(() => {
@@ -62,6 +67,7 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
 
   async function startDiagnose() {
     setPhase('diagnose');
+    setErrCode(null);
     try {
       const d = await getDiagnose();
       setDiag(d);
@@ -96,10 +102,12 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
         setPhase('win-no-data');
       } else {
         setError('看起来你还没在这台电脑上登录过微信，请先用微信登录一次。');
+        setErrCode('WECHAT_DATA_NOT_FOUND');
         setPhase('error');
       }
     } catch (e: any) {
       setError(e?.message || String(e));
+      setErrCode(errorCode(e));
       setPhase('error');
     }
   }
@@ -107,10 +115,12 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
   async function runDecrypt() {
     setProgress('正在解密所有微信数据库…');
     setPhase('win-decrypt');
+    setErrCode(null);
     try {
       const r = await refreshData();
       if (!r.ok) {
         setError(r.details || '解密失败');
+        setErrCode(r.code ?? 'DECRYPT_FAILED');
         setPhase('error');
         return;
       }
@@ -122,20 +132,24 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
         setError(`解密完成但后端无法加载这份数据：${r.init_error}\n\n` +
                  `常见原因：session.db 损坏 / 表名不匹配 / 解密目录里有上次失败的残留文件。\n` +
                  `建议：完全退出 Murmur，删除 ~/Documents/Murmur/decrypted/ 整个目录，重新走引导（抓 key 前先在微信里点开聊天列表 + 几个对话 + 朋友圈让 WCDB 派发完整 key）。`);
+        setErrCode(r.code ?? 'STORE_INIT_FAILED');
         setPhase('error');
         return;
       }
       setPhase('done');
     } catch (e: any) {
       setError(e?.message || String(e));
+      setErrCode(errorCode(e));
       setPhase('error');
     }
   }
 
   async function submitMacKey(key: string) {
     const cleaned = key.trim().toLowerCase();
+    setErrCode(null);
     if (cleaned.length !== 64 || !/^[0-9a-f]+$/.test(cleaned)) {
       setError('密钥格式不对：必须是 64 位十六进制字符（0-9a-f）');
+      setErrCode('KEY_FORMAT_INVALID');
       setPhase('error');
       return;
     }
@@ -143,23 +157,27 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
       const sr = await saveKey(cleaned);
       if (!sr.ok) {
         setError(sr.error || '保存密钥失败');
+        setErrCode(sr.code ?? null);
         setPhase('error');
         return;
       }
       await runDecrypt();
     } catch (e: any) {
       setError(e?.message || String(e));
+      setErrCode(errorCode(e));
       setPhase('error');
     }
   }
 
   async function startKeyExtract() {
+    setErrCode(null);
     try {
       if (diag?.platform === 'windows') {
         const latest = await getDiagnose();
         setDiag(latest);
         if (latest.capabilities.weixin_running === false) {
           setError('没有检测到正在运行的 Weixin.exe / WeChat.exe。请先打开微信，让它停在登录页但不要关闭程序；然后回到 Murmur 点「再次检测微信」。');
+          setErrCode('WECHAT_NOT_RUNNING');
           setPhase('error');
           return;
         }
@@ -182,6 +200,7 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
           ? '没读到密钥 — 请确认微信程序没有关闭：先让微信停在登录页，再点 Murmur 的开始抓密钥，然后在 90 秒内回微信完成登录。'
           : '没读到密钥 — 请确保已登录微信并点开几个对话';
         setError(r.log?.split('\n').slice(-12).join('\n') || fallback);
+        setErrCode(r.code ?? 'KEY_NOT_FOUND');
         setPhase('error');
         return;
       }
@@ -194,6 +213,7 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
       const r2 = await refreshData();
       if (!r2.ok) {
         setError(r2.details || '解密失败');
+        setErrCode(r2.code ?? 'DECRYPT_FAILED');
         setPhase('error');
         return;
       }
@@ -204,12 +224,14 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
         setError(`解密完成但后端无法加载这份数据：${r2.init_error}\n\n` +
                  `常见原因：session.db 损坏 / 表名不匹配 / 解密目录里有上次失败的残留文件。\n` +
                  `建议：完全退出 Murmur，删除 ~/Documents/Murmur/decrypted/ 整个目录，重新走引导。`);
+        setErrCode(r2.code ?? 'STORE_INIT_FAILED');
         setPhase('error');
         return;
       }
       setPhase('done');
     } catch (e: any) {
       setError(e?.message || String(e));
+      setErrCode(errorCode(e));
       setPhase('error');
     }
   }
@@ -217,16 +239,19 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
   async function startResign() {
     setPhase('mac-resigning');
     setProgress('检查 WeChat 是否已退出，然后重签名…（系统会弹窗要开机密码）');
+    setErrCode(null);
     try {
       const r = await resignWechat({ relaunch: true });
       if (!r.ok) {
         setError([r.error, r.stderr].filter(Boolean).join('\n') || '重签名失败：请确认系统密码窗口没有被取消。');
+        setErrCode(r.code ?? 'RESIGN_FAILED');
         setPhase('error');
         return;
       }
       setPhase('mac-wait-login');
     } catch (e: any) {
       setError(e?.message || String(e));
+      setErrCode(errorCode(e));
       setPhase('error');
     }
   }
@@ -305,7 +330,7 @@ export function OnboardingDialog({ open, onClose, onDone, onPickQQ, initError }:
           {phase === 'extract-key' && <Working text={progress} />}
           {phase === 'win-decrypt' && <Working text={progress || "正在解密所有微信数据库…"} />}
           {phase === 'done' && <Done onDone={() => { onClose(); onDone?.(); }} />}
-          {phase === 'error' && <ErrorView error={error || ''} diag={diag} onRetry={startDiagnose} />}
+          {phase === 'error' && <ErrorView error={error || ''} code={errCode} diag={diag} onRetry={startDiagnose} />}
         </div>
       </div>
     </div>
@@ -1159,17 +1184,18 @@ function Done({ onDone }: { onDone: () => void }) {
   );
 }
 
-function ErrorView({ error, diag, onRetry }: { error: string; diag: Diagnose | null; onRetry: () => void }) {
-  const isWinHookInstallFailure = diag?.platform === 'windows' &&
+function ErrorView({ error, code, diag, onRetry }: { error: string; code?: string | null; diag: Diagnose | null; onRetry: () => void }) {
+  const isWinHookInstallFailure = code !== 'WIN_HOOK_FAILED' && diag?.platform === 'windows' &&
     /hook (setup|install) failed|wx_key\.dll|注入到微信进程/i.test(error);
   return (
     <>
+      <ErrorExplain code={code} />
       <div style={{
         padding: '12px 14px', background: 'rgba(196,90,63,0.12)',
         border: '0.5px solid rgba(196,90,63,0.4)',
         borderRadius: 8, marginBottom: 14,
       }}>
-        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--et-rose)', marginBottom: 6 }}>失败原因</div>
+        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--et-rose)', marginBottom: 6 }}>{lookupError(code) ? '原始报错' : '失败原因'}</div>
         <pre className="et-meta" style={{ fontSize: 11, color: 'var(--et-ink-soft)',
           whiteSpace: 'pre-wrap', margin: 0 }}>{maskText(error)}</pre>
       </div>

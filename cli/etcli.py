@@ -147,6 +147,8 @@ def _render_appmsg(xml_text: str) -> str:
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import paths as _paths  # noqa: E402  (cross-platform discovery helper)
+import error_codes as _ec  # noqa: E402  (stable API error codes)
+import diag_redact as _redact  # noqa: E402  (diag bundle scrubbing)
 
 
 def _flutter_prefs_path() -> Path:
@@ -269,25 +271,39 @@ def read_diagnostic_logs(max_lines: int = 80) -> dict:
     }
 
 
-def _mask_user_paths(s: str) -> str:
-    """Replace user's home dir + wxid suffix with stable placeholders so the
-    diag bundle can be pasted into a public issue without leaking the user's
-    Windows username or full WeChat ID."""
+def _mask_user_paths(s: str, names=()) -> str:
+    """Scrub the diag bundle so it can be pasted into a public issue: home dir
+    / OS user name, wxid & account folders, QQ numbers, phone numbers, long
+    hex (keys/salts), nicknames. See cli/diag_redact.py."""
     if not s:
         return s
-    home = str(Path.home())
-    out = s.replace(home, "~")
-    # Mask wxid suffix: wxid_n0cir36u32si12_97a5 → wxid_n…97a5
-    import re as _re
-    out = _re.sub(r"wxid_([a-z0-9]{2})[a-z0-9]+_([a-f0-9]{4})", r"wxid_\1…\2", out)
-    # Mask QQ numbers (>=5 digits) similarly
-    out = _re.sub(r"\bqq[: /]?(\d{3})\d+(\d{3})\b", r"qq:\1…\2", out)
-    return out
+    return _redact.redact(s, names=names)
+
+
+def _diag_known_names() -> list:
+    """Nicknames we can cheaply learn (own account(s)) so the redactor can
+    blank them even outside `nick_name=` style fields."""
+    names: list = []
+    try:
+        for p in (_MurmurAPIHandler._build_profiles_payload() or {}).get("profiles", []):
+            if p.get("nick_name"):
+                names.append(p["nick_name"])
+    except Exception:
+        pass
+    try:
+        st = _MurmurAPIHandler._wechat_store
+        if st is not None and st.me:
+            c = st.contact(st.me)
+            names += [x for x in (c.nick_name, c.remark, c.alias) if x]
+    except Exception:
+        pass
+    return names
 
 
 def _build_diag_bundle() -> str:
     """Compose the markdown blob users paste into a GitHub issue."""
     import platform as _plat
+    names = _diag_known_names()
     lines: list[str] = []
     lines.append("## Murmur diag bundle")
     lines.append("")
@@ -295,16 +311,16 @@ def _build_diag_bundle() -> str:
     lines.append(f"- **platform**: {_plat.system()} {_plat.release()} ({_plat.machine()})")
     lines.append(f"- **python**: {sys.version.split()[0]}")
     lines.append(f"- **active_platform / active_id**: {_MurmurAPIHandler._active_platform} / "
-                 f"{_mask_user_paths(_MurmurAPIHandler._active_id or '(none)')}")
+                 f"{_mask_user_paths(_MurmurAPIHandler._active_id or '(none)', names)}")
     lines.append(f"- **store loaded**: {_MurmurAPIHandler.store is not None}")
     if _MurmurAPIHandler._init_error:
-        lines.append(f"- **init_error**: `{_mask_user_paths(_MurmurAPIHandler._init_error)}`")
+        lines.append(f"- **init_error**: `{_mask_user_paths(_MurmurAPIHandler._init_error, names)}`")
     # Discovered profiles
     try:
         wprofs = _paths.discover_wechat_profiles()
         lines.append(f"- **wechat profiles found**: {len(wprofs)}")
         for p in wprofs:
-            lines.append(f"  - {_mask_user_paths(p.wxid)}  enc={_mask_user_paths(str(p.encrypted_root))}  "
+            lines.append(f"  - {_mask_user_paths(p.wxid, names)}  enc={_mask_user_paths(str(p.encrypted_root), names)}  "
                          f"decrypted={(_paths.decrypted_root_for(p, must_exist=True) is not None)}")
     except Exception as e:
         lines.append(f"- **wechat profile discovery failed**: {type(e).__name__}: {e}")
@@ -314,8 +330,8 @@ def _build_diag_bundle() -> str:
         qprofs = _qpaths.discover_qq_profiles()
         lines.append(f"- **qq profiles found**: {len(qprofs)}")
         for q in qprofs:
-            lines.append(f"  - qq:{_mask_user_paths('qq:' + q.qq_number).split(':',1)[-1]}  "
-                         f"enc={_mask_user_paths(str(q.nt_db_dir))}")
+            lines.append(f"  - qq:{_mask_user_paths('qq:' + q.qq_number, names).split(':',1)[-1]}  "
+                         f"enc={_mask_user_paths(str(q.nt_db_dir), names)}")
     except Exception as e:
         lines.append(f"- **qq profile discovery failed**: {type(e).__name__}: {e}")
     # Caps
@@ -4063,6 +4079,11 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
     def _send_json(self, payload, status=200):
+        # Attach a stable `code` next to any `error` text so the frontend can
+        # look it up in errorCatalog.ts. The original `error` is untouched.
+        if isinstance(payload, dict) and payload.get("error") and "code" not in payload:
+            scope = "qq" if urllib.parse.urlparse(self.path or "").path.startswith("/api/qq/") else "wechat"
+            payload = _ec.annotate(dict(payload), scope=scope)
         body = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
         try:
             self.send_response(status)
@@ -4111,7 +4132,8 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 "detail": msg,
             }, status=503)
             return
-        self._send_json({"error": msg, "type": type(e).__name__}, status=500)
+        self._send_json({"error": msg, "type": type(e).__name__,
+                         "code": _ec.classify(msg) or _ec.INTERNAL_ERROR}, status=500)
 
     def do_GET(self):  # noqa: N802
         try:
@@ -4224,6 +4246,10 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     # construction threw — frontend should show this verbatim instead
                     # of relooping the user through onboarding pretending nothing failed.
                     "init_error": self.__class__._init_error,
+                    "init_error_code": (
+                        (_ec.classify(self.__class__._init_error) or _ec.STORE_INIT_FAILED)
+                        if self.__class__._init_error else None
+                    ),
                 })
             return self._send_json({
                 "data_dir": str(self.store.dir),
@@ -4940,6 +4966,10 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 # init — this used to silently swallow the error and let the frontend
                 # think everything was fine, then loop back into bootstrap. Surface it.
                 "init_error": init_error,
+                # Stable code for the failure (or post-decrypt init failure);
+                # None on a clean success. See cli/error_codes.py.
+                "code": _ec.refresh_failure_code(
+                    (r.stdout or "") + "\n" + (r.stderr or ""), init_error, ok=ok),
             })
 
         if path == "/api/media/index":
@@ -5661,12 +5691,14 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     "mac_keys_count": mac_keys_count,
                     "ms": ms,
                     "log": stdout[-3000:] or "(no output)",
+                    "code": None if ok else _ec.extract_key_failure_code(stdout),
                 })
             return self._send_json({
                 "ok": bool(key),
                 "key": key,
                 "ms": ms,
                 "log": stdout[-3000:],
+                "code": None if key else _ec.extract_key_failure_code(stdout),
             })
 
         if path == "/api/save-key":
@@ -5831,6 +5863,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     return self._send_json({
                         "ok": False,
                         "error": "重签名后主可执行文件仍带 hardened runtime — 这是 macOS / codesign 行为变化导致的，请反馈 issue",
+                        "code": _ec.RESIGN_FAILED,
                         "stderr": v_blob[-800:],
                         "log": steps_log,
                     })

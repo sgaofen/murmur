@@ -47,6 +47,8 @@ a = Analysis(
         # All local cli/ modules — etcli.py imports some lazily (refresh on Win
         # via _spawn_etcli_args, extract_key_mac on Mac via osascript subprocess).
         "paths",
+        "error_codes",
+        "diag_redact",
         "refresh",
         "extract_key_dll",
         "extract_key_mac",
