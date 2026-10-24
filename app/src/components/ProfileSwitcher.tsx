@@ -1,7 +1,7 @@
 /* ProfileSwitcher — trigger + popover for switching the active
- * platform/account. Uses Murmur's real `app/src/tokens.css` palette
- * (cream paper + ink-blue + warm coral); QQ pages reuse `--et-sky` so the
- * magazine tone stays consistent.
+ * platform/account. Colors are the semantic tokens in `app/src/tokens.css`
+ * (WeChat rows use the accent family, QQ rows the info family), so the
+ * popover follows the light / dark theme.
  *
  * Two looks: `variant="sidebar"` is the account row at the bottom of the app
  * shell's left nav (icon-only when the nav is collapsed); the default `chip`
@@ -344,7 +344,7 @@ function Popover({ profiles, activeId, onClose, anchorRef, placement }: {
       style={{ ...popoverShell, ...pos, visibility: pos ? 'visible' : 'hidden' }}>
       <div style={popoverHeader}>
         <span className="et-eyebrow">你的账号</span>
-        <span className="et-eyebrow" style={{ letterSpacing: '0.08em', color: 'var(--et-faint)', fontSize: 9 }}>
+        <span className="et-eyebrow" style={{ letterSpacing: '0.08em', color: 'var(--text-faint)', fontSize: 9 }}>
           {profiles.length} · murmur
         </span>
       </div>
@@ -365,9 +365,9 @@ function Popover({ profiles, activeId, onClose, anchorRef, placement }: {
       <div ref={footerRef} style={popoverFooter}>
         {!adding ? (
           <button type="button" role="menuitem" onClick={() => setAdding(true)} style={addBtn}
-            onMouseEnter={(e) => e.currentTarget.style.background = 'var(--et-paper-2)'}
+            onMouseEnter={(e) => e.currentTarget.style.background = 'var(--surface-sunken)'}
             onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}>
-            <span style={{ fontSize: 14, lineHeight: 1, color: 'var(--et-faint)' }}>＋</span>
+            <span style={{ fontSize: 14, lineHeight: 1, color: 'var(--text-faint)' }}>＋</span>
             <span>添加新账号</span>
           </button>
         ) : (
@@ -386,7 +386,7 @@ function Popover({ profiles, activeId, onClose, anchorRef, placement }: {
               )}
             </div>
             <button type="button" role="menuitem" onClick={() => setAdding(false)}
-              style={{ all: 'unset', cursor: 'pointer', color: 'var(--et-faint)',
+              style={{ all: 'unset', cursor: 'pointer', color: 'var(--text-faint)',
                        fontSize: 10.5, marginTop: 6, padding: 2 }}>
               ← 返回
             </button>
@@ -424,10 +424,10 @@ function ProfileRow({ p, isActive, isLast, hover, privacyOn, onHover, onClick }:
         display: 'flex',
         gap: 11,
         padding: '10px 14px 11px',
-        borderBottom: isLast ? 'none' : '0.5px solid var(--et-line)',
+        borderBottom: isLast ? 'none' : '0.5px solid var(--border-subtle)',
         cursor: p.state === 'extracting' ? 'wait' : 'pointer',
         opacity: dim ? 0.6 : 1,
-        background: isActive ? palette.bg : (hover ? 'var(--et-paper-2)' : 'transparent'),
+        background: isActive ? palette.bg : (hover ? 'var(--surface-sunken)' : 'transparent'),
         transition: 'background 120ms ease',
       }}
     >
@@ -449,7 +449,7 @@ function ProfileRow({ p, isActive, isLast, hover, privacyOn, onHover, onClick }:
           <span style={{
             fontFamily: monoStack,
             fontSize: 12.5,
-            color: dim ? 'var(--et-mute)' : 'var(--et-ink)',
+            color: dim ? 'var(--text-muted)' : 'var(--text-primary)',
             fontWeight: isActive ? 600 : 500,
             letterSpacing: '0.01em',
             whiteSpace: 'nowrap',
@@ -457,27 +457,27 @@ function ProfileRow({ p, isActive, isLast, hover, privacyOn, onHover, onClick }:
             textOverflow: 'ellipsis',
           }}>{display}</span>
           <span style={{
-            fontSize: 10.5, color: 'var(--et-mute)', flexShrink: 0,
-            fontFamily: 'var(--et-serif)', fontStyle: 'italic',
+            fontSize: 10.5, color: 'var(--text-muted)', flexShrink: 0,
+            fontFamily: 'var(--font-serif)', fontStyle: 'italic',
           }}>{humaniseLast(p.last_active_ts)}</span>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6,
-                       marginTop: 3, fontSize: 11, color: 'var(--et-mute)' }}>
+                       marginTop: 3, fontSize: 11, color: 'var(--text-muted)' }}>
           {p.state === 'ready' && (
-            <span><span className="et-num" style={{ color: 'var(--et-ink-soft)' }}>
+            <span><span className="et-num" style={{ color: 'var(--text-secondary)' }}>
               {p.n_sessions.toLocaleString()}
             </span> 个对话</span>
           )}
           {p.state === 'needs_decrypt' && (
-            <span style={{ color: 'var(--et-rose)', fontStyle: 'italic',
-                            fontFamily: 'var(--et-serif)' }}>未解密 · 点击设置</span>
+            <span style={{ color: 'var(--danger-fg)', fontStyle: 'italic',
+                            fontFamily: 'var(--font-serif)' }}>未解密 · 点击设置</span>
           )}
           {p.state === 'needs_key' && (
-            <span style={{ color: 'var(--et-rose)', fontStyle: 'italic',
-                            fontFamily: 'var(--et-serif)' }}>缺少密钥 · 点击引导</span>
+            <span style={{ color: 'var(--danger-fg)', fontStyle: 'italic',
+                            fontFamily: 'var(--font-serif)' }}>缺少密钥 · 点击引导</span>
           )}
           {p.state === 'extracting' && (
-            <span style={{ fontStyle: 'italic', fontFamily: 'var(--et-serif)' }}>正在提取密钥…</span>
+            <span style={{ fontStyle: 'italic', fontFamily: 'var(--font-serif)' }}>正在提取密钥…</span>
           )}
         </div>
       </div>
@@ -491,12 +491,12 @@ function PlatformPickButton({ glyph, label, onClick }:
     <button type="button" role="menuitem" onClick={onClick}
       style={{
         all: 'unset', cursor: 'pointer', display: 'flex', alignItems: 'center',
-        gap: 8, padding: '10px 12px', background: 'var(--et-paper)',
-        border: '0.5px solid var(--et-line-2)', borderRadius: 'var(--et-r-sm)',
-        fontSize: 12, color: 'var(--et-ink)',
+        gap: 8, padding: '10px 12px', background: 'var(--surface-card)',
+        border: '0.5px solid var(--border-default)', borderRadius: 'var(--radius-sm)',
+        fontSize: 12, color: 'var(--text-primary)',
       }}
-      onMouseEnter={(e) => e.currentTarget.style.background = 'var(--et-paper-2)'}
-      onMouseLeave={(e) => e.currentTarget.style.background = 'var(--et-paper)'}>
+      onMouseEnter={(e) => e.currentTarget.style.background = 'var(--surface-sunken)'}
+      onMouseLeave={(e) => e.currentTarget.style.background = 'var(--surface-card)'}>
       <span style={{ fontSize: 16 }}>{glyph}</span>
       <span>{label}</span>
     </button>
@@ -539,24 +539,24 @@ function idForBackend(p: ProfileEntry): string {
 const monoStack = '"JetBrains Mono", "SF Mono", ui-monospace, "Sarasa Mono SC", monospace';
 
 const wechatPalette = {
-  fg: 'var(--et-orange-2)',
-  bg: 'var(--et-orange-soft)',
-  bgHover: 'rgba(255,107,71,0.18)',
-  border: 'rgba(224, 83, 46, 0.18)',
+  fg: 'var(--accent-text)',
+  bg: 'var(--accent-soft)',
+  bgHover: 'color-mix(in srgb, var(--accent) 18%, transparent)',
+  border: 'var(--accent-border)',
 };
 const qqPalette = {
-  fg: '#3a6c8c',
-  bg: 'rgba(90, 122, 153, 0.10)',
-  bgHover: 'rgba(90, 122, 153, 0.20)',
-  border: 'rgba(90, 122, 153, 0.22)',
+  fg: 'var(--info-fg)',
+  bg: 'var(--info-bg)',
+  bgHover: 'color-mix(in srgb, var(--info-solid) 20%, transparent)',
+  border: 'var(--info-border)',
 };
 
 const addOnlyChip: React.CSSProperties = {
   all: 'unset', cursor: 'pointer',
   display: 'inline-flex', alignItems: 'center', gap: 5,
   padding: '5px 10px', borderRadius: 999,
-  fontSize: 11, fontWeight: 500, color: 'var(--et-mute)',
-  background: 'transparent', border: '0.5px solid var(--et-line-2)',
+  fontSize: 11, fontWeight: 500, color: 'var(--text-muted)',
+  background: 'transparent', border: '0.5px solid var(--border-default)',
 };
 
 const POPOVER_WIDTH = 270;
@@ -565,21 +565,21 @@ const POPOVER_WIDTH = 270;
 // app shell (nav 40 / top bar 30 / full-bleed pages 45) but below dialogs.
 const popoverShell: React.CSSProperties = {
   position: 'fixed', zIndex: 300,
-  width: POPOVER_WIDTH, maxWidth: 'calc(100vw - 16px)', background: 'var(--et-paper)',
-  border: '0.5px solid var(--et-line-2)', borderRadius: 'var(--et-r)',
-  boxShadow: 'var(--et-shadow-2)', overflow: 'hidden',
+  width: POPOVER_WIDTH, maxWidth: 'calc(100vw - 16px)', background: 'var(--surface-card)',
+  border: '0.5px solid var(--border-default)', borderRadius: 'var(--radius-lg)',
+  boxShadow: 'var(--shadow-md)', overflow: 'hidden',
 };
 const popoverHeader: React.CSSProperties = {
   padding: '11px 14px 8px',
-  borderBottom: '0.5px solid var(--et-line)',
+  borderBottom: '0.5px solid var(--border-subtle)',
   display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
 };
 const popoverFooter: React.CSSProperties = {
-  borderTop: '0.5px solid var(--et-line-2)', background: 'var(--et-paper-2)',
+  borderTop: '0.5px solid var(--border-default)', background: 'var(--surface-sunken)',
 };
 const addBtn: React.CSSProperties = {
   all: 'unset', cursor: 'pointer', display: 'flex', width: '100%',
   alignItems: 'center', gap: 9, padding: '10px 14px',
-  color: 'var(--et-mute)', fontSize: 12,
+  color: 'var(--text-muted)', fontSize: 12,
   boxSizing: 'border-box',
 };

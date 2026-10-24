@@ -31,6 +31,7 @@ import { IconKey } from '../ui/icons';
 - **状态色**：`--{success|warning|danger|info}-{bg|fg|border|solid}`，`-bg` 做底、`-fg` 做字和图标、`-border` 做描边、`-solid` 做实心元素（`--danger-solid-hover` 用于危险按钮悬停）
 - **其他**：`--shadow-sm/md/lg/accent`、`--skeleton-base/shine`、`--radius-xs/sm/md/lg/xl/pill`、`--space-1..9`（4/8/12/16/24/32/48/64/96px）、`--font-serif/sans/mono`、`--ease-out`、`--dur-fast/base`、`--z-dialog`（外壳自己的层级见第 7 节）
 - **media**（盖在照片 / 视频 / 渐变头像上的东西，深浅色一样）：`--media-scrim`（角标、悬停渐变）、`--media-scrim-strong`（看大图的遮罩）、`--media-on-scrim`（上面的白字）、`--media-control` + `--media-control-ink`（播放按钮的底和图标）。页面本身的遮罩仍用 `--surface-overlay`
+- **graph**（只给关系网 `components/extras/GraphView.tsx` 用）：`--graph-backdrop`（画布背景，深色是星空）、`--graph-node-rim` / `--graph-specular`（节点描边和高光）、`--graph-star`、`--graph-self`（「你」的光晕）、`--graph-highlight`（悬停 / 选中环）、`--graph-circle-1…9`（核心圈分类色）。层级和连线颜色直接用语义 token（`--accent`、`--info-*`、`--warning-solid`、`--et-amber` / `--et-sky` 等）。SVG 里通过 `style={{ fill / stroke / stopColor }}` 传 `var()`
 
 ### 规则
 

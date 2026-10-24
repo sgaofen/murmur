@@ -8,6 +8,8 @@ import { PageHeader } from '../shell/PageHeader';
 import { Button, Chip, EmptyState, ErrorState, Skeleton, cx } from '../ui';
 import type { ChipTone } from '../ui';
 import { IconClose, IconInbox, IconSearch } from '../ui/icons';
+import { signalsOutcome } from '../utils/pageStates';
+import type { SignalsOutcome } from '../utils/pageStates';
 import './OfflineSignalsTable.css';
 
 interface SignalRow {
@@ -62,6 +64,8 @@ export function OfflineSignalsTable({ onOpenFriend }: Props) {
   void usePrivacy();
   const [rows, setRows] = useState<SignalRow[] | null>(null);
   const [error, setError] = useState<unknown>(null);
+  // How collecting ended: an empty table must not hide "every request failed".
+  const [outcome, setOutcome] = useState<SignalsOutcome | null>(null);
   const [nonce, setNonce] = useState(0);
   const [progress, setProgress] = useState(0);
   const [total, setTotal] = useState<number | null>(null);
@@ -73,6 +77,7 @@ export function OfflineSignalsTable({ onOpenFriend }: Props) {
     let cancelled = false;
     setError(null);
     setRows(null);
+    setOutcome(null);
     setProgress(0);
     setTotal(null);
     (async () => {
@@ -82,6 +87,8 @@ export function OfflineSignalsTable({ onOpenFriend }: Props) {
         const targets = all.slice(0, 100);
         if (!cancelled) setTotal(targets.length);
         const collected: SignalRow[] = [];
+        let failed = 0;
+        let firstFailure: unknown = null;
         for (let i = 0; i < targets.length; i++) {
           if (cancelled) return;
           const f = targets[i];
@@ -108,12 +115,18 @@ export function OfflineSignalsTable({ onOpenFriend }: Props) {
               last_active: f.last,
               signature_summary: (sig?.signature_notes || []).slice(0, 3).join(' · ') || '—',
             });
-          } catch {
-            // skip friends that fail
+          } catch (e) {
+            // Skip friends that fail — but count them, see signalsOutcome().
+            failed += 1;
+            if (firstFailure === null) firstFailure = e;
           }
           if (!cancelled) setProgress(((i + 1) / targets.length) * 100);
         }
-        if (!cancelled) setRows(collected);
+        if (cancelled) return;
+        const out = signalsOutcome(targets.length, collected.length, failed);
+        setOutcome(out);
+        if (out.kind === 'all-failed') setError(firstFailure ?? new Error('all friend requests failed'));
+        else setRows(collected);
       } catch (e) {
         if (!cancelled) setError(e);
       }
@@ -171,6 +184,7 @@ export function OfflineSignalsTable({ onOpenFriend }: Props) {
   );
 
   if (error) {
+    const allFailed = outcome?.kind === 'all-failed';
     const code = errorCode(error);
     const entry = lookupError(code);
     const raw = error instanceof Error ? error.message : String(error);
@@ -180,8 +194,12 @@ export function OfflineSignalsTable({ onOpenFriend }: Props) {
         <ErrorState
           layout="page"
           code={code ?? undefined}
-          title={entry?.title ?? '离线证据表没能生成'}
-          reason={entry?.reason ?? '读取朋友列表时本地服务返回了错误。'}
+          // "Every friend failed" leads with that fact, so it never reads as
+          // an empty account; the error code's own advice still follows.
+          title={allFailed ? '朋友详情全部读取失败' : (entry?.title ?? '离线证据表没能生成')}
+          reason={allFailed
+            ? `${outcome.failed} 位朋友的详情都没读出来，所以表是空的——这不代表你没有朋友。${entry ? entry.reason : ''}`
+            : (entry?.reason ?? '读取朋友列表时本地服务返回了错误。')}
           fixes={entry ? [entry.fix] : ['点「重试」再收集一次', '还不行就到「设置」里复制诊断信息反馈给我们']}
           onRetry={() => setNonce(n => n + 1)}
           details={raw ? <pre>{maskText(raw)}</pre> : undefined}
@@ -302,6 +320,12 @@ export function OfflineSignalsTable({ onOpenFriend }: Props) {
                   ))}
                 </tbody>
               </table>
+            </div>
+          )}
+          {outcome?.kind === 'rows' && outcome.failed > 0 && (
+            <div className="et-meta signals-foot" role="status">
+              另有 {outcome.failed} 位朋友的详情读取失败，没有列进表里 ·{' '}
+              <button type="button" className="signals-retry" onClick={() => setNonce(n => n + 1)}>重新收集</button>
             </div>
           )}
           <div className="et-meta signals-foot">只统计消息最多的前 100 位私聊朋友 · 全部在本机计算</div>

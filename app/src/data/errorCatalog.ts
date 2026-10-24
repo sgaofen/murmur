@@ -243,6 +243,12 @@ export const ERROR_CATALOG: Record<string, ErrorEntry> = {
     reason: '本地后端只接受 Murmur 自己的页面发来的请求。',
     fix: '请从 Murmur 应用里操作；开发模式下前端要跑在 5173 端口。',
   },
+  HOST_NOT_ALLOWED: {
+    level: 'info',
+    title: '请求地址被拒绝',
+    reason: '本地后端只接受发往 127.0.0.1、localhost 或 [::1]（加上它实际监听的端口）的请求，用来挡住借用其他域名指向本机的网页（DNS 重绑定）。',
+    fix: '用 http://127.0.0.1:9100 访问本地服务；Murmur 应用和开发模式默认就是这个地址，不用改。',
+  },
   INTERNAL_ERROR: {
     level: 'info',
     title: '后端出错了',

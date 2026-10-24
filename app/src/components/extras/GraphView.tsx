@@ -92,20 +92,43 @@ export type Spotlight =
   | { kind: 'circle'; clusterId: string };
 // ──────────────────────────────────────────────────────────────────────────
 
+// Colors are design tokens (app/src/tokens.css), so the canvas follows the
+// light / dark theme. SVG gets them through `style` (fill / stroke /
+// stop-color), where var() is always honoured.
 const TIER_COLORS: Record<string, string> = {
-  self: '#FFE6CF',
-  A: '#FF6B47',
-  B: '#E8B57A',
-  C: '#5A7A99',
-  D: '#9E9583',
-  E: '#C8BFAB',
+  self: 'var(--graph-self)',
+  A: 'var(--accent)',
+  B: 'var(--et-amber)',
+  C: 'var(--et-sky)',
+  D: 'var(--text-faint)',
+  E: 'var(--et-faint)',
 };
 
-// ── [PATCH-1] 9 个核心圈固定调色板（按 cluster.id 字典序映射）──────────────
-const CIRCLE_PALETTE = [
-  '#FF6B47', '#E8B57A', '#5A7A99', '#9E9583', '#7C9885',
-  '#C9A66B', '#A87BA1', '#6B8FA8', '#D17545',
+const TIER_LEGEND: Array<{ tier: string; label: string }> = [
+  { tier: 'A', label: 'A · 灵魂朋友' },
+  { tier: 'B', label: 'B · 常聊朋友' },
+  { tier: 'C', label: 'C · 一般联系' },
+  { tier: 'D', label: 'D · 弱关系' },
+  { tier: 'E', label: 'E · 沉默 / 孤岛' },
 ];
+
+const EDGE_STROKE: Record<string, string> = {
+  private: 'var(--accent)',
+  co_group: 'var(--info-solid)',
+  co_active: 'var(--info-fg)',
+  mention: 'var(--warning-solid)',
+  dm_inferred: 'var(--accent-text)',
+  mutual_reply: 'var(--info-fg)',
+  close_pair: 'var(--accent-strong)',
+  moments_cross: 'var(--et-rose)',
+};
+
+// Floating panels over the canvas (legend, overview, banner, zoom buttons).
+const PANEL_BG = 'color-mix(in srgb, var(--surface-card) 86%, transparent)';
+const PANEL_BORDER = 'var(--border-subtle)';
+
+// ── [PATCH-1] 9 个核心圈固定调色板（按 cluster.id 字典序映射）──────────────
+const CIRCLE_PALETTE = Array.from({ length: 9 }, (_, i) => `var(--graph-circle-${i + 1})`);
 function clusterColor(clusterId: string, allClusters: GraphCluster[]): string {
   const sorted = [...allClusters].map(c => c.id).sort();
   const idx = sorted.indexOf(clusterId);
@@ -652,9 +675,7 @@ export function GraphView({
   return (
     <div style={{
       position: 'relative', width: '100%', height: '100%',
-      background: dark
-        ? 'radial-gradient(ellipse at 50% 40%, #1B2548 0%, #0B0F22 70%, #050714 100%)'
-        : 'linear-gradient(180deg, var(--et-bg) 0%, #EFE5D2 100%)',
+      background: 'var(--graph-backdrop)',
       overflow: 'hidden',
     }}>
       {dark && <Starfield />}
@@ -674,13 +695,13 @@ export function GraphView({
            onContextMenu={(e) => e.preventDefault()}>
         <defs>
           <radialGradient id="self-glow" cx="0.5" cy="0.5" r="0.5">
-            <stop offset="0%" stopColor="#FFE6CF" stopOpacity="1" />
-            <stop offset="60%" stopColor="#FF6B47" stopOpacity="0.6" />
-            <stop offset="100%" stopColor="#FF6B47" stopOpacity="0" />
+            <stop offset="0%" style={{ stopColor: 'var(--graph-self)' }} stopOpacity="1" />
+            <stop offset="60%" style={{ stopColor: 'var(--accent)' }} stopOpacity="0.6" />
+            <stop offset="100%" style={{ stopColor: 'var(--accent)' }} stopOpacity="0" />
           </radialGradient>
           <radialGradient id="sel-glow" cx="0.5" cy="0.5" r="0.5">
-            <stop offset="0%" stopColor="#FF6B47" stopOpacity="0.5" />
-            <stop offset="100%" stopColor="#FF6B47" stopOpacity="0" />
+            <stop offset="0%" style={{ stopColor: 'var(--accent)' }} stopOpacity="0.5" />
+            <stop offset="100%" style={{ stopColor: 'var(--accent)' }} stopOpacity="0" />
           </radialGradient>
           <filter id="edge-selected-glow" x="-30%" y="-30%" width="160%" height="160%">
             <feGaussianBlur stdDeviation="3" result="blur" />
@@ -786,18 +807,18 @@ export function GraphView({
             <g style={{ pointerEvents: 'none' }}>
               {/* 外发光：大半径软描边 + 极低透明度，烘 3D 立体感 */}
               <path d={outerPath}
-                fill={color} fillOpacity={0.05}
-                stroke={color} strokeOpacity={0.25} strokeWidth={1}
+                style={{ fill: color, stroke: color }} fillOpacity={0.05}
+                strokeOpacity={0.25} strokeWidth={1}
                 filter="url(#envelope-glow)" />
               {/* 主体：半透明填充 + 中等描边 */}
               <path d={innerPath}
-                fill={color} fillOpacity={dark ? 0.13 : 0.10}
-                stroke={color} strokeOpacity={0.7} strokeWidth={2}
+                style={{ fill: color, stroke: color }} fillOpacity={dark ? 0.13 : 0.10}
+                strokeOpacity={0.7} strokeWidth={2}
                 filter="url(#envelope-soft)" />
               {/* 内描边：细线，靠近成员一点点，加深「贴合」感 */}
               <path d={innerLinePath}
                 fill="none"
-                stroke={color} strokeOpacity={0.5} strokeWidth={1}
+                style={{ stroke: color }} strokeOpacity={0.5} strokeWidth={1}
                 strokeDasharray="3 5" />
             </g>
           );
@@ -816,21 +837,21 @@ export function GraphView({
           const isSelectedEdge = !!selectedEdgeKey && edgeKey(e) === selectedEdgeKey;
           const isHoverEdge = !!hoverEdge && hoverEdge.source === e.source && hoverEdge.target === e.target;
           const styleByType: Record<string, { stroke: string; width: number; opMul: number; dash: string | null }> = {
-            private:      { stroke: '#FF6B47',                                width: 1.2, opMul: 0.5,  dash: e.dashed ? '2 4' : null },
-            co_group:     { stroke: dark ? '#5A7A99' : '#1A2B4A',              width: 0.8, opMul: 0.32, dash: '1 3' },
-            co_active:    { stroke: dark ? '#8FA8C4' : '#2C4670',              width: 1.4, opMul: 0.6,  dash: null },
-            mention:      { stroke: dark ? '#E8B57A' : '#B98643',              width: 1.0, opMul: 0.5,  dash: null },
-            dm_inferred:  { stroke: dark ? '#FF8867' : '#D85A37',              width: 1.1, opMul: 0.55, dash: '5 4' },
-            mutual_reply: { stroke: dark ? '#8FA8C4' : '#2C4670',              width: 1.6, opMul: 0.7,  dash: null },
-            close_pair:   { stroke: dark ? '#FF6B47' : '#E0532E',              width: 2.4, opMul: 0.95, dash: null },
-            moments_cross:{ stroke: dark ? '#FFB382' : '#D17545',              width: 1.2, opMul: 0.55, dash: '6 3' },
+            private:      { stroke: EDGE_STROKE.private,       width: 1.2, opMul: 0.5,  dash: e.dashed ? '2 4' : null },
+            co_group:     { stroke: EDGE_STROKE.co_group,      width: 0.8, opMul: 0.32, dash: '1 3' },
+            co_active:    { stroke: EDGE_STROKE.co_active,     width: 1.4, opMul: 0.6,  dash: null },
+            mention:      { stroke: EDGE_STROKE.mention,       width: 1.0, opMul: 0.5,  dash: null },
+            dm_inferred:  { stroke: EDGE_STROKE.dm_inferred,   width: 1.1, opMul: 0.55, dash: '5 4' },
+            mutual_reply: { stroke: EDGE_STROKE.mutual_reply,  width: 1.6, opMul: 0.7,  dash: null },
+            close_pair:   { stroke: EDGE_STROKE.close_pair,    width: 2.4, opMul: 0.95, dash: null },
+            moments_cross:{ stroke: EDGE_STROKE.moments_cross, width: 1.2, opMul: 0.55, dash: '6 3' },
           };
           const s = styleByType[e.type] || styleByType.co_group;
           const baseOp = e.weight * s.opMul + 0.05;
           let op = isSelectedEdge ? 1 : (isHoverEdge ? 1 : (isHighlight ? Math.min(1, baseOp * 2.5) : baseOp));
           if (selected && !isHighlight && !isHoverEdge) op = baseOp * 0.18;
           const widthMul = isSelectedEdge ? 3.4 : (isHoverEdge ? 2.4 : (isHighlight ? 1.8 : 1));
-          const edgeStroke = (isSelectedEdge || isHoverEdge) ? '#FFC857' : s.stroke;
+          const edgeStroke = (isSelectedEdge || isHoverEdge) ? 'var(--graph-highlight)' : s.stroke;
           const edgeFilter = isSelectedEdge ? 'url(#edge-selected-glow)' : undefined;
           const edgeDash = isSelectedEdge ? undefined : (s.dash || undefined);
           if (isSelfEdge) {
@@ -838,7 +859,7 @@ export function GraphView({
             return (
               <line key={i}
                 x1={a.proj.x} y1={a.proj.y} x2={b.proj.x} y2={b.proj.y}
-                stroke={edgeStroke}
+                style={{ stroke: edgeStroke }}
                 strokeOpacity={op}
                 strokeWidth={isSelectedEdge ? Math.max(strokeWidth, 5.5) : strokeWidth}
                 strokeLinecap="round"
@@ -860,7 +881,7 @@ export function GraphView({
           return (
             <path key={i}
               d={`M${a.proj.x},${a.proj.y} Q${cx},${cy} ${b.proj.x},${b.proj.y}`}
-              stroke={edgeStroke}
+              style={{ stroke: edgeStroke }}
               strokeOpacity={op}
               strokeWidth={isSelectedEdge ? Math.max(strokeWidth, 5.5) : strokeWidth}
               strokeDasharray={edgeDash}
@@ -876,7 +897,7 @@ export function GraphView({
             {[0, 1].map(i => (
               <circle key={i}
                 cx={W / 2} cy={H / 2} r="20"
-                fill="none" stroke="#FF6B47"
+                fill="none" style={{ stroke: 'var(--accent)' }}
                 strokeOpacity="0.35"
                 strokeWidth="1">
                 <animate
@@ -908,7 +929,7 @@ export function GraphView({
           const inSpot = isNodeInSpot(n.id);
           const spotDim = !!spotlight && !inSpot && !n.is_self;
           const op = spotDim ? 0.18 : (dim ? 0.32 : 1);
-          const color = n.color || TIER_COLORS[n.tier] || '#9E9583';
+          const color = n.color || TIER_COLORS[n.tier] || TIER_COLORS.D;
           return (
             <g key={n.id}
                style={{ cursor: 'pointer', filter: spotDim ? 'saturate(0.3)' : undefined }}
@@ -924,29 +945,29 @@ export function GraphView({
               )}
               {isHov && !isSel && !n.is_self && (
                 <circle cx={n.proj.x} cy={n.proj.y} r={r + 6}
-                  fill="none" stroke="#FFC857" strokeWidth="2" opacity="0.85" />
+                  fill="none" style={{ stroke: 'var(--graph-highlight)' }} strokeWidth="2" opacity="0.85" />
               )}
               {isEdgeEndpoint && !n.is_self && (
                 <circle cx={n.proj.x} cy={n.proj.y} r={r + 7}
-                  fill="none" stroke="#FFC857" strokeWidth="2.4" opacity="0.95" />
+                  fill="none" style={{ stroke: 'var(--graph-highlight)' }} strokeWidth="2.4" opacity="0.95" />
               )}
               <circle cx={n.proj.x} cy={n.proj.y} r={r}
-                fill={color}
-                stroke={dark ? 'rgba(20,24,42,0.6)' : 'rgba(255,255,255,0.7)'}
+                style={{ fill: color, stroke: 'var(--graph-node-rim)' }}
                 strokeWidth={n.proj.depth * 0.6} />
               <circle cx={n.proj.x - r * 0.3} cy={n.proj.y - r * 0.3} r={r * 0.35}
-                fill={dark ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.45)'} />
+                style={{ fill: 'var(--graph-specular)' }} />
               {!dim && !spotDim && n.tier !== 'E' && (
                 <text x={n.proj.x} y={n.proj.y + r + (n.is_self ? 18 : 14)}
                   textAnchor="middle"
                   fontFamily={n.is_self || isSel ? 'var(--et-serif)' : 'var(--et-sans)'}
                   fontSize={n.is_self ? 16 : isSel ? 14 : isHov ? 13 : 11}
                   fontWeight={n.is_self || isSel ? 700 : (n.tier === 'A' || n.tier === 'B') ? 600 : 500}
-                  fill={dark ? '#F4ECDA' : '#1A2B4A'}
-                  stroke={dark ? 'rgba(11,15,34,0.85)' : 'rgba(247,241,230,0.85)'}
                   strokeWidth={3}
                   paintOrder="stroke fill"
-                  style={{ pointerEvents: 'none' }}>
+                  style={{
+                    pointerEvents: 'none', fill: 'var(--text-primary)',
+                    stroke: 'color-mix(in srgb, var(--surface-page) 85%, transparent)',
+                  }}>
                   {n.is_self ? '你' : displayName(n.id, n.name)}
                 </text>
               )}
@@ -956,13 +977,12 @@ export function GraphView({
       </svg>
 
       {hover && projById[hover] && hover !== selected && (
-        <NodeTooltip node={projById[hover]} dark={dark} />
+        <NodeTooltip node={projById[hover]} />
       )}
 
-      <Legend dark={dark} />
+      <Legend />
       <OverviewPanel
         stats={data.stats}
-        dark={dark}
         onPickCircle={onChangeSpotlight ? () => setPickerKind('circle') : undefined}      // [PATCH-4]
       />
 
@@ -971,7 +991,6 @@ export function GraphView({
         <SpotlightBanner
           spotlight={spotlight}
           data={data}
-          dark={dark}
           onClose={() => onChangeSpotlight(null)}
         />
       )}
@@ -981,7 +1000,6 @@ export function GraphView({
         <PickerOverlay
           kind={pickerKind}
           data={data}
-          dark={dark}
           onPick={(s) => { setPickerKind(null); onChangeSpotlight(s); }}
           onClose={() => setPickerKind(null)}
         />
@@ -990,10 +1008,10 @@ export function GraphView({
 
       <div style={{
         position: 'absolute', left: 24, top: 74, display: 'flex', alignItems: 'center', gap: 12,
-        color: dark ? 'rgba(244,236,218,0.65)' : 'rgba(26,43,74,0.6)',
+        color: 'var(--text-muted)',
         fontFamily: 'var(--et-sans)', fontSize: 11,
       }}>
-        <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#FF6B47',
+        <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--accent)',
           animation: 'mr-pulse 2.4s ease-in-out infinite' }} />
         <span>
           <b>拖拽</b>旋转 · <b>Shift+拖拽</b>平移 · <b>滚轮</b>缩放（{Math.round(zoom * 100)}%）
@@ -1003,9 +1021,9 @@ export function GraphView({
           <button onClick={resetView} style={{
             all: 'unset', cursor: 'pointer',
             padding: '3px 10px', borderRadius: 999, fontSize: 10,
-            background: dark ? 'rgba(255,107,71,0.2)' : 'var(--et-orange-soft)',
-            color: dark ? '#FFB89A' : 'var(--et-orange-2)',
-            border: `0.5px solid ${dark ? 'rgba(255,107,71,0.4)' : 'rgba(224,83,46,0.3)'}`,
+            background: 'var(--accent-soft)',
+            color: 'var(--accent-text)',
+            border: '0.5px solid var(--accent-border)',
           }}>重置视角</button>
         )}
       </div>
@@ -1022,10 +1040,10 @@ export function GraphView({
             width: 36, height: 36, borderRadius: 999,
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             fontSize: 20, fontWeight: 300, lineHeight: 1,
-            background: dark ? 'rgba(244,236,218,0.10)' : 'rgba(255,255,255,0.85)',
-            color: dark ? '#F4ECDA' : 'var(--et-ink)',
-            border: `0.5px solid ${dark ? 'rgba(244,236,218,0.25)' : 'rgba(26,43,74,0.18)'}`,
-            boxShadow: dark ? '0 2px 6px rgba(0,0,0,0.35)' : '0 2px 6px rgba(26,43,74,0.10)',
+            background: 'color-mix(in srgb, var(--surface-raised) 88%, transparent)',
+            color: 'var(--text-primary)',
+            border: '0.5px solid var(--border-default)',
+            boxShadow: 'var(--shadow-md)',
             backdropFilter: 'blur(6px)',
           }}>+</button>
         <button onClick={() => setZoom(z => Math.max(0.25, z - 0.2))}
@@ -1035,10 +1053,10 @@ export function GraphView({
             width: 36, height: 36, borderRadius: 999,
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             fontSize: 22, fontWeight: 300, lineHeight: 1,
-            background: dark ? 'rgba(244,236,218,0.10)' : 'rgba(255,255,255,0.85)',
-            color: dark ? '#F4ECDA' : 'var(--et-ink)',
-            border: `0.5px solid ${dark ? 'rgba(244,236,218,0.25)' : 'rgba(26,43,74,0.18)'}`,
-            boxShadow: dark ? '0 2px 6px rgba(0,0,0,0.35)' : '0 2px 6px rgba(26,43,74,0.10)',
+            background: 'color-mix(in srgb, var(--surface-raised) 88%, transparent)',
+            color: 'var(--text-primary)',
+            border: '0.5px solid var(--border-default)',
+            boxShadow: 'var(--shadow-md)',
             backdropFilter: 'blur(6px)',
           }}>−</button>
       </div>
@@ -1063,23 +1081,23 @@ function Starfield() {
   return (
     <svg style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none' }}>
       {stars.map((s, i) => (
-        <circle key={i} cx={`${s.x}%`} cy={`${s.y}%`} r={s.s} fill="white" opacity={s.o} />
+        <circle key={i} cx={`${s.x}%`} cy={`${s.y}%`} r={s.s} style={{ fill: 'var(--graph-star)' }} opacity={s.o} />
       ))}
     </svg>
   );
 }
 
-function NodeTooltip({ node, dark }: { node: Projected; dark: boolean }) {
+function NodeTooltip({ node }: { node: Projected }) {
   const name = displayName(node.id, node.name);
   return (
     <div style={{
       position: 'absolute',
       left: node.proj.x + 12, top: node.proj.y - 30,
       padding: '8px 12px', borderRadius: 10,
-      background: dark ? 'rgba(20,24,42,0.92)' : 'rgba(26,43,74,0.92)',
-      color: '#F4ECDA',
+      background: 'color-mix(in srgb, var(--surface-inverse) 94%, transparent)',
+      color: 'var(--text-inverse)',
       fontFamily: 'var(--et-sans)', fontSize: 11,
-      boxShadow: '0 8px 24px rgba(0,0,0,0.3)',
+      boxShadow: 'var(--shadow-lg)',
       pointerEvents: 'none',
     }}>
       <div style={{ fontWeight: 600, fontSize: 12.5 }}>{name}</div>
@@ -1091,16 +1109,9 @@ function NodeTooltip({ node, dark }: { node: Projected; dark: boolean }) {
   );
 }
 
-function Legend({ dark }: { dark: boolean }) {
-  const tiers = [
-    { color: '#FF6B47', label: 'A · 灵魂朋友' },
-    { color: '#E8B57A', label: 'B · 常聊朋友' },
-    { color: '#5A7A99', label: 'C · 一般联系' },
-    { color: '#9E9583', label: 'D · 弱关系' },
-    { color: '#C8BFAB', label: 'E · 沉默 / 孤岛' },
-  ];
-  const bg = dark ? 'rgba(20,24,42,0.7)' : 'rgba(251,246,238,0.85)';
-  const border = dark ? 'rgba(244,236,218,0.14)' : 'rgba(26,43,74,0.12)';
+function Legend() {
+  const bg = PANEL_BG;
+  const border = PANEL_BORDER;
   return (
     <div style={{
       position: 'absolute', left: 24, bottom: 24,
@@ -1109,37 +1120,37 @@ function Legend({ dark }: { dark: boolean }) {
       backdropFilter: 'blur(12px)',
     }}>
       <div style={{ fontFamily: 'var(--et-sans)', fontSize: 10, letterSpacing: '0.18em',
-        color: dark ? 'rgba(244,236,218,0.55)' : 'rgba(26,43,74,0.55)', textTransform: 'uppercase' }}>
+        color: 'var(--text-muted)', textTransform: 'uppercase' }}>
         关系层级
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8 }}>
-        {tiers.map(t => (
+        {TIER_LEGEND.map(t => (
           <div key={t.label} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ width: 10, height: 10, borderRadius: '50%', background: t.color, boxShadow: 'inset 0 0 2px rgba(255,255,255,0.5)' }} />
-            <span style={{ fontFamily: 'var(--et-sans)', fontSize: 11, color: dark ? '#F4ECDA' : '#1A2B4A' }}>{t.label}</span>
+            <span style={{ width: 10, height: 10, borderRadius: '50%', background: TIER_COLORS[t.tier], boxShadow: 'inset 0 0 2px var(--graph-specular)' }} />
+            <span style={{ fontFamily: 'var(--et-sans)', fontSize: 11, color: 'var(--text-primary)' }}>{t.label}</span>
           </div>
         ))}
       </div>
       <div style={{ marginTop: 12, paddingTop: 10, borderTop: `0.5px dashed ${border}` }}>
         <div style={{ fontFamily: 'var(--et-sans)', fontSize: 10, letterSpacing: '0.18em',
-          color: dark ? 'rgba(244,236,218,0.5)' : 'rgba(26,43,74,0.5)', textTransform: 'uppercase', marginBottom: 8 }}>
+          color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: 8 }}>
           关系类型
         </div>
         {[
-          { stroke: '#FF6B47', dash: null, width: 2.2, label: '你 ↔ 他（私聊）' },
-          { stroke: dark ? '#FF6B47' : '#E0532E', dash: null, width: 3, label: '挚友对（朋友间最强）' },
-          { stroke: dark ? '#8FA8C4' : '#2C4670', dash: null, width: 1.8, label: '群里互动密切' },
-          { stroke: dark ? '#E8B57A' : '#B98643', dash: null, width: 1.4, label: '在你私聊里被一起提到' },
-          { stroke: dark ? '#FF8867' : '#D85A37', dash: '4 3', width: 1.4, label: '推测他俩私下也聊（虚线）' },
-          { stroke: dark ? '#5A7A99' : '#1A2B4A', dash: '1 3', width: 1, label: '共群（点状）' },
+          { stroke: EDGE_STROKE.private, dash: null, width: 2.2, label: '你 ↔ 他（私聊）' },
+          { stroke: EDGE_STROKE.close_pair, dash: null, width: 3, label: '挚友对（朋友间最强）' },
+          { stroke: EDGE_STROKE.co_active, dash: null, width: 1.8, label: '群里互动密切' },
+          { stroke: EDGE_STROKE.mention, dash: null, width: 1.4, label: '在你私聊里被一起提到' },
+          { stroke: EDGE_STROKE.dm_inferred, dash: '4 3', width: 1.4, label: '推测他俩私下也聊（虚线）' },
+          { stroke: EDGE_STROKE.co_group, dash: '1 3', width: 1, label: '共群（点状）' },
         ].map((e, i) => (
           <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 5 }}>
             <svg width="22" height="6" style={{ flexShrink: 0 }}>
               <line x1="0" y1="3" x2="22" y2="3"
-                stroke={e.stroke} strokeWidth={e.width}
+                style={{ stroke: e.stroke }} strokeWidth={e.width}
                 strokeDasharray={e.dash || undefined} strokeLinecap="round" />
             </svg>
-            <span style={{ fontFamily: 'var(--et-sans)', fontSize: 11, color: dark ? '#F4ECDA' : '#1A2B4A' }}>{e.label}</span>
+            <span style={{ fontFamily: 'var(--et-sans)', fontSize: 11, color: 'var(--text-primary)' }}>{e.label}</span>
           </div>
         ))}
       </div>
@@ -1148,14 +1159,14 @@ function Legend({ dark }: { dark: boolean }) {
 }
 
 // ── [PATCH-4] OverviewPanel: 两个 Stat 改为可点 ────────────────────────────
-function OverviewPanel({ stats, dark, onPickCircle }: {
-  stats: GraphData['stats']; dark: boolean;
+function OverviewPanel({ stats, onPickCircle }: {
+  stats: GraphData['stats'];
   onPickCircle?: () => void;
 }) {
-  const bg = dark ? 'rgba(20,24,42,0.7)' : 'rgba(251,246,238,0.85)';
-  const border = dark ? 'rgba(244,236,218,0.14)' : 'rgba(26,43,74,0.12)';
-  const tColor = dark ? '#F4ECDA' : '#1A2B4A';
-  const mute = dark ? 'rgba(244,236,218,0.6)' : 'rgba(26,43,74,0.6)';
+  const bg = PANEL_BG;
+  const border = PANEL_BORDER;
+  const tColor = 'var(--text-primary)';
+  const mute = 'var(--text-muted)';
   return (
     <div style={{
       position: 'absolute', right: 24, bottom: 24,
@@ -1166,16 +1177,16 @@ function OverviewPanel({ stats, dark, onPickCircle }: {
       <div style={{ fontFamily: 'var(--et-sans)', fontSize: 10, letterSpacing: '0.18em',
         color: mute, textTransform: 'uppercase' }}>关于这张图</div>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 8 }}>
-        <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#FFE6CF', boxShadow: '0 0 8px #FF6B47' }} />
+        <span style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--graph-self)', boxShadow: '0 0 8px var(--accent)' }} />
         <span style={{ fontFamily: 'var(--et-serif)', fontSize: 14, fontWeight: 600, color: tColor }}>
           你处在中心
         </span>
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 14 }}>
-        <Stat dark={dark} num={stats.people} label="个节点" />
-        <Stat dark={dark} num={stats.ffEdges} label="朋友间互连" />
-        <Stat dark={dark} num={stats.clusters} label="个核心圈" onClick={onPickCircle} />
-        <Stat dark={dark} num={stats.isolates} label="个孤立点" />
+        <Stat num={stats.people} label="个节点" />
+        <Stat num={stats.ffEdges} label="朋友间互连" />
+        <Stat num={stats.clusters} label="个核心圈" onClick={onPickCircle} />
+        <Stat num={stats.isolates} label="个孤立点" />
       </div>
       <div style={{ marginTop: 14, paddingTop: 12, borderTop: `0.5px dashed ${border}`,
         fontFamily: 'var(--et-serif)', fontSize: 13, lineHeight: 1.6, color: tColor, fontStyle: 'italic' }}>
@@ -1185,8 +1196,8 @@ function OverviewPanel({ stats, dark, onPickCircle }: {
   );
 }
 
-function Stat({ dark, num, label, onClick }: {
-  dark: boolean; num: number; label: string; onClick?: () => void;
+function Stat({ num, label, onClick }: {
+  num: number; label: string; onClick?: () => void;
 }) {
   const clickable = !!onClick;
   return (
@@ -1202,18 +1213,18 @@ function Stat({ dark, num, label, onClick }: {
         borderRadius: 8,
         transition: 'background 160ms ease',
       }}
-      onMouseEnter={(e) => { if (clickable) e.currentTarget.style.background = dark ? 'rgba(255,200,87,0.10)' : 'rgba(255,200,87,0.18)'; }}
+      onMouseEnter={(e) => { if (clickable) e.currentTarget.style.background = 'var(--surface-hover)'; }}
       onMouseLeave={(e) => { if (clickable) e.currentTarget.style.background = 'transparent'; }}
     >
       <div style={{ fontFamily: 'var(--et-serif)', fontSize: 24, fontWeight: 600,
-        color: dark ? '#F4ECDA' : '#1A2B4A', fontVariantNumeric: 'tabular-nums', lineHeight: 1,
+        color: 'var(--text-primary)', fontVariantNumeric: 'tabular-nums', lineHeight: 1,
         textDecoration: clickable ? 'underline dotted' : 'none', textUnderlineOffset: 4,
-        textDecorationColor: clickable ? (dark ? 'rgba(255,200,87,0.5)' : 'rgba(217,119,87,0.5)') : 'transparent',
+        textDecorationColor: clickable ? 'var(--accent-border)' : 'transparent',
       }}>
         {num.toLocaleString()}
       </div>
       <div style={{ fontFamily: 'var(--et-sans)', fontSize: 11,
-        color: dark ? 'rgba(244,236,218,0.6)' : 'rgba(26,43,74,0.6)', marginTop: 2,
+        color: 'var(--text-muted)', marginTop: 2,
         display: 'flex', alignItems: 'center', gap: 4,
       }}>
         {label}{clickable && <span style={{ fontSize: 9 }}>›</span>}
@@ -1223,8 +1234,8 @@ function Stat({ dark, num, label, onClick }: {
 }
 
 // ── [PATCH-4] Spotlight 顶栏 ───────────────────────────────────────────────
-function SpotlightBanner({ spotlight, data, dark, onClose }: {
-  spotlight: Spotlight; data: GraphData; dark: boolean; onClose: () => void;
+function SpotlightBanner({ spotlight, data, onClose }: {
+  spotlight: Spotlight; data: GraphData; onClose: () => void;
 }) {
   if (!spotlight) return null;
   // Cluster labels embed the anchor's real name ("太の 这一圈 (11 人)").
@@ -1234,42 +1245,42 @@ function SpotlightBanner({ spotlight, data, dark, onClose }: {
   const c = data.clusters.find(x => x.id === spotlight.clusterId);
   const title = maskText(c?.label || '核心圈');
   const sub = `${c?.members?.length || 0} 位成员 · 你不在场时，他们仍在一起说话`;
-  const bg = dark ? 'rgba(20,24,42,0.85)' : 'rgba(251,246,238,0.92)';
-  const border = dark ? 'rgba(244,236,218,0.18)' : 'rgba(26,43,74,0.16)';
+  const bg = 'color-mix(in srgb, var(--surface-raised) 92%, transparent)';
+  const border = 'var(--border-default)';
   return (
     <div style={{
       position: 'absolute', top: 18, left: '50%', transform: 'translateX(-50%)',
       padding: '10px 16px 10px 18px', borderRadius: 14,
       background: bg, border: `0.5px solid ${border}`, backdropFilter: 'blur(12px)',
       display: 'flex', alignItems: 'center', gap: 14,
-      boxShadow: dark ? '0 12px 32px rgba(0,0,0,0.45)' : '0 12px 32px rgba(26,43,74,0.18)',
+      boxShadow: 'var(--shadow-lg)',
       maxWidth: 'calc(100% - 80px)',
     }}>
       <div style={{ fontFamily: 'var(--et-sans)', fontSize: 10, letterSpacing: '0.18em',
         textTransform: 'uppercase',
-        color: dark ? 'rgba(244,236,218,0.55)' : 'rgba(26,43,74,0.55)' }}>
+        color: 'var(--text-muted)' }}>
         聚焦核心圈
       </div>
       <div style={{ width: 1, height: 28, background: border }} />
       <div>
         <div style={{ fontFamily: 'var(--et-serif)', fontSize: 16, fontWeight: 700,
-          color: dark ? '#F4ECDA' : '#1A2B4A' }}>{title}</div>
+          color: 'var(--text-primary)' }}>{title}</div>
         <div style={{ fontFamily: 'var(--et-sans)', fontSize: 11,
-          color: dark ? 'rgba(244,236,218,0.65)' : 'rgba(26,43,74,0.65)', marginTop: 2 }}>{sub}</div>
+          color: 'var(--text-secondary)', marginTop: 2 }}>{sub}</div>
       </div>
       <button onClick={onClose} style={{
         all: 'unset', cursor: 'pointer', padding: '4px 10px', borderRadius: 999,
         fontSize: 11, marginLeft: 8,
-        background: dark ? 'rgba(244,236,218,0.10)' : 'rgba(26,43,74,0.06)',
-        color: dark ? '#F4ECDA' : '#1A2B4A',
+        background: 'var(--surface-pressed)',
+        color: 'var(--text-primary)',
       }}>退出 · Esc</button>
     </div>
   );
 }
 
 // ── [PATCH-4] 列表选择层 ───────────────────────────────────────────────────
-function PickerOverlay({ kind, data, dark, onPick, onClose }: {
-  kind: 'circle'; data: GraphData; dark: boolean;
+function PickerOverlay({ kind, data, onPick, onClose }: {
+  kind: 'circle'; data: GraphData;
   onPick: (s: Spotlight) => void; onClose: () => void;
 }) {
   void kind;  // bridge 永久砍掉；保留参数形状方便日后扩展
@@ -1281,9 +1292,9 @@ function PickerOverlay({ kind, data, dark, onPick, onClose }: {
   }));
   items.sort((a, b) => b.size - a.size);
 
-  const bg = dark ? 'rgba(11,15,34,0.7)' : 'rgba(26,43,74,0.35)';
-  const card = dark ? 'rgba(20,24,42,0.96)' : '#FBF6EE';
-  const border = dark ? 'rgba(244,236,218,0.18)' : 'rgba(26,43,74,0.16)';
+  const bg = 'var(--surface-overlay)';
+  const card = 'var(--surface-raised)';
+  const border = 'var(--border-default)';
   return (
     <div onClick={onClose} style={{
       position: 'absolute', inset: 0, zIndex: 200, background: bg,
@@ -1293,7 +1304,7 @@ function PickerOverlay({ kind, data, dark, onPick, onClose }: {
       <div onClick={e => e.stopPropagation()} style={{
         width: 480, maxHeight: '70%', display: 'flex', flexDirection: 'column',
         background: card, borderRadius: 16, border: `0.5px solid ${border}`,
-        boxShadow: dark ? '0 24px 60px rgba(0,0,0,0.6)' : '0 24px 60px rgba(26,43,74,0.25)',
+        boxShadow: 'var(--shadow-lg)',
         overflow: 'hidden',
       }}>
         <div style={{ padding: '16px 20px 12px',
@@ -1302,17 +1313,17 @@ function PickerOverlay({ kind, data, dark, onPick, onClose }: {
           <div>
             <div style={{ fontFamily: 'var(--et-sans)', fontSize: 10, letterSpacing: '0.18em',
               textTransform: 'uppercase',
-              color: dark ? 'rgba(244,236,218,0.55)' : 'rgba(26,43,74,0.55)' }}>
+              color: 'var(--text-muted)' }}>
               选一个
             </div>
             <div style={{ fontFamily: 'var(--et-serif)', fontSize: 18, fontWeight: 700,
-              marginTop: 2, color: dark ? '#F4ECDA' : '#1A2B4A' }}>
+              marginTop: 2, color: 'var(--text-primary)' }}>
               {`${items.length} 个核心圈`}
             </div>
           </div>
           <button onClick={onClose} style={{
             all: 'unset', cursor: 'pointer', fontSize: 22,
-            color: dark ? 'rgba(244,236,218,0.6)' : 'rgba(26,43,74,0.5)',
+            color: 'var(--text-muted)',
           }}>×</button>
         </div>
         <div style={{ padding: '12px 18px 12px 12px', overflow: 'auto', scrollbarGutter: 'stable' }}>
@@ -1324,20 +1335,20 @@ function PickerOverlay({ kind, data, dark, onPick, onClose }: {
                 gap: 14, padding: '10px 12px', borderRadius: 10, width: '100%',
                 boxSizing: 'border-box', marginBottom: 4,
               }}
-              onMouseEnter={(e) => e.currentTarget.style.background = dark ? 'rgba(244,236,218,0.06)' : 'rgba(26,43,74,0.05)'}
+              onMouseEnter={(e) => e.currentTarget.style.background = 'var(--surface-hover)'}
               onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
             >
               <span style={{
                 width: 14, height: 14, borderRadius: '50%', background: it.color,
                 flexShrink: 0,
-                boxShadow: `0 0 12px ${it.color}66`,
+                boxShadow: `0 0 12px color-mix(in srgb, ${it.color} 40%, transparent)`,
               }} />
               <span style={{ flex: 1, fontFamily: 'var(--et-serif)', fontSize: 15, fontWeight: 600,
-                color: dark ? '#F4ECDA' : '#1A2B4A',
+                color: 'var(--text-primary)',
                 overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
               }}>{maskText(it.label)}</span>
               <span style={{ fontFamily: 'var(--et-sans)', fontSize: 11,
-                color: dark ? 'rgba(244,236,218,0.6)' : 'rgba(26,43,74,0.55)' }}>{it.sub}</span>
+                color: 'var(--text-muted)' }}>{it.sub}</span>
             </button>
           ))}
         </div>

@@ -98,7 +98,9 @@ def parse_cursor(s: str) -> tuple:
         local_id = int(parts[1])
     except ValueError:
         raise CursorError(f"bad cursor: {s!r}")
-    _bounded(ts, "cursor time")
+    # Times can be negative (a message's own create_time, e.g. a broken
+    # clock), so a cursor this module handed out must parse back.
+    _bounded(ts, "cursor time", lo=-_INT_LIMIT)
     _bounded(local_id, "cursor local_id")
     db = parts[2]
     if "/" in db or "\\" in db:
@@ -182,51 +184,81 @@ _LID_MAX = _PACK - 1
 _KEY_CACHE: "OrderedDict[tuple, tuple]" = OrderedDict()  # (path, table) → (stamp, keys | None)
 _KEY_LOCK = threading.Lock()
 _KEY_CACHE_MAX_ENTRIES = 32
-_KEY_CACHE_MAX_ROWS = 4_000_000  # ≈ 32 MB of packed keys
+_KEY_CACHE_MAX_ROWS = 4_000_000  # ≈ 33 MB of keys held (tracemalloc); building one this size peaks ≈ 46 MB
+_KEY_BUILDING: dict = {}  # (path, table) → Event set when that build ends
+_KEY_BATCH = 50_000
 
 
 def _build_keys(c: sqlite3.Connection, table: str) -> Optional[array]:
     """The table's packed sort keys in display order; None if they don't pack
-    (negative / post-2106 times, local_id ≥ 2^32, non-integer columns)."""
-    rows = c.execute(f"SELECT COALESCE(create_time, 0), local_id FROM {table} ORDER BY 1, 2").fetchall()
+    (negative / post-2106 times, local_id ≥ 2^32, non-integer columns).
+
+    Rows are streamed from the cursor in batches straight into the array, so
+    the only large allocation is the array itself plus its growth slack.
+    Measured with tracemalloc on 3M rows: fetchall() + a list of ints peaked
+    at 529 MB; this peaks at 37 MB and keeps 24.5 MB (≈ 8 bytes a row)."""
+    cur = c.execute(f"SELECT COALESCE(create_time, 0), local_id FROM {table} ORDER BY 1, 2")
+    keys = array("Q")
     try:
-        keys = array("Q", [t << 32 | lid for t, lid in rows])
-        if rows and max(lid for _, lid in rows) > _LID_MAX:
-            return None
+        while True:
+            batch = cur.fetchmany(_KEY_BATCH)
+            if not batch:
+                break
+            for _, lid in batch:
+                if not 0 <= lid <= _LID_MAX:
+                    return None
+            keys.extend(t << 32 | lid for t, lid in batch)
     except (OverflowError, TypeError):
         return None
+    finally:
+        cur.close()
     return keys
 
 
 def _file_keys(store, fname: str, table: str) -> Optional[array]:
-    """Cached sort keys of `table` in `fname`; None → page it with plain SQL."""
+    """Cached sort keys of `table` in `fname`; None → page it with plain SQL.
+
+    Concurrent requests for the same file share one build: the first caller
+    builds, the others wait on its Event and then read the cache."""
     base = getattr(store, "dir", None)
     if base is None:
         return None
     path = Path(base) / fname
-    try:
-        st = path.stat()
-    except OSError:
-        return None
-    stamp = (st.st_mtime_ns, st.st_size)
     ck = (str(path), table)
-    with _KEY_LOCK:
-        hit = _KEY_CACHE.get(ck)
-        if hit is not None and hit[0] == stamp:
-            _KEY_CACHE.move_to_end(ck)
-            return hit[1]
-    c = store._conn(fname)
+    while True:
+        try:
+            st = path.stat()
+        except OSError:
+            return None
+        stamp = (st.st_mtime_ns, st.st_size)
+        with _KEY_LOCK:
+            hit = _KEY_CACHE.get(ck)
+            if hit is not None and hit[0] == stamp:
+                _KEY_CACHE.move_to_end(ck)
+                return hit[1]
+            pending = _KEY_BUILDING.get(ck)
+            if pending is None:
+                done = _KEY_BUILDING[ck] = threading.Event()
+        if pending is None:
+            break
+        pending.wait()  # someone else is building this one; then re-check
     try:
-        keys = _build_keys(c, table)
+        c = store._conn(fname)
+        try:
+            keys = _build_keys(c, table)
+        finally:
+            c.close()
+        with _KEY_LOCK:
+            _KEY_CACHE[ck] = (stamp, keys)
+            _KEY_CACHE.move_to_end(ck)
+            rows = sum(len(v[1]) for v in _KEY_CACHE.values() if v[1] is not None)
+            while len(_KEY_CACHE) > 1 and (len(_KEY_CACHE) > _KEY_CACHE_MAX_ENTRIES or rows > _KEY_CACHE_MAX_ROWS):
+                _, (_, old) = _KEY_CACHE.popitem(last=False)
+                rows -= len(old) if old is not None else 0
     finally:
-        c.close()
-    with _KEY_LOCK:
-        _KEY_CACHE[ck] = (stamp, keys)
-        _KEY_CACHE.move_to_end(ck)
-        rows = sum(len(v[1]) for v in _KEY_CACHE.values() if v[1] is not None)
-        while len(_KEY_CACHE) > 1 and (len(_KEY_CACHE) > _KEY_CACHE_MAX_ENTRIES or rows > _KEY_CACHE_MAX_ROWS):
-            _, (_, old) = _KEY_CACHE.popitem(last=False)
-            rows -= len(old) if old is not None else 0
+        with _KEY_LOCK:
+            _KEY_BUILDING.pop(ck, None)
+        done.set()
     return keys
 
 

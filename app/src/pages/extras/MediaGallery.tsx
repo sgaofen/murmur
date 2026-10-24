@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { Friend } from '../../data/types';
-import { API_BASE, indexMedia } from '../../data/api';
+import { errorCode, getFriendMedia, indexMedia } from '../../data/api';
+import { lookupError } from '../../data/errorCatalog';
 import { useTaskCenter } from '../../components/extras/TaskCenter';
 import { displayName, maskText } from '../../utils/privacy';
 import { usePrivacy } from '../../utils/usePrivacy';
-import { Button, EmptyState, Skeleton } from '../../ui';
+import { Button, EmptyState, ErrorState, Skeleton } from '../../ui';
 import { IconClose, IconPlay, IconSearch, IconSparkle } from '../../ui/icons';
 import './MediaGallery.css';
 
@@ -50,6 +51,8 @@ export function MediaGallery({ friend }: Props) {
   const taskCenter = useTaskCenter();
   const [items, setItems] = useState<MediaItem[]>([]);
   const [loading, setLoading] = useState(true);
+  // A failed list request is not "no media yet" — it gets its own error state.
+  const [loadError, setLoadError] = useState<unknown>(null);
   const [indexing, setIndexing] = useState(false);
   const [indexError, setIndexError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
@@ -57,10 +60,10 @@ export function MediaGallery({ friend }: Props) {
 
   const loadMedia = useCallback(() => {
     setLoading(true);
-    fetch(API_BASE + '/api/friend/' + encodeURIComponent(friend.id) + '/media')
-      .then(r => r.ok ? r.json() : [])
-      .then(d => setItems(Array.isArray(d) ? d : []))
-      .catch(() => setItems([]))
+    setLoadError(null);
+    getFriendMedia<MediaItem>(friend.id)
+      .then(d => setItems(d))
+      .catch(e => { setItems([]); setLoadError(e); })
       .finally(() => setLoading(false));
   }, [friend.id]);
 
@@ -142,7 +145,12 @@ export function MediaGallery({ friend }: Props) {
           </div>
         </div>
       )}
-      {!loading && items.length === 0 && (
+      {!loading && loadError != null && (
+        <div className="media-empty">
+          <MediaLoadError error={loadError} onRetry={loadMedia} />
+        </div>
+      )}
+      {!loading && loadError == null && items.length === 0 && (
         <div className="media-empty">
           <EmptyState
             icon={<IconSparkle size={24} />}
@@ -192,6 +200,22 @@ export function MediaGallery({ friend }: Props) {
 
       {active && <Lightbox item={active} onClose={() => setActive(null)} />}
     </div>
+  );
+}
+
+function MediaLoadError({ error, onRetry }: { error: unknown; onRetry: () => void }) {
+  const code = errorCode(error);
+  const entry = lookupError(code);
+  const raw = error instanceof Error ? error.message : String(error);
+  return (
+    <ErrorState
+      code={code ?? undefined}
+      title={entry?.title ?? '相册没能加载'}
+      reason={entry?.reason ?? '读取这个聊天的图片和视频列表时，本地服务返回了错误。媒体索引本身没有丢。'}
+      fixes={entry ? [entry.fix] : ['点「重试」再读一次', '还不行就到「设置」里复制诊断信息反馈给我们']}
+      onRetry={onRetry}
+      details={raw ? <pre>{maskText(raw)}</pre> : undefined}
+    />
   );
 }
 

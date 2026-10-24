@@ -247,6 +247,13 @@ export async function getMoments(id: string, n = 4): Promise<Moment[]> {
   return j(`/api/friend/${encodeURIComponent(id)}/moments?n=${n}`);
 }
 
+/** Media items (images / videos) of one chat from media-index.json. An empty
+ * list means "nothing indexed yet"; a failed request throws ApiError. */
+export async function getFriendMedia<T = unknown>(id: string): Promise<T[]> {
+  const d = await j<unknown>(`/api/friend/${encodeURIComponent(id)}/media`);
+  return Array.isArray(d) ? (d as T[]) : [];
+}
+
 export interface ChatMessage {
   ts: number;
   time: string;

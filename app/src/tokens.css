@@ -96,6 +96,12 @@
   --et-sage:     #8AA48F;
   --et-sky:      #5A7A99;
   --et-postmark: #C45A3F;
+
+  /* relationship graph canvas (components/extras/GraphView.tsx) */
+  --graph-backdrop:  linear-gradient(180deg, #F7F1E6 0%, #EFE5D2 100%);
+  --graph-node-rim:  rgba(255, 255, 255, 0.70);
+  --graph-specular:  rgba(255, 255, 255, 0.45);
+  --graph-star:      transparent;   /* stars are drawn only on the night canvas */
 }
 
 /* ———————————————————————— Dark (deep ink, late night) ———————————————————————— */
@@ -166,6 +172,11 @@
   --et-sage:     #9DBBA1;
   --et-sky:      #8FA8C4;
   --et-postmark: #E07659;
+
+  --graph-backdrop:  radial-gradient(ellipse at 50% 40%, #1B2548 0%, #0B0F22 70%, #050714 100%);
+  --graph-node-rim:  rgba(20, 24, 42, 0.60);
+  --graph-specular:  rgba(255, 255, 255, 0.25);
+  --graph-star:      #FFFFFF;
 }
 
 /* ———————————————————————— Theme-independent scales ———————————————————————— */
@@ -210,7 +221,22 @@
   --media-control:      rgba(255, 255, 255, 0.92);
   --media-control-ink:  #1A2B4A;
 
-  /* —— legacy (--et-*) —— */
+  /* relationship graph: the "you" glow, the hover / selection ring and the
+     core-circle palette (categorical data colors, mid-tones that read on
+     both the cream and the night-sky canvas) */
+  --graph-self:      #FFE6CF;
+  --graph-highlight: #FFC857;
+  --graph-circle-1:  #FF6B47;
+  --graph-circle-2:  #E8B57A;
+  --graph-circle-3:  #5A7A99;
+  --graph-circle-4:  #9E9583;
+  --graph-circle-5:  #7C9885;
+  --graph-circle-6:  #C9A66B;
+  --graph-circle-7:  #A87BA1;
+  --graph-circle-8:  #6B8FA8;
+  --graph-circle-9:  #D17545;
+
+    /* —— legacy (--et-*) —— */
   --et-serif: var(--font-serif);
   --et-sans:  var(--font-sans);
   --et-mono:  var(--font-mono);

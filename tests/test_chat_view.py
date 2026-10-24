@@ -303,9 +303,35 @@ class BoundsTest(ChatViewBase):
         self.assertEqual(cv.parse_cursor(f"{top}:{top}:message_0.db"), (top, "message_0.db", top))
         for bad in (f"{top + 1}:1:message_0.db", f"1:{top + 1}:message_0.db",
                     "9" * 40 + ":1:message_0.db", "1:" + "9" * 40 + ":message_0.db",
-                    "-1:1:message_0.db", "1:-5:message_0.db"):
+                    f"{-top - 1}:1:message_0.db", "1:-5:message_0.db"):
             with self.assertRaises(cv.CursorError):
                 cv.parse_cursor(bad)
+        # Negative times are in range (final-polish: the lower bound is -2^53).
+        self.assertEqual(cv.parse_cursor("-1:1:message_0.db"), (-1, "message_0.db", 1))
+        self.assertEqual(cv.parse_cursor(f"{-top}:1:message_0.db"), (-top, "message_0.db", 1))
+
+    def test_negative_create_time_cursor_round_trips(self) -> None:
+        """A message with create_time < 0 gets a cursor this module must accept
+        back (before / after / around), on both the key-index and SQL paths."""
+        c = sqlite3.connect(str(self.store.dir / "message_0.db"))
+        add_msg(c, ALICE, ALICE, -86400, "史前消息")
+        c.commit()
+        c.close()
+        cv._KEY_CACHE.clear()
+        for patched in (False, True):
+            with self.subTest(sql_fallback=patched):
+                ctx = mock.patch.object(cv, "_file_keys", lambda *a: None) if patched else mock.patch.object(cv, "_KEY_BATCH", 3)
+                with ctx:
+                    r = self.page(limit=100)
+                    first = r["messages"][0]
+                    self.assertEqual(first["text"], "史前消息")
+                    self.assertTrue(first["id"].startswith("-86400:"))
+                    self.assertEqual(self.page(after=first["id"], limit=2)["messages"][0]["text"], ALICE_TEXTS[0])
+                    self.assertEqual(self.page(before=first["id"], limit=2)["messages"], [])
+                    around = self.page(around=first["id"], limit=3)
+                    self.assertEqual(around["anchor"], first["id"])
+                    self.assertEqual(around["messages"][0]["text"], "史前消息")
+        cv._KEY_CACHE.clear()
 
     def test_huge_values_never_reach_sqlite(self) -> None:
         huge = "9" * 30
@@ -505,6 +531,113 @@ class SortKeyIndexTest(unittest.TestCase):
             cv._KEY_CACHE.clear()
             cv.chat_page(self.store, BOB, limit=5)
             self.assertEqual(len(cv._KEY_CACHE), 1)  # always keeps the newest entry
+
+
+class KeyBuildTest(unittest.TestCase):
+    """final-polish: building a file's sort keys streams rows in batches
+    (bounded peak memory) and concurrent requests for one file build once."""
+
+    def setUp(self) -> None:
+        cv._KEY_CACHE.clear()
+        self.tmp = Path(tempfile.mkdtemp(prefix="murmur-chat-build-"))
+        d = build_fixture(self.tmp)
+        c = make_msg_db(d / "message_5.db", [ME, BOB])
+        for j in range(500):
+            add_msg(c, BOB, BOB if j % 2 else ME, ts("2025-01-01") + j // 4, f"b{j}")
+        c.commit()
+        c.close()
+        self.store = EchoStore(d)
+
+    def tearDown(self) -> None:
+        cv._KEY_CACHE.clear()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_batched_build_matches_one_shot(self) -> None:
+        c = self.store._conn("message_5.db")
+        try:
+            want = sorted(t << 32 | lid for t, lid in c.execute(
+                f"SELECT create_time, local_id FROM {table_for(BOB)}"))
+            with mock.patch.object(cv, "_KEY_BATCH", 7):
+                got = cv._build_keys(c, table_for(BOB))
+        finally:
+            c.close()
+        self.assertEqual(list(got), want)
+
+    def test_unpackable_row_in_a_later_batch(self) -> None:
+        c = sqlite3.connect(":memory:")
+        c.execute("CREATE TABLE t (local_id INTEGER PRIMARY KEY, create_time INTEGER)")
+        c.executemany("INSERT INTO t VALUES (?, ?)", [(i, 100 + i) for i in range(1, 20)])
+        c.execute("INSERT INTO t VALUES (?, ?)", ((1 << 32) + 1, 500))
+        with mock.patch.object(cv, "_KEY_BATCH", 4):
+            self.assertIsNone(cv._build_keys(c, "t"))
+        c.execute("DELETE FROM t WHERE local_id > 100")
+        c.execute("INSERT INTO t VALUES (99, -5)")  # negative time: doesn't pack
+        with mock.patch.object(cv, "_KEY_BATCH", 4):
+            self.assertIsNone(cv._build_keys(c, "t"))
+        c.close()
+
+    def test_peak_memory_is_about_the_array(self) -> None:
+        import tracemalloc
+        n = 200_000
+        c = sqlite3.connect(":memory:")
+        c.execute("CREATE TABLE t (local_id INTEGER PRIMARY KEY, create_time INTEGER)")
+        c.executemany("INSERT INTO t VALUES (?, ?)", ((i, 1_700_000_000 + i // 3) for i in range(1, n + 1)))
+        tracemalloc.start()
+        try:
+            keys = cv._build_keys(c, "t")
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+            c.close()
+        self.assertEqual(len(keys), n)
+        # fetchall() + a list cost ~176 bytes a row (35 MB here); streaming
+        # into array('Q') is the 1.6 MB array plus one batch of tuples.
+        self.assertLess(peak, 16 * 1024 * 1024, f"peak {peak} bytes")
+
+    def test_concurrent_requests_build_once(self) -> None:
+        calls = []
+        started = threading.Event()
+        release = threading.Event()
+        real = cv._build_keys
+
+        def slow_build(c, table):
+            calls.append(table)
+            started.set()
+            release.wait(10)
+            return real(c, table)
+
+        results = []
+        with mock.patch.object(cv, "_build_keys", slow_build):
+            threads = [threading.Thread(target=lambda: results.append(
+                cv._file_keys(self.store, "message_5.db", table_for(BOB)))) for _ in range(8)]
+            for t in threads:
+                t.start()
+            self.assertTrue(started.wait(10))
+            release.set()
+            for t in threads:
+                t.join(10)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(results), 8)
+        self.assertTrue(all(r is results[0] for r in results))
+        self.assertEqual(len(results[0]), 500)
+        self.assertEqual(cv._KEY_BUILDING, {})
+
+    def test_failed_build_lets_waiters_retry(self) -> None:
+        calls = []
+        real = cv._build_keys
+
+        def flaky(c, table):
+            calls.append(table)
+            if len(calls) == 1:
+                raise sqlite3.OperationalError("disk I/O error")
+            return real(c, table)
+
+        with mock.patch.object(cv, "_build_keys", flaky):
+            with self.assertRaises(sqlite3.OperationalError):
+                cv._file_keys(self.store, "message_5.db", table_for(BOB))
+            self.assertEqual(cv._KEY_BUILDING, {})
+            self.assertEqual(len(cv._file_keys(self.store, "message_5.db", table_for(BOB))), 500)
+        self.assertEqual(len(calls), 2)
 
 
 # ---------------------------------------------------------------- fallback

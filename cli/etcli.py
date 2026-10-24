@@ -1033,7 +1033,7 @@ STOPWORDS.update("这个 那个 一下 还是 就是 没有 什么 怎么 为啥
 STOP_CHARS = set("的了是我你他她也都在就不和与这那一个有没啊吧呀嗯哦嘛呢吗哈呜哇噢哎唉哟唔嗷嘿哼啦喔把被让给从向对跟比又再才还但而或因所以之上下里外中后前时日年月来去到过")
 NON_TEXT = re.compile(r"\[[^\]]+\]")
 URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
-APP_VERSION = "0.4.4"
+APP_VERSION = "0.5.0"
 YEARBOOK_CACHE_VERSION = 6
 
 
@@ -4438,6 +4438,65 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             return origin
         return None
 
+    # DNS-rebinding guard. A web page can point its own name (evil.com) at
+    # 127.0.0.1 and then make same-origin requests here, sidestepping CORS —
+    # but the browser still sends `Host: evil.com[:port]`. So every request
+    # must name a loopback host plus the port this server listens on. The
+    # Tauri shell and the dev frontend both fetch http://127.0.0.1:<port>
+    # (app/src/data/api.ts); their *Origin* (tauri://localhost,
+    # http://tauri.localhost, :5173) is checked by CORS above, not here.
+    _ALLOWED_HOST_NAMES = {"127.0.0.1", "localhost", "::1"}
+    _WILDCARD_BIND = {"", "0.0.0.0", "::"}
+
+    @staticmethod
+    def _split_host_header(raw: str):
+        """'name[:port]' / '[v6][:port]' → (name, port or None); None if malformed."""
+        raw = raw.strip().lower()
+        if not raw:
+            return None
+        if raw.startswith("["):
+            end = raw.find("]")
+            if end < 0:
+                return None
+            name, rest = raw[1:end], raw[end + 1:]
+            if rest and not rest.startswith(":"):
+                return None
+            port_s = rest[1:] if rest else None
+        elif raw.count(":") > 1:
+            return None  # bare IPv6 without brackets isn't a valid Host
+        else:
+            name, sep, port_s = raw.partition(":")
+            if not sep:
+                port_s = None
+        if port_s is None:
+            return name, None
+        if not port_s.isdigit() or len(port_s) > 5:
+            return None
+        return name, int(port_s)
+
+    def _host_allowed(self) -> bool:
+        raw = self.headers.get("Host")
+        if not raw:
+            return False
+        parsed = self._split_host_header(raw)
+        if parsed is None:
+            return False
+        name, port = parsed
+        bound_host, bound_port = (getattr(self.server, "server_address", None) or ("127.0.0.1", 0))[:2]
+        if port is None:
+            port = 80  # a browser omits the port only when it is the default
+        if port != int(bound_port):
+            return False
+        if name in self._ALLOWED_HOST_NAMES:
+            return True
+        # `serve --host <ip>` on purpose (e.g. a LAN address): that exact name too.
+        bound = str(bound_host).lower()
+        return bound not in self._WILDCARD_BIND and name == bound
+
+    def _reject_host(self):
+        self.close_connection = True
+        return self._send_json({"error": "host_not_allowed", "code": _ec.HOST_NOT_ALLOWED}, 403)
+
     def _origin_allowed(self) -> bool:
         origin = self.headers.get("Origin")
         return not origin or self._allowed_cors_origin() is not None
@@ -4477,6 +4536,8 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 pass
 
     def do_OPTIONS(self):  # noqa: N802
+        if not self._host_allowed():
+            return self._reject_host()
         if not self._origin_allowed():
             return self._send_json({"error": "origin_not_allowed"}, 403)
         self.send_response(204)
@@ -4509,6 +4570,8 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):  # noqa: N802
         try:
+            if not self._host_allowed():
+                return self._reject_host()
             if not self._origin_allowed():
                 return self._send_json({"error": "origin_not_allowed"}, 403)
             if self._handle_app_lock("GET"):
@@ -4519,6 +4582,8 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):  # noqa: N802
         try:
+            if not self._host_allowed():
+                return self._reject_host()
             if not self._origin_allowed():
                 return self._send_json({"error": "origin_not_allowed"}, 403)
             if self._handle_app_lock("POST"):

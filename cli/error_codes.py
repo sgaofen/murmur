@@ -68,6 +68,8 @@ APP_LOCK_INVALID = "APP_LOCK_INVALID"
 TIMEOUT = "TIMEOUT"
 AGENT_NOT_INSTALLED = "AGENT_NOT_INSTALLED"
 ORIGIN_NOT_ALLOWED = "ORIGIN_NOT_ALLOWED"
+# Host header isn't a loopback name + the listening port (DNS rebinding guard).
+HOST_NOT_ALLOWED = "HOST_NOT_ALLOWED"
 INTERNAL_ERROR = "INTERNAL_ERROR"
 
 ALL_CODES = frozenset(
@@ -84,6 +86,7 @@ ALL_CODES = frozenset(
 # extract_key_dll.py, qq endpoints.
 _RULES = (
     (ORIGIN_NOT_ALLOWED, r"origin_not_allowed"),
+    (HOST_NOT_ALLOWED, r"host_not_allowed"),
     # live_key.py job error tokens (exact) and Frida install messages
     (FRIDA_MISSING, r"^frida-missing$|不能在线安装 frida|no module named '?frida"),
     (WECHAT_HARDENED, r"^attach-denied$"),
