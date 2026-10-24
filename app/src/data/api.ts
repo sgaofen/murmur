@@ -347,6 +347,178 @@ export async function rebuildSearchIndex(): Promise<SearchIndexStatus & { ok: bo
   return j('/api/search/rebuild', { method: 'POST' });
 }
 
+// ---- Optional on-device semantic search (backend: cli/semantic_index.py) ----
+// Off by default; needs `pip install -r requirements-semantic.txt` plus a
+// one-time model download the user must start explicitly. Never calls a
+// cloud API. Same privacy rule as keyword search: apply maskText/displayName.
+
+export type SemanticState =
+  | 'not_installed'   // optional Python deps missing → show install_hint
+  | 'disabled'        // user hasn't turned it on
+  | 'model_missing'   // show model.size_bytes + repo, ask before downloading
+  | 'downloading'
+  | 'empty'           // ready, but no index built yet
+  | 'building'
+  | 'ready'
+  | 'error';
+
+export interface SemanticMirror {
+  id: string;                     // 'huggingface' | 'hf-mirror' | 'custom'
+  label: string;
+  endpoint: string;
+}
+
+export interface SemanticIndexStatus {
+  state: 'empty' | 'building' | 'ready' | 'error';
+  phase: '' | 'keyword_index' | 'planning' | 'embedding' | 'done';
+  full_rebuild: boolean;
+  done: number;                   // messages processed in this pass
+  total: number;
+  percent: number;
+  chunks: number;
+  indexed_messages: number;
+  last_built_at: number | null;   // unix seconds
+  last_error: string | null;
+  stale: boolean;                 // keyword index rebuilt since; next incremental pass re-embeds
+}
+
+export interface SemanticStatus {
+  state: SemanticState;
+  message: string;                // Chinese, ready to show
+  installed: boolean;
+  missing_deps: string[];
+  install_hint: string;
+  enabled: boolean;
+  mirror: string;
+  mirrors: SemanticMirror[];
+  model: {
+    id: string;
+    name: string;
+    repo: string;
+    revision: string;
+    license: string;
+    homepage: string;
+    size_bytes: number;
+    files: { path: string; size: number; sha256: string }[];
+    downloaded: boolean;
+    dir: string;
+  };
+  download: {
+    state: 'idle' | 'downloading' | 'done' | 'error';
+    mirror: string | null;
+    file: string | null;
+    done_bytes: number;
+    total_bytes: number;
+    error: string | null;
+    finished_at: number | null;
+  };
+  local_only: true;
+  index: SemanticIndexStatus | null;  // null before decrypted data exists
+}
+
+export interface SemanticChunkMessage {
+  sender: string;
+  sender_name: string;
+  ts: number;
+  time: string;
+  type: string;
+  text: string;
+  locator: SearchHit['locator'];
+}
+
+export interface SemanticSearchHit extends SearchHit {
+  score: number;                  // cosine similarity, higher = closer
+  chunk: {
+    id: number;
+    ts_start: number;
+    ts_end: number;
+    message_count: number;
+    anchor_index: number;         // which of `messages` the hit points at
+    messages: SemanticChunkMessage[];
+  };
+}
+
+export interface SemanticSearchResponse extends Omit<SearchResponse, 'mode' | 'match' | 'results' | 'index'> {
+  mode: 'semantic';
+  match: 'semantic';
+  model: string;
+  results: SemanticSearchHit[];
+  index: SemanticIndexStatus;
+}
+
+export interface SemanticSearchParams extends Omit<SearchParams, 'type' | 'limit'> {
+  limit?: number;                 // 1..100, default 20
+  minScore?: number;
+}
+
+/** Thrown when semantic search isn't usable (HTTP 409); carries the status. */
+export class SemanticUnavailableError extends Error {
+  status: SemanticStatus;
+  constructor(message: string, status: SemanticStatus) {
+    super(message);
+    this.name = 'SemanticUnavailableError';
+    this.status = status;
+  }
+}
+
+async function semanticJ<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(API_BASE + path, init);
+  if (res.status === 409) {
+    const body = await res.json().catch(() => null);
+    if (body && body.status) throw new SemanticUnavailableError(body.message || '语义搜索不可用', body.status);
+    throw new Error(`API ${path}: 409`);
+  }
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`API ${path}: ${res.status} ${text.slice(0, 200)}`);
+  }
+  return res.json();
+}
+
+const postJson = (body: unknown): RequestInit => ({
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(body),
+});
+
+export async function getSemanticStatus(): Promise<SemanticStatus> {
+  return j('/api/search/semantic/status');
+}
+
+export async function setSemanticSettings(
+  s: { enabled?: boolean; mirror?: string },
+): Promise<SemanticStatus & { ok: boolean }> {
+  return j('/api/search/semantic/settings', postJson(s));
+}
+
+/** Starts the model download — only after the user confirmed size + source. */
+export async function downloadSemanticModel(
+  mirror?: string,
+): Promise<SemanticStatus & { ok: boolean; started: boolean; already_running: boolean }> {
+  return semanticJ('/api/search/semantic/download', postJson(mirror ? { mirror } : {}));
+}
+
+export async function buildSemanticIndex(
+  full = false,
+): Promise<SemanticStatus & { ok: boolean; started: boolean; queued: boolean }> {
+  return semanticJ('/api/search/semantic/build', postJson({ full }));
+}
+
+export async function searchSemantic(p: SemanticSearchParams): Promise<SemanticSearchResponse> {
+  const params = new URLSearchParams({ q: p.q, mode: 'semantic' });
+  const list = (v?: string | string[]) => (Array.isArray(v) ? v.join(',') : v);
+  const chat = list(p.chat);
+  const sender = list(p.sender);
+  if (chat) params.set('chat', chat);
+  if (sender) params.set('sender', sender);
+  if (p.from !== undefined && p.from !== '') params.set('from', String(p.from));
+  if (p.to !== undefined && p.to !== '') params.set('to', String(p.to));
+  if (p.limit) params.set('limit', String(p.limit));
+  if (p.offset) params.set('offset', String(p.offset));
+  if (p.minScore !== undefined) params.set('min_score', String(p.minScore));
+  return semanticJ(`/api/search?${params}`);
+}
+
 export async function indexMedia(): Promise<{
   ok: boolean; total?: number; indexed?: number; existing?: number; ms?: number; details?: string; error?: string;
 }> {
@@ -992,7 +1164,7 @@ export async function exportPairChat(a: string, b: string, format: PairExportFor
 }
 
 export interface BatchStartReq {
-  cli: 'claude' | 'codex' | 'both';
+  cli: string;  // a local agent cli (see /api/agents) or 'both' (claude + codex)
   mode: 'top' | 'all' | 'pairs-graph';
   pair_mode?: 'mention' | 'graph';
   top?: number;

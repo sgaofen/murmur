@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import { HomePage } from './pages/Home';
 import { FriendPage } from './pages/Friend';
 import { LoadingPage } from './pages/Loading';
@@ -15,6 +15,10 @@ import { PrivacyToggle } from './components/PrivacyToggle';
 import { PrivacyIdentityIndex } from './components/extras/PrivacyIdentityIndex';
 import { QQOnboardingDialog } from './pages/QQOnboardingDialog';
 import { supportsQQOnboarding, syncActiveToBackend } from './utils/activeProfile';
+import { ThemeSwitcher, useTheme } from './ui';
+
+// Component gallery (#/ui-gallery) — not linked from the app; loaded on demand.
+const UiGalleryPage = lazy(() => import('./pages/UiGallery'));
 
 type Route =
   | { name: 'loading' }
@@ -24,7 +28,8 @@ type Route =
   | { name: 'graph' }
   | { name: 'table' }
   | { name: 'reports' }
-  | { name: 'annual' };
+  | { name: 'annual' }
+  | { name: 'ui-gallery' };
 
 function parseHash(h: string): Route {
   const s = h.replace(/^#\/?/, '');
@@ -34,6 +39,7 @@ function parseHash(h: string): Route {
   if (s === 'table') return { name: 'table' };
   if (s === 'reports') return { name: 'reports' };
   if (s === 'annual') return { name: 'annual' };
+  if (s === 'ui-gallery') return { name: 'ui-gallery' };
   if (s.startsWith('yearbook/')) return { name: 'yearbook', id: s.slice('yearbook/'.length) };
   if (s.startsWith('friend/')) return { name: 'friend', id: s.slice('friend/'.length) };
   return { name: 'home' };
@@ -43,9 +49,7 @@ const ONBOARDING_SEEN_KEY = 'murmur.onboarding.seen';
 
 export default function App() {
   const [route, setRoute] = useState<Route>(() => parseHash(window.location.hash));
-  const [dark, setDark] = useState<boolean>(
-    () => window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false
-  );
+  const { resolved: theme, toggle: toggleTheme } = useTheme();
   const [onboarding, setOnboarding] = useState(false);
   const [qqOnboarding, setQQOnboarding] = useState(false);
   // Set when /api/info reports bootstrap=true with a non-null init_error.
@@ -77,11 +81,6 @@ export default function App() {
   function go(path: string) {
     window.location.hash = path;
   }
-
-  // Apply dark class on root
-  useEffect(() => {
-    document.documentElement.classList.toggle('et-dark', dark);
-  }, [dark]);
 
   // Auto-show onboarding when data isn't ready. Three triggers:
   //   1. Backend in bootstrap mode (no decrypted data) — ALWAYS show, regardless
@@ -115,7 +114,7 @@ export default function App() {
 
       // #loading is a deliberate dev route — don't auto-pop the onboarding.
       const initialRoute = parseHash(window.location.hash);
-      if (initialRoute.name === 'loading') {
+      if (initialRoute.name === 'loading' || initialRoute.name === 'ui-gallery') {
         return;
       }
       const info = await probe(() => getInfo());
@@ -169,10 +168,10 @@ export default function App() {
               }}>引导</button>
       <button onClick={() => go('loading')} style={chipBtn}>加载</button>
       <button onClick={() => go('')} style={chipBtn}>首页</button>
-      <button onClick={() => setDark(d => !d)} style={{
+      <button onClick={toggleTheme} style={{
         all: 'unset', cursor: 'pointer', padding: '4px 10px', borderRadius: 999,
         background: 'var(--et-ink)', color: 'var(--et-paper)', fontWeight: 500,
-      }}>{dark ? '亮' : '暗'}</button>
+      }}>{theme === 'dark' ? '亮' : '暗'}</button>
     </div>
   );
 
@@ -200,9 +199,11 @@ export default function App() {
     case 'annual':
       body = <AnnualReportPage onBack={() => go('')} onOpenFriend={(id) => go(`friend/${id}`)} />;
       break;
+    case 'ui-gallery':
+      body = <Suspense fallback={null}><UiGalleryPage onBack={() => go('')} /></Suspense>;
+      break;
     default:
       body = <HomePage
-        dark={dark}
         onOpenFriend={(id) => go(`friend/${id}`)}
         onOpenOnboarding={() => setOnboarding(true)}
         onOpenQQ={qqSupported ? () => setQQOnboarding(true) : undefined}
@@ -216,7 +217,12 @@ export default function App() {
         {body}
         <BatchStatusPill onOpenReports={() => go('reports')} />
         {showDevControls && DevControls}
-        <PrivacyToggle position={showDevControls ? 'top-right' : 'bottom-right'} />
+        {/* Temporary home for appearance + privacy until the UI-2 sidebar / settings page. */}
+        <div className={showDevControls ? 'ui-dock ui-dock--top-right' : 'ui-dock'}>
+          <ThemeSwitcher compact />
+          <span className="ui-dock__sep" aria-hidden="true" />
+          <PrivacyToggle />
+        </div>
         <OnboardingDialog
           open={onboarding}
           onClose={() => { localStorage.setItem(ONBOARDING_SEEN_KEY, '1'); setOnboarding(false); setBootstrapInitError(null); }}

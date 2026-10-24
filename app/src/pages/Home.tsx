@@ -1,22 +1,25 @@
 import { useEffect, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import { Avatar } from '../components/Avatar';
 import { FriendCard } from '../components/FriendCard';
 import { Postmark } from '../components/Postmark';
 import { Ribbon } from '../components/Ribbon';
 import { Sparkline } from '../components/Sparkline';
-import { APP_VERSION, errorCode, getAllFriends, getHomeSummary, getLogTail, getTauriLogTail, refreshData } from '../data/api';
+import { APP_VERSION, ApiError, errorCode, getAllFriends, getDiagBundle, getHomeSummary, getLogTail, getTauriLogTail, refreshData } from '../data/api';
 import { lookupError } from '../data/errorCatalog';
 import type { LogTailResponse } from '../data/api';
 import type { Friend, HomeSummary } from '../data/types';
 import { ExtractKeyDialog } from './ExtractKeyDialog';
 import { TaskCenterBell, TaskCenterDrawer, useTaskCenter } from '../components/extras/TaskCenter';
 import { displayName, maskText } from '../utils/privacy';
+import { redactDiagnostics } from '../utils/diagRedact';
 import { usePrivacy } from '../utils/usePrivacy';
 import { ProfileSwitcher } from '../components/ProfileSwitcher';
 import { LiveSyncToggle } from '../components/LiveSyncToggle';
+import { Button, EmptyState, ErrorState } from '../ui';
+import { IconKey } from '../ui/icons';
 
 interface Props {
-  dark?: boolean;
   onOpenFriend: (id: string) => void;
   onOpenOnboarding?: () => void;
   onOpenQQ?: () => void;
@@ -240,7 +243,7 @@ function isOnboardingNeededError(e: any): boolean {
     text.includes('bootstrap mode');
 }
 
-export function HomePage({ dark = false, onOpenFriend, onOpenOnboarding }: Props) {
+export function HomePage({ onOpenFriend, onOpenOnboarding }: Props) {
   void usePrivacy();
   const [tab, setTab] = useState<Tab>('private');
   const [search, setSearch] = useState('');
@@ -251,6 +254,8 @@ export function HomePage({ dark = false, onOpenFriend, onOpenOnboarding }: Props
   const [error, setError] = useState<string | null>(null);
   const [bootWaitSec, setBootWaitSec] = useState(0);
   const [bootLogs, setBootLogs] = useState<LogTailResponse | null>(null);
+  // Bumped by the error screen's retry button to re-run the boot probe.
+  const [bootNonce, setBootNonce] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshMsg, setRefreshMsg] = useState('');
   const [extractOpen, setExtractOpen] = useState(false);
@@ -263,6 +268,9 @@ export function HomePage({ dark = false, onOpenFriend, onOpenOnboarding }: Props
     // Retry for up to 60 seconds on cold launch. On Windows the bundled
     // PyInstaller etcli.exe can be slowed down by Defender/AV scanning, and
     // on slower machines the webview may render long before port 9100 is ready.
+    // A user-initiated 「重新连接」 that gets an HTTP answer shows it right away:
+    // the backend is up, so polling for another minute won't change anything.
+    const isReconnect = bootNonce > 0;
     let cancelled = false;
     let attempts = 0;
     const tryFetch = async () => {
@@ -282,8 +290,8 @@ export function HomePage({ dark = false, onOpenFriend, onOpenOnboarding }: Props
             onOpenOnboarding?.();
             return;
           }
-          // Last attempt — surface the error
-          if (attempts >= 80) {
+          // Last attempt (or the backend answered a reconnect) — surface the error
+          if (attempts >= 80 || (isReconnect && e instanceof ApiError && e.status > 0)) {
             setError(String(e?.message || e));
             getTauriLogTail(80)
               .then(localLogs => localLogs || getLogTail(80))
@@ -300,7 +308,7 @@ export function HomePage({ dark = false, onOpenFriend, onOpenOnboarding }: Props
     };
     tryFetch();
     return () => { cancelled = true; };
-  }, []);
+  }, [bootNonce]);
 
   // Debounce search
   useEffect(() => {
@@ -390,67 +398,51 @@ export function HomePage({ dark = false, onOpenFriend, onOpenOnboarding }: Props
   }
 
   if (error && !summary) {
-    return (
-      <div style={{
-        minHeight: '100vh', display: 'flex', flexDirection: 'column',
-        alignItems: 'center', justifyContent: 'center', padding: 24, gap: 16,
-      }}>
-        <div className="et-h2" style={{ color: 'var(--et-ink)' }}>
-          {isOnboardingNeededError(error) ? '还没完成初始化' : '后端没起来'}
-        </div>
-        <div className="et-meta" style={{ color: 'var(--et-mute)', maxWidth: 520, textAlign: 'center' }}>
-          {isOnboardingNeededError(error) ? (
-            <>
-              本地后端已经启动了，但还没有找到可用的解密数据。请按初始化引导选择微信数据目录、抓密钥并解密。
-            </>
-          ) : (
-            <>
-              Murmur 应该自动启动 etcli.exe 作为后端。如果没起，请：<br/>
-              1. 完全退出 Murmur 重启<br/>
-              2. 还不行就看日志 <code style={{ background: 'var(--et-paper-2)', padding: '2px 6px', borderRadius: 4 }}>~/Documents/Murmur/logs/serve.log</code><br/>
-              3. 开发模式可手动跑 <code style={{ background: 'var(--et-paper-2)', padding: '2px 6px', borderRadius: 4 }}>{navigator.userAgent.toLowerCase().includes('mac') ? 'bash start-mac.sh' : 'start-windows.bat'}</code><br/>
-              4. 把日志贴 issue 给作者 sgaofen
-            </>
+    if (isOnboardingNeededError(error)) {
+      return (
+        <EmptyState
+          layout="page"
+          icon={<IconKey size={26} />}
+          title="还没完成初始化"
+          description="本地后端已经启动了，但还没有找到可用的解密数据。请按初始化引导选择微信数据目录、抓密钥并解密。"
+          actions={onOpenOnboarding && (
+            <Button variant="primary" size="lg" onClick={onOpenOnboarding}>打开初始化引导</Button>
           )}
-        </div>
-        {isOnboardingNeededError(error) && onOpenOnboarding && (
-          <button onClick={onOpenOnboarding} style={{
-            all: 'unset', cursor: 'pointer', padding: '12px 28px',
-            borderRadius: 999, background: 'var(--et-orange)', color: '#fff',
-            fontSize: 14, fontWeight: 600, boxShadow: '0 6px 16px rgba(255,107,71,0.28)',
-          }}>打开初始化引导</button>
-        )}
-        <div className="et-meta" style={{ color: 'var(--et-faint)' }}>{maskText(error)}</div>
-        {bootLogs && (
-          <details style={{ width: 'min(760px, 92vw)' }}>
-            <summary className="et-meta" style={{ cursor: 'pointer', color: 'var(--et-orange)', textAlign: 'center' }}>
-              查看启动诊断日志
-            </summary>
-            <div className="et-meta" style={{ color: 'var(--et-mute)', marginTop: 8, textAlign: 'center' }}>
-              日志目录：{maskText(bootLogs.logs_dir)}
-            </div>
-            <pre style={{
-              marginTop: 10,
-              padding: 12,
-              maxHeight: 260,
-              overflow: 'auto',
-              borderRadius: 8,
-              border: '0.5px solid var(--et-line-2)',
-              background: 'var(--et-paper-2)',
-              color: 'var(--et-ink-soft)',
-              fontSize: 11,
-              lineHeight: 1.55,
-              whiteSpace: 'pre-wrap',
-            }}>{maskText([
-              '--- serve.log ---',
-              bootLogs.serve || '(empty)',
-              '',
-              '--- tauri-shell.log ---',
-              bootLogs.tauri_shell || '(empty)',
-            ].join('\n'))}</pre>
-          </details>
-        )}
-      </div>
+        />
+      );
+    }
+    const info = describeBootError(error);
+    return (
+      <ErrorState
+        layout="page"
+        code={info.code}
+        title={info.title}
+        reason={info.reason}
+        fixes={info.fixes}
+        onRetry={() => { setError(null); setBootLogs(null); setBootNonce(n => n + 1); }}
+        retryLabel="重新连接"
+        diagnostics={() => bootDiagnostics(error, bootLogs)}
+        // Redacted on screen too: when copying fails the button tells users to
+        // take a screenshot, and that also ends up in a public issue.
+        details={
+          <>
+            <div>报错原文</div>
+            <pre>{maskText(redactDiagnostics(error))}</pre>
+            {bootLogs && (
+              <>
+                <div>启动诊断日志 · {maskText(redactDiagnostics(bootLogs.logs_dir))}</div>
+                <pre>{maskText(redactDiagnostics([
+                  '--- serve.log ---',
+                  bootLogs.serve || '(empty)',
+                  '',
+                  '--- tauri-shell.log ---',
+                  bootLogs.tauri_shell || '(empty)',
+                ].join('\n')))}</pre>
+              </>
+            )}
+          </>
+        }
+      />
     );
   }
 
@@ -468,7 +460,7 @@ export function HomePage({ dark = false, onOpenFriend, onOpenOnboarding }: Props
   }
 
   return (
-    <div className={`et-root ${dark ? 'et-dark' : ''}`} style={{ background: 'var(--et-bg)', minHeight: '100%' }}>
+    <div className="et-root" style={{ background: 'var(--et-bg)', minHeight: '100%' }}>
       <HomeChromeBar onRefresh={handleRefresh} refreshing={refreshing} refreshMsg={refreshMsg}
         onExtractKey={() => setExtractOpen(true)}
         onToggleTaskCenter={() => setTaskCenterOpen(o => !o)}
@@ -531,4 +523,110 @@ function summarizeRefreshFailure(details: string, code: string | null = null): s
     .map(line => line.trim())
     .find(line => line && !line.startsWith('[INFO]'));
   return `更新失败：${(firstUsefulLine || text || '未知错误').slice(0, 80)}`;
+}
+
+/** Turn a boot-probe failure into code / reason / fixes for <ErrorState>.
+ * Errors from data/api.ts look like `API /api/home-summary: 503 {json}`;
+ * anything else means fetch() itself failed (backend not listening). */
+function describeBootError(raw: string): { code: string; title: string; reason: ReactNode; fixes: ReactNode[] } {
+  const isMac = navigator.userAgent.toLowerCase().includes('mac');
+  const logHint = <>查看日志 <code>~/Documents/Murmur/logs/serve.log</code></>;
+  const issueHint = '还不行就点「复制诊断信息」，贴到 GitHub issue 给作者 sgaofen';
+  const m = /^API (\S+): (\d{3})\s*([\s\S]*)$/.exec(raw);
+  if (!m) {
+    return {
+      code: 'BACKEND_UNREACHABLE',
+      title: '后端没起来',
+      reason: <>Murmur 会在后台自动启动本地服务（{isMac ? 'etcli' : 'etcli.exe'}），但等了一分钟仍然连不上 <code>127.0.0.1:9100</code>。</>,
+      fixes: [
+        '完全退出 Murmur 再重新打开',
+        logHint,
+        <>开发模式可手动运行 <code>{isMac ? 'bash start-mac.sh' : 'start-windows.bat'}</code></>,
+        issueHint,
+      ],
+    };
+  }
+  const status = Number(m[2]);
+  const body = readErrorBody(m[3]);
+  const apiCode = body.error && /^[a-z][a-z0-9_]*$/.test(body.error) ? body.error : null;
+  const message = body.message;
+  const detail = !message && body.error && !apiCode ? body.error : null;
+  return {
+    code: apiCode ? `HTTP ${status} · ${apiCode}` : `HTTP ${status}`,
+    title: '首页数据没能加载',
+    reason: message
+      ? maskText(redactDiagnostics(message))
+      : `本地服务返回了错误（HTTP ${status}）${detail ? `：${maskText(redactDiagnostics(detail)).slice(0, 160)}` : '。'}`,
+    fixes: ['点「重新连接」再试一次', '完全退出 Murmur 再重新打开', logHint, issueHint],
+  };
+}
+
+/** Pull `error` / `message` out of an etcli error body. data/api.ts keeps only
+ * the first 200 chars, so long JSON bodies (e.g. database_malformed) arrive
+ * truncated — fall back to reading the string fields directly. */
+function readErrorBody(text: string): { error: string | null; message: string | null } {
+  const body = parseJsonObject(text);
+  if (body) {
+    return {
+      error: typeof body.error === 'string' ? body.error : null,
+      message: typeof body.message === 'string' ? body.message : null,
+    };
+  }
+  return { error: readJsonStringField(text, 'error'), message: readJsonStringField(text, 'message') };
+}
+
+function parseJsonObject(text: string): { error?: unknown; message?: unknown } | null {
+  try {
+    const v: unknown = JSON.parse(text);
+    return v && typeof v === 'object' ? v as { error?: unknown; message?: unknown } : null;
+  } catch {
+    return null;  // body was plain text / truncated
+  }
+}
+
+/** `"key": "value"` from possibly-truncated JSON; an unterminated value gets a trailing「…」. */
+function readJsonStringField(text: string, key: string): string | null {
+  const m = new RegExp(`"${key}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)(")?`).exec(text);
+  if (!m) return null;
+  let value: string;
+  try {
+    value = JSON.parse(`"${m[1]}"`) as string;
+  } catch {
+    value = m[1];  // cut in the middle of an escape sequence
+  }
+  return m[2] ? value : `${value}…`;
+}
+
+/** Text behind 「复制诊断信息」. When the backend answered with an HTTP error,
+ * prefer its /api/diag-bundle (profiles, init_error, log tails — scrubbed by
+ * cli/diag_redact.py); otherwise use the log tail we already fetched.
+ * ErrorState runs the result through redactDiagnostics() before copying, so
+ * this is redacted whether or not privacy mode is on. */
+async function bootDiagnostics(error: string, logs: LogTailResponse | null): Promise<string> {
+  const head = [
+    '### Murmur 启动诊断',
+    `- 版本：${APP_VERSION}`,
+    `- 平台：${navigator.userAgent}`,
+    `- 时间：${new Date().toISOString()}`,
+    `- 报错：${error}`,
+  ];
+  let body: string[] = logs ? [
+    `- 日志目录：${logs.logs_dir}`,
+    '',
+    '```',
+    '--- serve.log ---',
+    logs.serve || '(empty)',
+    '',
+    '--- tauri-shell.log ---',
+    logs.tauri_shell || '(empty)',
+    '```',
+  ] : [];
+  if (/^API \S+: \d{3}\b/.test(error)) {
+    try {
+      body = ['', (await getDiagBundle()).markdown];
+    } catch {
+      // diag-bundle unavailable — keep the local log tail
+    }
+  }
+  return maskText([...head, ...body].join('\n'));
 }

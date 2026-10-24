@@ -6,6 +6,7 @@ import { invokeAgent, getInvokeStream } from '../../data/api';
 import type { Friend } from '../../data/types';
 import { displayName, isPrivacyMode, maskText } from '../../utils/privacy';
 import { usePrivacy } from '../../utils/usePrivacy';
+import { agentDisplayName as agentNameFor } from '../../utils/agents';
 
 interface Props {
   friend: Friend;
@@ -103,7 +104,7 @@ export function AgentReport({ friend, cli, onClose }: Props) {
   }, [cli, friend.id]);
 
   const chapters = output ? parseChapters(output) : [];
-  const agentDisplayName = cli === 'claude' ? 'Claude Code' : cli === 'codex' ? 'Codex CLI' : cli;
+  const agentDisplayName = agentNameFor(cli);
   const friendName = displayName(friend.id, friend.name);
 
   if (phase === 'running') {

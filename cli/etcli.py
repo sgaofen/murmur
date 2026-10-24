@@ -152,6 +152,7 @@ def _render_appmsg(xml_text: str) -> str:
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import paths as _paths  # noqa: E402  (cross-platform discovery helper)
+import local_agents as _local_agents  # noqa: E402  (AI CLI registry)
 import error_codes as _ec  # noqa: E402  (stable API error codes)
 import diag_redact as _redact  # noqa: E402  (diag bundle scrubbing)
 import live_key as _live_key  # noqa: E402  (macOS live key capture via Frida)
@@ -1209,9 +1210,6 @@ def _agent_reports_root() -> Path:
         return Path(override).expanduser()
     return _agent_workspace_root() / "agent_reports" / _account_slug()
 
-def _codex_model_args() -> list[str]:
-    model = os.environ.get("MURMUR_CODEX_MODEL", "gpt-5.2").strip()
-    return ["-m", model] if model else []
 
 def _safe_filename(s: str) -> str:
     return re.sub(r'[<>:"/\\|?*]', "_", s)[:80]
@@ -4341,6 +4339,46 @@ def _kick_search_index(store) -> None:
         sys.stderr.write(f"[search-index] kick failed: {type(e).__name__}: {e}\n")
 
 
+def _semantic_index_for(store):
+    """SemanticIndex layered on the store's keyword index (cli/semantic_index.py)."""
+    import semantic_index as _sem
+    return _sem.get_semantic_index(_search_index_for(store))
+
+
+def _kick_semantic_index(store) -> None:
+    """Incremental semantic pass after fresh data — only when the user turned
+    semantic search on, deps are installed and the model is present."""
+    if store is None:
+        return
+    try:
+        import semantic_index as _sem
+        if _sem.ensure_usable() is None:
+            _semantic_index_for(store).start_update(full=False)
+    except Exception as e:
+        sys.stderr.write(f"[semantic] kick failed: {type(e).__name__}: {e}\n")
+
+
+def _is_json_request(handler) -> bool:
+    """True when the POST declares a JSON body.
+
+    Browsers can send text/plain / form posts cross-site without a CORS
+    preflight; insisting on application/json makes every state-changing
+    semantic endpoint preflighted, so the origin allow-list applies.
+    """
+    ctype = (handler.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+    return ctype == "application/json"
+
+
+def _read_json_body(handler) -> dict:
+    length = int(handler.headers.get("Content-Length") or 0)
+    body = handler.rfile.read(length) if length else b"{}"
+    try:
+        data = json.loads(body.decode("utf-8") or "{}")
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 # ---------- HTTP handler ----------
 
 class _MurmurAPIHandler(BaseHTTPRequestHandler):
@@ -4487,7 +4525,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         # Bootstrap mode: only a small allowlist works without decrypted data.
         _NO_STORE_GET = {"/api/info", "/api/agents", "/api/diagnose", "/api/reports", "/api/log-tail",
                           "/api/scan-disks/status", "/api/profiles", "/api/diag-bundle",
-                          "/api/live-key/status", "/api/private-copy/status",
+                          "/api/search/semantic/status", "/api/live-key/status", "/api/private-copy/status",
                           "/api/live-sync/status"}
         # QQ endpoints have their own data lifecycle (separate stores keyed by
         # qq number) so they bypass the WeChat-store bootstrap gate entirely.
@@ -4692,7 +4730,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         # opened the Reports page on a fresh install.
         _gate_pass = (path in {"/api/diagnose", "/api/agents", "/api/reports", "/api/log-tail",
                                 "/api/scan-disks/status", "/api/profiles", "/api/diag-bundle",
-                                "/api/live-key/status", "/api/private-copy/status"}
+                                "/api/search/semantic/status", "/api/live-key/status", "/api/private-copy/status"}
                       or path.startswith("/api/report/"))
         if _gate_pass:
             pass  # these don't need store, fall through to their handlers
@@ -4710,18 +4748,44 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             payload = idx.status()
             payload["auto_started"] = auto
             return self._send_json(payload)
-        if path == "/api/search":
+        if path == "/api/search/semantic/status":
+            import semantic_index as _sem
+            # Works before decrypted data exists (install / model state only).
+            return self._send_json(_sem.full_status(
+                _search_index_for(self.store) if self.store is not None else None))
+        if path in ("/api/search", "/api/search/semantic"):
             import search_index as _si
             q = (qs.get("q", [""])[0] or "").strip()
             if not q:
                 return self._send_json({"error": "q required"}, 400)
+            semantic = (path == "/api/search/semantic"
+                        or (qs.get("mode", ["keyword"])[0] or "keyword") == "semantic")
             try:
                 ts_from = _si.parse_time_param(qs.get("from", [None])[0])
                 ts_to = _si.parse_time_param(qs.get("to", [None])[0], end=True)
-                limit = int(qs.get("limit", [50])[0])
+                limit = int(qs.get("limit", [20 if semantic else 50])[0])
                 offset = int(qs.get("offset", [0])[0])
+                ms = qs.get("min_score", [None])[0]
+                min_score = float(ms) if ms not in (None, "") else None
             except ValueError as e:
                 return self._send_json({"error": "bad_param", "message": str(e)}, 400)
+            if semantic:
+                import semantic_index as _sem
+                blocked = _sem.ensure_usable()
+                if blocked is not None:
+                    return self._send_json({"error": "semantic_unavailable",
+                                            "message": blocked["message"], "status": blocked}, 409)
+                sidx = _semantic_index_for(self.store)
+                try:
+                    payload = sidx.search(q, chat=qs.get("chat"), sender=qs.get("sender"),
+                                          ts_from=ts_from, ts_to=ts_to, limit=limit,
+                                          offset=offset, min_score=min_score)
+                except _sem.ModelIntegrityError as e:
+                    st = _sem.availability()
+                    return self._send_json({"error": "semantic_unavailable", "message": str(e),
+                                            "status": st}, 409)
+                payload["index"] = sidx.status()
+                return self._send_json(payload)
             idx = _search_index_for(self.store)
             idx.ensure_fresh()
             payload = idx.search(
@@ -5209,6 +5273,36 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             except json.JSONDecodeError:
                 opts = {}
             return self._set_active_profile(opts)
+        if path in ("/api/search/semantic/settings", "/api/search/semantic/download"):
+            # Account-independent: work before decrypted data exists too.
+            import semantic_index as _sem
+            if not _is_json_request(self):
+                return self._send_json({"error": "unsupported_media_type",
+                                        "message": "需要 Content-Type: application/json"}, 415)
+            opts = _read_json_body(self)
+            try:
+                if path == "/api/search/semantic/settings":
+                    en = opts.get("enabled")
+                    _sem.save_settings(enabled=None if en is None else bool(en),
+                                       mirror=opts.get("mirror"))
+                    if en is False:
+                        for sidx in list(_sem._REGISTRY.values()):
+                            sidx.cancel()
+                    kicked = {}
+                else:
+                    mirror = opts.get("mirror") or _sem.load_settings()["mirror"]
+                    if _sem.missing_deps():
+                        st = _sem.availability()
+                        return self._send_json({"error": "semantic_unavailable",
+                                                "message": st["message"], "status": st}, 409)
+                    if opts.get("mirror"):
+                        _sem.save_settings(mirror=mirror)
+                    kicked = _sem.downloader().start(mirror)
+            except ValueError as e:
+                return self._send_json({"error": "bad_param", "message": str(e)}, 400)
+            payload = _sem.full_status(_search_index_for(self.store) if self.store is not None else None)
+            payload.update({"ok": True, **kicked})
+            return self._send_json(payload)
         if self.store is None and path not in BOOTSTRAP_POSTS:
             return self._send_json({
                 "error": "no_decrypted_data",
@@ -5218,6 +5312,22 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
 
         if path == "/api/export":
             return self._post_export_to_dir()
+
+        if path == "/api/search/semantic/build":
+            import semantic_index as _sem
+            if not _is_json_request(self):
+                return self._send_json({"error": "unsupported_media_type",
+                                        "message": "需要 Content-Type: application/json"}, 415)
+            blocked = _sem.ensure_usable()
+            if blocked is not None:
+                return self._send_json({"error": "semantic_unavailable",
+                                        "message": blocked["message"], "status": blocked}, 409)
+            opts = _read_json_body(self)
+            sidx = _semantic_index_for(self.store)
+            kicked = sidx.start_update(full=bool(opts.get("full")))
+            payload = _sem.full_status(_search_index_for(self.store))
+            payload.update({"ok": True, **kicked})
+            return self._send_json(payload)
 
         if path == "/api/search/rebuild":
             idx = _search_index_for(self.store)
@@ -5414,6 +5524,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 # Fresh decrypted data → incremental search-index pass in the
                 # background (first run builds the whole index).
                 _kick_search_index(_MurmurAPIHandler._wechat_store)
+                _kick_semantic_index(_MurmurAPIHandler._wechat_store)
             return self._send_json({
                 "ok": ok,
                 "ms": dt,
@@ -5541,10 +5652,11 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 cli_names = [c for c in ("claude", "codex") if c in installed]
                 if len(cli_names) < 2:
                     return self._send_json({"ok": False, "error": "需要同时安装 Claude 和 Codex 才能跑双引擎"}, 400)
-            elif cli_name in ("claude", "codex"):
+            elif cli_name in _local_agents.agent_clis():
                 cli_names = [cli_name]
             else:
-                return self._send_json({"ok": False, "error": "cli must be claude, codex, or both"}, 400)
+                return self._send_json({"ok": False, "error": "cli must be one of "
+                                        + ", ".join(_local_agents.agent_clis()) + ", or both"}, 400)
             extra: list = ["--parallel", str(parallel), "--sample", str(sample)]
             if mode == "all":
                 pair_arg = top_pairs if top_pairs >= 0 else 0
@@ -5748,50 +5860,14 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     with _STORE_READ_LOCK:
                         pack = build_pair_inference_pack(store_ref, a, b)
                     state["stage"] = f"running {cli_name}"
-                    use_shell = sys.platform.startswith("win") and agent_path.lower().endswith((".cmd", ".bat", ".ps1"))
-                    cmd_args = ([agent_path, "--print"] if cli_name == "claude" else
-                                 [agent_path, "exec", "--skip-git-repo-check", "--ephemeral", *_codex_model_args(), "-"] if cli_name == "codex" else
-                                 [agent_path])
                     t_start = _time.time()
-
-                    # Popen + stream stdout line by line so frontend can show live output
-                    if use_shell:
-                        cmd = " ".join(f'"{x}"' if " " in x or x.startswith("-") is False else x for x in cmd_args)
-                    else:
-                        cmd = cmd_args
-
-                    # Run agent from a writable user dir, NOT the bundled .app's
-                    # read-only Resources dir (where etcli's own cwd may live).
-                    # codex creates session dirs in cwd → fails if cwd isn't writable.
-                    _agent_cwd = _agent_workspace_root()
-                    try: _agent_cwd.mkdir(parents=True, exist_ok=True)
-                    except OSError: _agent_cwd = Path.home()
-                    proc = subprocess.Popen(
-                        cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                        bufsize=1, text=True, encoding="utf-8", errors="replace",
-                        shell=use_shell, cwd=str(_agent_cwd),
-                    )
-                    if proc.stdin:
-                        proc.stdin.write(pack)
-                        proc.stdin.close()
-                    if proc.stdout:
-                        for line in proc.stdout:
-                            state["output"] += line
-                    rc = proc.wait(timeout=900)
+                    rc, agent_err = _run_local_agent_streaming(cli_name, agent_path, pack, state)
                     elapsed = int(_time.time() - t_start)
                     output = state["output"]
                     sys.stderr.write(f"[invoke-pair] {name_a}↔{name_b} done rc={rc} chars={len(output)} {elapsed}s\n")
 
                     if rc == 0 and len(output) > 100:
-                        clean_output = output
-                        if cli_name == "codex":
-                            cidx = output.rfind("\ncodex\n")
-                            if cidx > 0:
-                                clean_output = output[cidx + len("\ncodex\n"):]
-                                tidx = clean_output.find("\ntokens used\n")
-                                if tidx > 0:
-                                    clean_output = clean_output[:tidx]
-                        clean_output = clean_output.strip()
+                        clean_output = _local_agents.clean_output(cli_name, output, server=True)
                         pairs_root = _agent_reports_root() / "pairs"
                         pairs_root.mkdir(parents=True, exist_ok=True)
                         safe_a = re.sub(r'[<>:"/\\|?*]', "_", name_a) or a
@@ -5810,7 +5886,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                         sys.stderr.write(f"[invoke-pair] saved → {fname}\n")
                         state["stage"] = "saved"
                     else:
-                        state["error"] = f"agent rc={rc}, output {len(output)} chars (need ≥100)"
+                        state["error"] = f"agent rc={rc}, output {len(output)} chars (need ≥100)" + agent_err
                         state["stage"] = "failed"
                     pck = "pairreport_" + "__".join(sorted([a, b]))
                     _PAIR_REPORT_CACHE.pop(pck, None)
@@ -5912,53 +5988,15 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     pack_path.write_text(pack, encoding="utf-8")
                     state["stage"] = f"running {cli_name}"
 
-                    use_shell = sys.platform.startswith("win") and agent_path.lower().endswith((".cmd", ".bat", ".ps1"))
-                    if cli_name == "claude":
-                        cmd_args = [agent_path, "--print"]
-                    elif cli_name == "codex":
-                        cmd_args = [agent_path, "exec", "--skip-git-repo-check", "--ephemeral", *_codex_model_args(), "-"]
-                    else:
-                        cmd_args = [agent_path]
-
-                    if use_shell:
-                        cmd = " ".join(f'"{x}"' if " " in x or x.startswith("-") is False else x for x in cmd_args)
-                    else:
-                        cmd = cmd_args
-
                     t_start = _time.time()
-                    # Run agent from a writable user dir, NOT the bundled .app's
-                    # read-only Resources dir (where etcli's own cwd may live).
-                    # codex creates session dirs in cwd → fails if cwd isn't writable.
-                    _agent_cwd = _agent_workspace_root()
-                    try: _agent_cwd.mkdir(parents=True, exist_ok=True)
-                    except OSError: _agent_cwd = Path.home()
-                    proc = subprocess.Popen(
-                        cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                        bufsize=1, text=True, encoding="utf-8", errors="replace",
-                        shell=use_shell, cwd=str(_agent_cwd),
-                    )
-                    if proc.stdin:
-                        proc.stdin.write(pack)
-                        proc.stdin.close()
-                    if proc.stdout:
-                        for line in proc.stdout:
-                            state["output"] += line
-                    rc = proc.wait(timeout=900)
+                    rc, agent_err = _run_local_agent_streaming(cli_name, agent_path, pack, state)
                     elapsed = int(_time.time() - t_start)
                     output = state["output"]
                     sys.stderr.write(f"[invoke] {name} rc={rc} chars={len(output)} {elapsed}s\n")
 
                     if rc == 0 and len(output) > 100:
-                        # Strip codex banner: keep only between "\ncodex\n" and "\ntokens used\n"
-                        clean_output = output
-                        if cli_name == "codex":
-                            cidx = output.rfind("\ncodex\n")
-                            if cidx > 0:
-                                clean_output = output[cidx + len("\ncodex\n"):]
-                                tidx = clean_output.find("\ntokens used\n")
-                                if tidx > 0:
-                                    clean_output = clean_output[:tidx]
-                        clean_output = clean_output.strip()
+                        # e.g. strip the codex banner: keep only between "\ncodex\n" and "\ntokens used\n"
+                        clean_output = _local_agents.clean_output(cli_name, output, server=True)
                         reports_root = _agent_reports_root() / "friends"
                         reports_root.mkdir(parents=True, exist_ok=True)
                         safe_full = re.sub(r'[<>:"/\\|?*]', "_", name) or wxid
@@ -5979,7 +6017,7 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                         except Exception:
                             pass
                     else:
-                        state["error"] = f"agent rc={rc}, output {len(output)} chars"
+                        state["error"] = f"agent rc={rc}, output {len(output)} chars" + agent_err
                         state["stage"] = "failed"
                 except Exception as e:
                     state["error"] = f"{type(e).__name__}: {e}"
@@ -6910,6 +6948,89 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         self._send_cors_headers()
         self.end_headers()
         self.wfile.write(data)
+
+
+def _run_local_agent_streaming(cli_name: str, agent_path: str, prompt: str, state: dict) -> tuple[int, str]:
+    """Run one local agent on `prompt`, appending its stdout to state["output"]
+    line by line so the frontend can poll live progress.
+
+    Returns (returncode, error_suffix). error_suffix is "" or a short
+    "\n[stderr] ..." tail, only for agents whose stderr is kept apart from
+    stdout (claude/codex keep the legacy merged stream).
+    """
+    # Run agent from a writable user dir, NOT the bundled .app's
+    # read-only Resources dir (where etcli's own cwd may live).
+    # codex creates session dirs in cwd → fails if cwd isn't writable.
+    _agent_cwd = _agent_workspace_root()
+    try: _agent_cwd.mkdir(parents=True, exist_ok=True)
+    except OSError: _agent_cwd = Path.home()
+    inv = _local_agents.build_invocation(cli_name, agent_path, prompt, _agent_cwd)
+    cmd_args = inv.argv
+    use_shell = _local_agents.needs_shell(agent_path)
+    # Popen + stream stdout line by line so frontend can show live output
+    if use_shell:
+        cmd = " ".join(f'"{x}"' if " " in x or x.startswith("-") is False else x for x in cmd_args)
+    else:
+        cmd = cmd_args
+    env = None
+    if inv.env:
+        env = os.environ.copy()
+        env.update(inv.env)
+    err_chunks: list[str] = []
+    err_thread = None
+    proc = None
+    watchdog = None
+    try:
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT if inv.merge_stderr else subprocess.PIPE,
+            bufsize=1, text=True, encoding="utf-8", errors="replace",
+            shell=use_shell, cwd=str(_agent_cwd), env=env,
+            **_local_agents.popen_group_kwargs(),
+        )
+        # The read loop below blocks until the agent closes stdout, so the
+        # timeout has to come from a watchdog that kills the process tree.
+        watchdog = _local_agents.Watchdog(proc, inv.timeout)
+        with watchdog:
+            if not inv.merge_stderr and proc.stderr:
+                def _drain(stream=proc.stderr):
+                    for line in stream:
+                        err_chunks.append(line)
+                err_thread = threading.Thread(target=_drain, daemon=True)
+                err_thread.start()
+            if proc.stdin:
+                try:
+                    if inv.stdin_text is not None:
+                        proc.stdin.write(inv.stdin_text)
+                    proc.stdin.close()
+                except OSError:
+                    pass  # agent exited / was killed before reading all input
+            if proc.stdout:
+                for line in proc.stdout:
+                    state["output"] += line
+            try:
+                rc = proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                # stdout closed but the process lingers (detached child etc.)
+                _local_agents.kill_process_tree(proc)
+                rc = proc.wait()
+        if err_thread is not None:
+            err_thread.join(timeout=5)
+    finally:
+        inv.cleanup()
+        if proc is not None:
+            # Never leave the agent running: timeout, a stuck child keeping
+            # the pipe open, or an exception in this thread all end up here.
+            _local_agents.kill_process_tree(proc)
+            for stream in (proc.stdout, proc.stderr):
+                if stream:
+                    try: stream.close()
+                    except OSError: pass
+    err_tail = "".join(err_chunks).strip()
+    suffix = f"\n[stderr] {err_tail[-600:]}" if err_tail else ""
+    if watchdog is not None and watchdog.fired:
+        suffix = f"\nagent 超时（{inv.timeout}s 无结果），已结束进程" + suffix
+    return rc, suffix
 
 
 # ---------- live sync (实时同步, WeChat only) ----------
@@ -8066,29 +8187,12 @@ def _compute_friend_topology(
 
 
 def _detect_local_agents() -> list[dict]:
-    """Detect installed AI CLIs that Murmur can actually invoke safely."""
-    candidates = [
-        ("claude", "Claude Code", "anthropic"),
-        ("codex", "Codex CLI", "openai"),
-    ]
-    found = []
-    for cli, name, vendor in candidates:
-        path = _which(cli)
-        if not path:
-            continue
-        try:
-            # On Windows .cmd needs shell=True; on POSIX direct invocation works
-            use_shell = sys.platform.startswith("win") and path.lower().endswith((".cmd", ".bat", ".ps1"))
-            cmd = f'"{path}" --version' if use_shell else [path, "--version"]
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=5,
-                               encoding="utf-8", errors="replace", shell=use_shell)
-            version = (r.stdout or r.stderr or "").strip().split("\n")[0][:80]
-            if r.returncode == 0 or version:
-                found.append({"cli": cli, "name": name, "vendor": vendor,
-                              "version": version, "path": path})
-        except (subprocess.TimeoutExpired, OSError):
-            pass
-    return found
+    """Detect installed AI CLIs that Murmur can actually invoke safely.
+
+    The candidate list (claude, codex, gemini, kimi, opencode) and how each is
+    probed live in local_agents.AGENTS.
+    """
+    return _local_agents.detect_local_agents(_which)
 
 
 def _run_server(args) -> int:

@@ -5,9 +5,9 @@ html, body, #root {
   height: 100%;
   margin: 0;
   padding: 0;
-  background: var(--et-bg);
-  color: var(--et-ink);
-  font-family: var(--et-sans);
+  background: var(--surface-page);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
 }
 
@@ -17,4 +17,4 @@ button { font-family: inherit; }
 input  { font-family: inherit; outline: none; }
 
 /* hide ugly Chrome focus ring on buttons that handle focus themselves */
-button:focus-visible { outline: 2px solid var(--et-orange); outline-offset: 2px; border-radius: 6px; }
+button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; border-radius: 6px; }

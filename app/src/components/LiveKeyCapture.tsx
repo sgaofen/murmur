@@ -9,8 +9,10 @@
 // and a live matched-DB counter, offer another round, then hand off to the
 // existing decrypt flow.
 import { useCallback, useEffect, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import { cancelLiveKey, getLiveKeyStatus, installFrida, startLiveKey } from '../data/api';
 import type { LiveKeyStatus } from '../data/api';
+import { Button, Callout, Card, SegmentedControl } from '../ui';
 import { PrivateCopyCapture } from './PrivateCopyCapture';
 import { lookupError } from '../data/errorCatalog';
 import { ErrorExplain } from './ErrorExplain';
@@ -140,53 +142,51 @@ export function LiveKeyCapture({ onDecrypt, reason = 'manual', wechatVersion, on
       )}
 
       {st.frida.installed && !job.running && (
-        <>
+        <div className="ui-stack ui-stack--md">
           {finished && job.phase === 'done' && (
             <RoundSummary newCount={job.new.length} matched={matched} total={total}
               missingCore={missingCore} round={job.round} />
           )}
           {job.phase === 'error' && <JobError error={job.error} code={job.code} log={job.log} />}
           {!finished && total > 0 && (
-            <div className="et-meta" style={{ marginBottom: 10 }}>
+            <div className="et-meta">
               已有 <strong>{matched}</strong> / {total} 个数据库的密钥{matched > 0 ? '（之前抓到的会保留）' : ''}
             </div>
           )}
           <TodoList />
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '12px 0 4px', flexWrap: 'wrap' }}>
+          <div className="ui-row">
             <span className="et-meta">每轮抓取时长：</span>
-            {DURATIONS.map(d => (
-              <button key={d} onClick={() => setSeconds(d)} style={chip(seconds === d)}>{d} 秒</button>
-            ))}
+            <SegmentedControl label="每轮抓取时长" size="sm" value={String(seconds)}
+              onChange={v => setSeconds(Number(v))}
+              options={DURATIONS.map(d => ({ value: String(d), label: `${d} 秒` }))} />
           </div>
-          <div style={{
-            padding: '10px 14px', background: 'rgba(232,181,122,0.18)',
-            border: '0.5px solid rgba(138,90,28,0.3)', borderRadius: 8,
-            fontSize: 11.5, color: '#8a5a1c', lineHeight: 1.6, margin: '10px 0 4px',
-          }}>
-            💡 点开始后多半会弹 macOS 密码窗口（挂钩微信需要管理员权限），输完开机密码倒计时才开始。
+          <Callout tone="warning" compact>
+            点开始后多半会弹 macOS 密码窗口（挂钩微信需要管理员权限），输完开机密码倒计时才开始。
             倒计时期间<strong>切到微信去操作</strong>，Murmur 这边不用看着。<br/>
             风控提示：挂钩微信进程有被腾讯检测到的可能。Murmur 只处理本机、你本人的数据，不上传任何内容。
+          </Callout>
+          <div className="ui-stack">
+            {finished && matched > 0 ? (
+              <>
+                <Button variant="primary" size="lg" block onClick={onDecrypt}>
+                  {matched >= total ? '全部抓到了 → 开始解密' : `用已抓到的 ${matched} 个开始解密`}
+                </Button>
+                <Button variant="secondary" size="lg" block onClick={start} loading={busy}>
+                  {busy ? '启动中…' : '再抓一轮（补齐剩下的）'}
+                </Button>
+              </>
+            ) : (
+              <>
+                <Button variant="primary" size="lg" block onClick={start} loading={busy}>
+                  {busy ? '启动中…' : finished ? '再抓一轮' : '开始实时抓取'}
+                </Button>
+                {!finished && matched > 0 && (
+                  <Button variant="secondary" size="lg" block onClick={onDecrypt}>已经够了，直接用现有的 {matched} 个解密</Button>
+                )}
+              </>
+            )}
           </div>
-          {finished && matched > 0 ? (
-            <>
-              <button onClick={onDecrypt} style={primaryBtn}>
-                {matched >= total ? '全部抓到了 → 开始解密' : `用已抓到的 ${matched} 个开始解密`}
-              </button>
-              <button onClick={start} disabled={busy} style={secondaryBtn}>
-                {busy ? '启动中…' : '再抓一轮（补齐剩下的）'}
-              </button>
-            </>
-          ) : (
-            <>
-              <button onClick={start} disabled={busy} style={primaryBtn}>
-                {busy ? '启动中…' : finished ? '再抓一轮' : '开始实时抓取'}
-              </button>
-              {!finished && matched > 0 && (
-                <button onClick={onDecrypt} style={secondaryBtn}>已经够了，直接用现有的 {matched} 个解密</button>
-              )}
-            </>
-          )}
-        </>
+        </div>
       )}
 
       {job.running && (
@@ -198,12 +198,10 @@ export function LiveKeyCapture({ onDecrypt, reason = 'manual', wechatVersion, on
       )}
 
       {err && <ErrorExplain code={errCode} style={{ marginTop: 10, marginBottom: 0 }} />}
-      {err && <div style={{ marginTop: 10, fontSize: 12, color: 'var(--et-rose)' }}>{err}</div>}
+      {err && <Callout tone="danger" compact className="ui-mt-3">{err}</Callout>}
 
       {onPaste && !job.running && (
-        <button onClick={onPaste} style={{ ...secondaryBtn, border: 'none', fontSize: 12, color: 'var(--et-mute)' }}>
-          或者：手动粘贴密钥
-        </button>
+        <Button variant="ghost" block className="ui-mt-2" onClick={onPaste}>或者：手动粘贴密钥</Button>
       )}
     </>
   );
@@ -213,45 +211,35 @@ function MethodChooser({ reason, wechatVersion, onPick, onPaste }: {
   reason: Props['reason']; wechatVersion?: string | null;
   onPick: (m: 'frida' | 'private-copy') => void; onPaste?: () => void;
 }) {
+  const card = (m: 'frida' | 'private-copy', title: ReactNode, desc: string) => (
+    <Card variant="sunken" padding="sm" interactive role="button" tabIndex={0}
+      onClick={() => onPick(m)}
+      onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onPick(m); } }}>
+      <div style={{ fontWeight: 600, fontSize: 14 }}>{title}</div>
+      <div className="et-meta" style={{ marginTop: 4, lineHeight: 1.6 }}>{desc}</div>
+    </Card>
+  );
   return (
     <>
       <Intro reason={reason} wechatVersion={wechatVersion} />
-      <div className="et-meta" style={{ marginBottom: 10 }}>选一种抓取方式：</div>
-      <button onClick={() => onPick('frida')} style={methodCard}>
-        <div style={{ fontWeight: 600, fontSize: 14, color: 'var(--et-ink)' }}>Frida 实时抓取</div>
-        <div className="et-meta" style={{ marginTop: 4, lineHeight: 1.6 }}>
-          挂钩正在运行的微信。需要装一次 Frida，并会弹一次系统密码窗（管理员权限）。不改动微信本体。
-        </div>
-      </button>
-      <button onClick={() => onPick('private-copy')} style={{ ...methodCard, marginTop: 10 }}>
-        <div style={{ fontWeight: 600, fontSize: 14, color: 'var(--et-ink)' }}>
-          免 Frida 方式 <span style={{ color: 'var(--et-orange)', fontSize: 12 }}>推荐给不想装 Frida / 不想输管理员密码的人</span>
-        </div>
-        <div className="et-meta" style={{ marginTop: 4, lineHeight: 1.6 }}>
-          把微信复制一份到 Murmur 自己的目录、重签名后打开这份副本来抓。不装 Frida、不用管理员密码，不动 /Applications/WeChat.app。
-        </div>
-      </button>
+      <div className="ui-stack">
+        <div className="et-meta">选一种抓取方式：</div>
+        {card('frida', 'Frida 实时抓取',
+          '挂钩正在运行的微信。需要装一次 Frida，并会弹一次系统密码窗（管理员权限）。不改动微信本体。')}
+        {card('private-copy',
+          <>免 Frida 方式 <span style={{ color: 'var(--accent-text)', fontSize: 12, fontWeight: 500 }}>推荐给不想装 Frida / 不想输管理员密码的人</span></>,
+          '把微信复制一份到 Murmur 自己的目录、重签名后打开这份副本来抓。不装 Frida、不用管理员密码，不动 /Applications/WeChat.app。')}
+      </div>
       {onPaste && (
-        <button onClick={onPaste} style={{
-          all: 'unset', cursor: 'pointer', display: 'block', width: '100%', textAlign: 'center',
-          padding: '12px 0', marginTop: 10, fontSize: 12, color: 'var(--et-mute)',
-        }}>
-          或者：手动粘贴密钥
-        </button>
+        <Button variant="ghost" block className="ui-mt-2" onClick={onPaste}>或者：手动粘贴密钥</Button>
       )}
     </>
   );
 }
 
-const methodCard: React.CSSProperties = {
-  all: 'unset', cursor: 'pointer', display: 'block', width: '100%', boxSizing: 'border-box',
-  padding: '12px 14px', borderRadius: 8,
-  background: 'var(--et-paper-2)', border: '0.5px solid var(--et-line-2)',
-};
-
 function Intro({ reason, wechatVersion }: { reason: Props['reason']; wechatVersion?: string | null }) {
   return (
-    <div className="et-serif" style={{ fontSize: 15, lineHeight: 1.7, color: 'var(--et-ink-soft)', marginBottom: 12 }}>
+    <div className="et-serif" style={{ fontSize: 15, lineHeight: 1.7, color: 'var(--text-secondary)', marginBottom: 12 }}>
       {reason === 'scan-empty' && <>内存扫描这次一个密钥都没找到 —— 微信 4.1.9 之后很常见，不是你操作的问题。<br/></>}
       {reason === 'version' && wechatVersion && <>检测到你的微信是 <strong>{wechatVersion}</strong>，这个版本密钥不再常驻内存。<br/></>}
       换个办法：我在微信<strong>用到</strong>密钥的那一刻把它截下来。所以抓取期间需要你<strong>主动去用微信</strong>，光放着是抓不到的。
@@ -261,18 +249,14 @@ function Intro({ reason, wechatVersion }: { reason: Props['reason']; wechatVersi
 
 function TodoList() {
   return (
-    <div style={{
-      padding: '12px 14px', background: 'var(--et-paper-2)',
-      border: '0.5px solid var(--et-line-2)', borderRadius: 8,
-      fontSize: 13, lineHeight: 1.8, color: 'var(--et-ink)',
-    }}>
-      <div style={{ fontWeight: 600, marginBottom: 6 }}>倒计时开始后，去微信里做这些：</div>
-      <ol style={{ margin: 0, paddingLeft: 20 }}>
+    <Card variant="sunken" padding="sm">
+      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>倒计时开始后，去微信里做这些：</div>
+      <ol style={{ margin: 0, paddingLeft: 20, fontSize: 13, lineHeight: 1.8 }}>
         {TODO.map(([what, why]) => (
           <li key={what}>{what} <span className="et-meta" style={{ fontSize: 11 }}>· {why}</span></li>
         ))}
       </ol>
-    </div>
+    </Card>
   );
 }
 
@@ -291,13 +275,13 @@ function Running({ status, matched, total, onStop }: {
       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12 }}>
         <div className="et-h3">{head}</div>
         {(job.phase === 'capturing' || job.phase === 'waiting-wechat') && job.remaining != null && (
-          <div style={{ fontFamily: 'var(--et-mono)', fontSize: 34, fontWeight: 600, color: 'var(--et-orange)' }}>
+          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 34, fontWeight: 600, color: 'var(--accent)' }}>
             {job.remaining}s
           </div>
         )}
       </div>
-      <div style={{ margin: '12px 0 6px', height: 8, borderRadius: 4, background: 'var(--et-paper-2)', overflow: 'hidden' }}>
-        <div style={{ width: `${pct}%`, height: '100%', background: 'var(--et-orange)', transition: 'width .4s' }} />
+      <div style={{ margin: '12px 0 6px', height: 8, borderRadius: 4, background: 'var(--surface-sunken)', overflow: 'hidden' }}>
+        <div style={{ width: `${pct}%`, height: '100%', background: 'var(--accent)', transition: 'width .4s' }} />
       </div>
       <div className="et-meta" style={{ marginBottom: 10 }}>
         已匹配 <strong>{matched}</strong> / {total} 个数据库
@@ -305,17 +289,17 @@ function Running({ status, matched, total, onStop }: {
         {job.phase === 'capturing' && <> · 已截获 {job.hits} 次加解密调用</>}
       </div>
       {job.passphrase_found && (
-        <div className="et-meta" style={{ marginBottom: 10, color: 'var(--et-sage)' }}>
+        <div className="et-meta" style={{ marginBottom: 10, color: 'var(--success-fg)' }}>
           ✓ 已截获账号口令，其余数据库的密钥直接推算出来了
         </div>
       )}
       {job.new.length > 0 && (
-        <div style={{ fontFamily: 'var(--et-mono)', fontSize: 11, color: 'var(--et-ink-soft)', lineHeight: 1.6, marginBottom: 10 }}>
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--success-fg)', lineHeight: 1.6, marginBottom: 10 }}>
           {job.new.slice(-6).map(n => <div key={n}>✓ {n}</div>)}
         </div>
       )}
       {(job.phase === 'capturing' || job.phase === 'waiting-wechat') && <TodoList />}
-      <button onClick={onStop} style={secondaryBtn}>提前结束这一轮</button>
+      <Button variant="secondary" size="lg" block className="ui-mt-3" onClick={onStop}>提前结束这一轮</Button>
     </div>
   );
 }
@@ -324,16 +308,9 @@ function RoundSummary({ newCount, matched, total, missingCore, round }: {
   newCount: number; matched: number; total: number; missingCore: string[]; round: number;
 }) {
   const all = total > 0 && matched >= total;
-  const color = all ? '#3a7a4f' : newCount > 0 ? '#8a5a1c' : 'var(--et-rose)';
   return (
-    <div style={{
-      padding: '12px 14px', borderRadius: 8, marginBottom: 12, lineHeight: 1.7, fontSize: 13,
-      background: all ? 'rgba(72,167,107,0.10)' : 'rgba(232,181,122,0.18)',
-      border: `0.5px solid ${all ? 'rgba(72,167,107,0.30)' : 'rgba(138,90,28,0.3)'}`, color,
-    }}>
-      <div style={{ fontWeight: 600 }}>
-        第 {round} 轮结束：新抓到 {newCount} 个，累计 {matched} / {total}
-      </div>
+    <Callout tone={all ? 'success' : newCount > 0 ? 'warning' : 'danger'}
+      title={`第 ${round} 轮结束：新抓到 ${newCount} 个，累计 ${matched} / ${total}`}>
       {all && <div>全部数据库的密钥都到手了。</div>}
       {!all && newCount === 0 && (
         <div>这一轮什么都没截到。确认倒计时期间你在微信里发了消息、点开了新对话；如果弹密码窗时点了取消，也会这样。</div>
@@ -344,7 +321,7 @@ function RoundSummary({ newCount, matched, total, missingCore, round }: {
       {!all && newCount > 0 && missingCore.length === 0 && (
         <div>剩下的多半是你这次没碰到的功能（某些聊天分库、收藏、表情）。可以直接解密，缺的以后再补一轮。</div>
       )}
-    </div>
+    </Callout>
   );
 }
 
@@ -358,20 +335,15 @@ function JobError({ error, code, log }: { error: string | null; code?: string | 
     error === 'no-dbs' ? '没找到微信的加密数据库，请确认微信已经登录并完成首次同步。' :
     `抓取失败：${error || '未知错误'}`;
   return (
-    <div style={known ? { marginBottom: 12 } : {
-      padding: '12px 14px', background: 'rgba(196,90,63,0.12)', border: '0.5px solid rgba(196,90,63,0.4)',
-      borderRadius: 8, marginBottom: 12,
-    }}>
-      {known
-        ? <ErrorExplain code={code} style={{ marginBottom: 0 }} />
-        : <div style={{ fontSize: 13, color: 'var(--et-rose)', fontWeight: 600 }}>{msg}</div>}
+    <Callout tone="danger" title={known ? undefined : msg}>
+      {known && <ErrorExplain code={code} style={{ marginBottom: 0 }} />}
       {log && (
-        <details style={{ marginTop: 6 }}>
-          <summary style={{ cursor: 'pointer', fontSize: 11, color: 'var(--et-mute)' }}>查看日志</summary>
-          <pre style={{ fontSize: 10.5, whiteSpace: 'pre-wrap', margin: '6px 0 0', maxHeight: 160, overflow: 'auto' }}>{log.slice(-1500)}</pre>
+        <details>
+          <summary>查看日志</summary>
+          <pre>{log.slice(-1500)}</pre>
         </details>
       )}
-    </div>
+    </Callout>
   );
 }
 
@@ -379,60 +351,34 @@ function FridaMissing({ status, onInstall }: { status: LiveKeyStatus; onInstall:
   const inst = status.install;
   if (status.frida.installable) {
     return (
-      <div style={{
-        padding: '12px 14px', background: 'var(--et-paper-2)', border: '0.5px solid var(--et-line-2)',
-        borderRadius: 8, fontSize: 13, lineHeight: 1.7, marginBottom: 12,
-      }}>
-        <div style={{ fontWeight: 600, marginBottom: 4 }}>需要先装一个组件：Frida</div>
+      <Card variant="sunken" padding="sm" className="ui-mb-3">
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>需要先装一个组件：Frida</div>
         <div className="et-meta">实时抓取靠 Frida 挂钩微信的加密调用，只装一次（下载约 45 MB，装在当前 Python 的用户目录）。</div>
         {inst.ok === false && (
-          <details open style={{ marginTop: 8 }}>
-            <summary style={{ cursor: 'pointer', fontSize: 12, color: 'var(--et-rose)' }}>安装失败，查看输出</summary>
-            <pre style={{ fontSize: 10.5, whiteSpace: 'pre-wrap', maxHeight: 140, overflow: 'auto' }}>{inst.log.slice(-1200)}</pre>
-            <div className="et-meta">也可以在终端手动装：<code>python3 -m pip install --user "frida&gt;=17"</code>，装完回来刷新。</div>
-          </details>
+          <Callout tone="danger" compact className="ui-mt-2" title="安装失败">
+            <details open>
+              <summary>查看输出</summary>
+              <pre>{inst.log.slice(-1200)}</pre>
+            </details>
+            <div>也可以在终端手动装：<code>python3 -m pip install --user "frida&gt;=17"</code>，装完回来刷新。</div>
+          </Callout>
         )}
-        <button onClick={onInstall} disabled={inst.running} style={primaryBtn}>
+        <Button variant="primary" size="lg" block className="ui-mt-3" onClick={onInstall} loading={inst.running}>
           {inst.running ? '正在安装 Frida…（一般 1 分钟内）' : inst.ok === false ? '重试安装' : '一键安装 Frida'}
-        </button>
-      </div>
+        </Button>
+      </Card>
     );
   }
   return (
-    <div style={{
-      padding: '12px 14px', background: 'var(--et-paper-2)', border: '0.5px solid var(--et-line-2)',
-      borderRadius: 8, fontSize: 13, lineHeight: 1.7, marginBottom: 12,
-    }}>
-      <div style={{ fontWeight: 600, marginBottom: 4 }}>这个版本的 App 没带上 Frida，先用终端抓一次</div>
+    <Card variant="sunken" padding="sm" className="ui-mb-3">
+      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>这个版本的 App 没带上 Frida，先用终端抓一次</div>
       <div className="et-meta" style={{ marginBottom: 6 }}>下载源码后在仓库目录里运行（抓的时候按下面的清单去用微信）：</div>
-      <pre style={{ background: 'var(--et-paper)', padding: '8px 10px', borderRadius: 6, fontSize: 11, fontFamily: 'var(--et-mono)', whiteSpace: 'pre-wrap', margin: 0 }}>
+      <pre style={{ background: 'var(--surface-card)', color: 'var(--text-secondary)', padding: '8px 10px', borderRadius: 6, fontSize: 11, fontFamily: 'var(--font-mono)', whiteSpace: 'pre-wrap', margin: 0 }}>
 {`python3.12 -m pip install -r requirements-mac-keyextract.txt
 python3.12 cli/hook_cc_key_frida.py --seconds 90`}
       </pre>
       <div className="et-meta" style={{ marginTop: 6 }}>如果提示 attach / permission 失败，在第二条命令前面加 <code>sudo</code>。一轮抓不全就多跑几次，已经抓到的会保留。</div>
       <div className="et-meta" style={{ marginTop: 6 }}>抓到的密钥会存到 <code>~/.murmur/decrypted_keys.json</code>，回到 Murmur 重新检测即可解密。</div>
-    </div>
+    </Card>
   );
-}
-
-const primaryBtn: React.CSSProperties = {
-  all: 'unset', cursor: 'pointer', display: 'block', width: '100%',
-  textAlign: 'center', padding: '14px 0', marginTop: 8,
-  background: 'var(--et-orange)', color: '#fff',
-  borderRadius: 'var(--et-r)', fontSize: 14, fontWeight: 600,
-  boxShadow: '0 6px 16px rgba(255,107,71,0.32)',
-};
-
-const secondaryBtn: React.CSSProperties = {
-  ...primaryBtn, background: 'transparent', color: 'var(--et-ink)', boxShadow: 'none',
-  border: '1px solid var(--et-line-2)', padding: '12px 0',
-};
-
-function chip(active: boolean): React.CSSProperties {
-  return {
-    all: 'unset', cursor: 'pointer', padding: '4px 12px', borderRadius: 999, fontSize: 12,
-    border: `1px solid ${active ? 'var(--et-orange)' : 'var(--et-line-2)'}`,
-    color: active ? 'var(--et-orange)' : 'var(--et-ink-soft)',
-    background: active ? 'rgba(255,107,71,0.08)' : 'transparent',
-  };
 }
