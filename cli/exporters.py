@@ -1,22 +1,29 @@
-"""exporters.py — 把单个朋友/群的聊天导出为 JSON / HTML / TXT。
+"""exporters.py — 把单个朋友/群的聊天导出为 JSON / HTML / TXT / CSV / Markdown / ChatLab。
 
-所有渲染都基于 EchoStore.messages() 流式读取，不会把全量数据加载到内存。
-HTTP 路由由 etcli.py 的 /api/export?wxid=&format= 调用；命令行入口便于测试：
+单聊导出先把消息整理成统一的 record 列表（collect_records），再交给各格式的
+writer。媒体策略（none / originals / best）见 export_media.py：选了带附件时
+走 export_to_dir()，把聊天文件、media/ 附件目录和 导出报告.md 写进一个文件夹。
 
-    python exporters.py json --wxid wxid_xxx > out.json
-    python exporters.py html --wxid wxid_xxx > out.html
-    python exporters.py txt  --wxid wxid_xxx > out.txt
+HTTP 路由由 etcli.py 的 /api/export?wxid=&format=&media= 调用；命令行入口便于测试：
+
+    python exporters.py json    --wxid wxid_xxx > out.json
+    python exporters.py csv     --wxid wxid_xxx --out out.csv
+    python exporters.py chatlab --wxid wxid_xxx --media best --dir ~/Desktop/导出
 """
 from __future__ import annotations
 
 import argparse
+import csv
 import html as _html
 import json
 import re
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import IO, Iterator
+from typing import IO, Optional
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 CST = timezone(timedelta(hours=8))
 
@@ -28,10 +35,10 @@ def _fmt_ts(ts: int) -> str:
         return ""
 
 
-def _store_and_meta(wxid: str):
-    """Lazy-import etcli to avoid circular imports when this module is run directly."""
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from etcli import EchoStore  # noqa: E402
+def _default_store():
+    """CLI fallback: first WeChat profile. The HTTP server always passes its
+    active store instead (multi-account / QQ — issue #11)."""
+    from etcli import EchoStore  # noqa: E402  (lazy: avoid circular import)
     from paths import discover_wechat_profiles, decrypted_root_for  # noqa: E402
 
     profs = discover_wechat_profiles()
@@ -41,56 +48,7 @@ def _store_and_meta(wxid: str):
     decrypted = decrypted_root_for(profile, must_exist=True)
     if not decrypted:
         raise SystemExit("没有已解密的数据库 — 请先运行 refresh.py 解密")
-    store = EchoStore(decrypted)
-    contact = store.contact(wxid)
-    name = contact.display() if contact else wxid
-    return store, name
-
-
-def export_json(wxid: str, out: IO) -> int:
-    """Stream-write a JSON document with all messages for `wxid`."""
-    store, name = _store_and_meta(wxid)
-    out.write(f'{{"wxid":{json.dumps(wxid, ensure_ascii=False)},')
-    out.write(f'"name":{json.dumps(name, ensure_ascii=False)},')
-    out.write('"format_version":1,"messages":[')
-    first = True
-    n = 0
-    for m in store.messages(wxid, text_only=False):
-        rec = {
-            "ts": m.create_time,
-            "time": _fmt_ts(m.create_time),
-            "from_id": m.sender_wxid,
-            "from": m.sender_name,
-            "type": m.raw_type_label,
-            "type_id": m.msg_type,
-            "text": m.text,
-        }
-        if not first:
-            out.write(",")
-        out.write(json.dumps(rec, ensure_ascii=False))
-        first = False
-        n += 1
-    out.write("]}")
-    return n
-
-
-def export_txt(wxid: str, out: IO) -> int:
-    """Plain-text chat log. One message per line — readable on any device."""
-    store, name = _store_and_meta(wxid)
-    out.write(f"=== 与 {name} 的聊天记录 ({wxid}) ===\n")
-    out.write(f"导出时间: {_fmt_ts(int(datetime.now(CST).timestamp()))}\n\n")
-    n = 0
-    for m in store.messages(wxid, text_only=False):
-        ts = _fmt_ts(m.create_time)
-        sender = m.sender_name or m.sender_wxid
-        text = m.text or f"[{m.raw_type_label}]"
-        # Indent multi-line text under the timestamp for readability
-        lines = text.split("\n")
-        out.write(f"[{ts}] {sender}: {lines[0]}\n")
-        for ln in lines[1:]:
-            out.write(f"    {ln}\n")
-        n += 1
-    return n
+    return EchoStore(decrypted)
 
 
 _HTML_HEADER = """<!DOCTYPE html>
@@ -114,6 +72,8 @@ header .meta {{ font-size: 12px; color: var(--mute); }}
 .msg.other .body {{ background: var(--bubble-other); border: 0.5px solid var(--line); }}
 .msg .meta {{ font-size: 11px; color: var(--mute); margin: 2px 4px; align-self: flex-end; }}
 .msg.self .meta {{ order: -1; }}
+.msg .body.media {{ padding: 4px; background: transparent; border: none; }}
+.msg .body.media img, .msg .body.media video {{ display: block; max-width: 100%; max-height: 360px; border-radius: 10px; }}
 .day {{ text-align: center; margin: 22px 0 6px; font-size: 11px; color: var(--mute); }}
 footer {{ margin-top: 30px; text-align: center; color: var(--mute); font-size: 11px; }}
 </style></head><body><div class="wrap">
@@ -126,41 +86,424 @@ footer {{ margin-top: 30px; text-align: center; color: var(--mute); font-size: 1
 _HTML_FOOTER = """<footer>本文件由 Murmur 离线导出，仅存储于本地。</footer></div></body></html>"""
 
 
-def export_html(wxid: str, out: IO) -> int:
-    store, name = _store_and_meta(wxid)
+@dataclass
+class ChatMeta:
+    chat_id: str
+    name: str
+    is_group: bool
+    platform: str      # "wechat" | "qq"
+    self_id: str       # platform id of the account owner ("self" when unknown)
+    self_name: str
+
+
+def _platform_of(store) -> str:
+    return "qq" if type(store).__name__ == "QQStore" else "wechat"
+
+
+def chat_meta(store, wxid: str) -> ChatMeta:
+    contact = None
+    try:
+        contact = store.contact(wxid)
+    except Exception:
+        contact = None
+    name = contact.display() if contact else wxid
+    me = getattr(store, "me", None) or "self"
+    self_name = "我"
+    try:
+        sc = store.contact(me) if me != "self" else None
+        if sc and sc.display() and sc.display() != me:
+            self_name = sc.display()
+    except Exception:
+        pass
+    return ChatMeta(
+        chat_id=wxid,
+        name=name,
+        is_group=wxid.endswith("@chatroom"),
+        platform=_platform_of(store),
+        self_id=me,
+        self_name=self_name,
+    )
+
+
+def _iter_messages(store, wxid: str):
+    """store.messages() with raw XML when the store supports it (EchoStore)."""
+    try:
+        return store.messages(wxid, text_only=False, with_raw=True)
+    except TypeError:
+        # QQStore / older stores don't take with_raw.
+        return store.messages(wxid, text_only=False)
+
+
+_APPMSG_SUBTYPE_RE = re.compile(r"<appmsg\b.*?<type>\s*(\d+)\s*</type>", re.S)
+_REFERMSG_RE = re.compile(r"<refermsg>.*?</refermsg>", re.S)
+
+# WeChat msg_type → ChatLab standard message type (docs/cn/standard/chatlab-format.md v0.0.2)
+_CHATLAB_BASE_TYPES = {
+    1: 0,       # TEXT
+    3: 1,       # IMAGE
+    34: 2,      # VOICE
+    43: 3,      # VIDEO
+    47: 5,      # EMOJI
+    48: 8,      # LOCATION
+    42: 27,     # CONTACT (名片)
+    50: 23,     # CALL
+    62: 3,      # short video
+    10000: 80,  # SYSTEM
+    10002: 81,  # RECALL (revoke)
+}
+# <appmsg><type>N</type> sub-types → ChatLab types
+_CHATLAB_APPMSG_TYPES = {
+    "5": 7, "4": 7, "24": 7,            # LINK (link / note)
+    "6": 4,                              # FILE
+    "8": 5,                              # EMOJI
+    "15": 26, "19": 26, "40": 26,        # FORWARD (聊天记录)
+    "17": 8, "74": 8,                    # LOCATION
+    "3": 24, "63": 24, "76": 24,         # SHARE (music)
+    "33": 24, "36": 24, "51": 24,        # SHARE (mini program / channels)
+    "57": 25,                            # REPLY (引用)
+    "62": 22,                            # POKE (拍一拍)
+    "2000": 21,                          # TRANSFER
+    "2001": 20,                          # RED_PACKET
+}
+
+
+def appmsg_subtype(msg_type: int, raw: Optional[str]) -> Optional[str]:
+    """`<appmsg><type>` value, or None when msg_type isn't an appmsg.
+
+    WeChat 4.x packs the sub-type into the high 32 bits of local_type
+    ((sub << 32) | 49, e.g. 21474836529 = link); legacy rows use plain 49
+    and carry the sub-type only in the XML.
+    """
+    if msg_type > 0xFFFFFFFF and (msg_type & 0xFFFFFFFF) == 49:
+        return str(msg_type >> 32)
+    if msg_type == 49 or msg_type in _APPMSG_LARGEINT:
+        body = _REFERMSG_RE.sub("", raw or "")
+        m = _APPMSG_SUBTYPE_RE.search(body)
+        return m.group(1) if m else ""
+    return None
+
+
+def chatlab_type(msg_type: int, raw: Optional[str], text: str) -> int:
+    sub = appmsg_subtype(msg_type, raw)
+    if sub is not None:
+        if sub:
+            return _CHATLAB_APPMSG_TYPES.get(sub, 99)
+        return 7 if (text or "").startswith("[链接") else 99
+    if msg_type == 10000 and "拍了拍" in (text or ""):
+        return 22
+    return _CHATLAB_BASE_TYPES.get(msg_type, 99)
+
+
+_APPMSG_LARGEINT = {244813135921, 8589934592049, 8594229559345}
+_GROUP_PREFIX_RE = re.compile(r"^[^\s:]+:\n")
+
+
+def collect_records(store, wxid: str, media=None) -> list[dict]:
+    """Materialize the chat into plain records every writer consumes.
+
+    `media` is an export_media.MediaExporter (or None for text-only). Records
+    carry `media` = export-relative path when an attachment was copied.
+    """
+    out: list[dict] = []
+    for m in _iter_messages(store, wxid):
+        raw = getattr(m, "raw", None)
+        rel = media.handle(m.msg_type, raw) if media is not None else None
+        text = m.text or ""
+        label = m.raw_type_label
+        if label.startswith("type_") and appmsg_subtype(m.msg_type, raw) is not None:
+            label = "share"  # 4.x packed appmsg types have no MSG_TYPES entry
+        if m.msg_type == 10000 and raw and not raw.lstrip().startswith("<"):
+            # System notices ("你已添加了…", "拍了拍") are plain text; the
+            # store only gives a "[system]" stub, so prefer the real body.
+            text = _GROUP_PREFIX_RE.sub("", raw, count=1).strip() or text
+        out.append({
+            "ts": int(m.create_time),
+            "time": _fmt_ts(m.create_time),
+            "from_id": m.sender_wxid,
+            "from": m.sender_name or m.sender_wxid,
+            "type": label,
+            "type_id": m.msg_type,
+            "text": text,
+            "media": rel,
+            "chatlab_type": chatlab_type(m.msg_type, raw, text),
+        })
+    return out
+
+
+def _display_text(r: dict) -> str:
+    return r["text"] or f"[{r['type']}]"
+
+
+# ---------- writers ----------
+
+def write_json(meta: ChatMeta, records: list[dict], out: IO) -> int:
+    """Stream-write a JSON document (format_version 1, unchanged shape + optional media)."""
+    out.write(f'{{"wxid":{json.dumps(meta.chat_id, ensure_ascii=False)},')
+    out.write(f'"name":{json.dumps(meta.name, ensure_ascii=False)},')
+    out.write('"format_version":1,"messages":[')
+    for i, r in enumerate(records):
+        rec = {
+            "ts": r["ts"], "time": r["time"],
+            "from_id": r["from_id"], "from": r["from"],
+            "type": r["type"], "type_id": r["type_id"], "text": r["text"],
+        }
+        if r.get("media"):
+            rec["media"] = r["media"]
+        if i:
+            out.write(",")
+        out.write(json.dumps(rec, ensure_ascii=False))
+    out.write("]}")
+    return len(records)
+
+
+def write_txt(meta: ChatMeta, records: list[dict], out: IO) -> int:
+    """Plain-text chat log. One message per line — readable on any device."""
+    out.write(f"=== 与 {meta.name} 的聊天记录 ({meta.chat_id}) ===\n")
+    out.write(f"导出时间: {_fmt_ts(int(datetime.now(CST).timestamp()))}\n\n")
+    for r in records:
+        lines = _display_text(r).split("\n")
+        tail = f"  ({r['media']})" if r.get("media") else ""
+        out.write(f"[{r['time']}] {r['from']}: {lines[0]}{tail if len(lines) == 1 else ''}\n")
+        for ln in lines[1:]:
+            out.write(f"    {ln}\n")
+        if tail and len(lines) > 1:
+            out.write(f"    {tail.strip()}\n")
+    return len(records)
+
+
+CSV_COLUMNS = ["time", "timestamp", "sender_id", "sender", "type", "text", "media"]
+# Excel treats a leading = / @ (and + / - followed by formula syntax) as a
+# formula. Prefix those cells with an apostrophe so a hostile message can't
+# execute when the CSV is opened (OWASP "CSV injection").
+_CSV_FORMULA_RE = re.compile(r"^[=@\t\r]|^[+\-].*[(!|]", re.S)
+
+
+def _csv_cell(v) -> str:
+    s = "" if v is None else str(v)
+    if s and _CSV_FORMULA_RE.match(s):
+        return "'" + s
+    return s
+
+
+def write_csv(meta: ChatMeta, records: list[dict], out: IO) -> int:
+    """UTF-8 CSV with BOM so Excel opens Chinese correctly. RFC 4180 quoting."""
+    out.write("﻿")
+    w = csv.writer(out, lineterminator="\r\n", quoting=csv.QUOTE_MINIMAL)
+    w.writerow(CSV_COLUMNS)
+    for r in records:
+        w.writerow([_csv_cell(x) for x in (
+            r["time"], r["ts"], r["from_id"], r["from"], r["type"], r["text"], r.get("media") or "",
+        )])
+    return len(records)
+
+
+_MD_BLOCK_START = re.compile(r"^(\s*)([#>*+\-|]|\d+[.)]|```|~~~)")
+
+
+def _md_escape_line(line: str) -> str:
+    line = line.replace("<", "&lt;")
+    m = _MD_BLOCK_START.match(line)
+    if m:
+        line = line[:m.end(1)] + "\\" + line[m.end(1):]
+    return line
+
+
+def _md_media(r: dict) -> str:
+    rel = r.get("media")
+    if not rel:
+        return ""
+    if r["type_id"] == 3 or rel.lower().endswith((".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")):
+        return f"![图片](<{rel}>)"
+    return f"[视频](<{rel}>)"
+
+
+_PLACEHOLDER_RE = re.compile(r"^\[[^\]\n]{1,12}\]$")
+
+
+def write_md(meta: ChatMeta, records: list[dict], out: IO) -> int:
+    """Markdown: H1 title, one H2 per day, `**sender** · HH:MM` then the body."""
+    out.write(f"# 与 {_md_escape_line(meta.name)} 的聊天记录\n\n")
+    out.write(f"> {meta.chat_id} · 导出于 {_fmt_ts(int(datetime.now(CST).timestamp()))} · 共 {len(records)} 条\n")
+    last_day = None
+    for r in records:
+        day = r["time"][:10]
+        if day != last_day:
+            out.write(f"\n## {day}\n")
+            last_day = day
+        sender = _md_escape_line(r["from"]).replace("*", "\\*")
+        out.write(f"\n**{sender}** · {r['time'][11:16]}\n\n")
+        media = _md_media(r)
+        # A bare "[image]" placeholder adds nothing next to the embedded file.
+        placeholder = not r["text"] or _PLACEHOLDER_RE.match(r["text"]) is not None
+        body_lines = [] if (media and placeholder) else _display_text(r).split("\n")
+        for ln in body_lines:
+            out.write(_md_escape_line(ln) + "  \n" if ln else "\n")
+        if media:
+            out.write(media + "\n")
+    out.write("\n---\n\n*本文件由 Murmur 离线导出，仅存储于本地。*\n")
+    return len(records)
+
+
+def write_html(meta: ChatMeta, records: list[dict], out: IO) -> int:
     out.write(_HTML_HEADER.format(
-        title=_html.escape(name),
-        wxid=_html.escape(wxid),
+        title=_html.escape(meta.name),
+        wxid=_html.escape(meta.chat_id),
         when=_fmt_ts(int(datetime.now(CST).timestamp())),
     ))
-    last_day: str | None = None
-    n = 0
-    for m in store.messages(wxid, text_only=False):
-        day = _fmt_ts(m.create_time)[:10]
+    last_day: Optional[str] = None
+    for r in records:
+        day = r["time"][:10]
         if day != last_day:
             out.write(f'<div class="day">— {_html.escape(day)} —</div>\n')
             last_day = day
-        is_self = (m.sender_wxid == "self")
+        is_self = (r["from_id"] == "self")
         cls = "self" if is_self else "other"
-        body_text = m.text if m.text else f"[{m.raw_type_label}]"
-        time_short = _fmt_ts(m.create_time)[11:16]
-        sender_label = "" if is_self else _html.escape(m.sender_name or m.sender_wxid)
+        sender_label = "" if is_self else _html.escape(r["from"])
+        rel = r.get("media")
+        if rel and r["type_id"] == 43:
+            body = f'<video controls preload="none" src="{_html.escape(rel)}"></video>'
+        elif rel:
+            body = f'<a href="{_html.escape(rel)}"><img loading="lazy" src="{_html.escape(rel)}" alt=""></a>'
+        else:
+            body = _html.escape(_display_text(r))
         out.write(
             f'<div class="msg {cls}">'
-            f'<div class="meta">{sender_label} {time_short}</div>'
-            f'<div class="body">{_html.escape(body_text)}</div>'
+            f'<div class="meta">{sender_label} {r["time"][11:16]}</div>'
+            f'<div class="body{" media" if rel else ""}">{body}</div>'
             '</div>\n'
         )
-        n += 1
     out.write(_HTML_FOOTER)
-    return n
+    return len(records)
 
 
+CHATLAB_VERSION = "0.0.2"
+
+
+def chatlab_payload(meta: ChatMeta, records: list[dict]) -> dict:
+    """Build a ChatLab standard document (JSON flavour, spec v0.0.2).
+
+    Spec: https://github.com/ChatLab/ChatLab/blob/main/docs/cn/standard/chatlab-format.md
+    Only fields defined by the spec are emitted. Murmur's "self" sentinel is
+    mapped to the account's real platform id so `sender` always references a
+    member.
+    """
+    def pid(sender_id: str) -> str:
+        return meta.self_id if sender_id == "self" else sender_id
+
+    members: dict[str, dict] = {}
+    if not meta.is_group:
+        members[meta.self_id] = {"platformId": meta.self_id, "accountName": meta.self_name}
+        members[meta.chat_id] = {"platformId": meta.chat_id, "accountName": meta.name}
+    messages = []
+    for r in records:
+        sid = pid(r["from_id"]) or "unknown"
+        name = meta.self_name if r["from_id"] == "self" else (r["from"] or sid)
+        if sid not in members:
+            members[sid] = {"platformId": sid, "accountName": name}
+        ctype = int(r["chatlab_type"])
+        content: Optional[str] = r["text"] if r["text"] else None
+        messages.append({
+            "sender": sid,
+            "accountName": members[sid]["accountName"],
+            "timestamp": int(r["ts"]),
+            "type": ctype,
+            "content": content,
+        })
+    chat_meta_obj = {
+        "name": meta.name,
+        "platform": meta.platform,
+        "type": "group" if meta.is_group else "private",
+    }
+    if meta.is_group:
+        chat_meta_obj["groupId"] = meta.chat_id
+    if meta.self_id and meta.self_id != "self":
+        chat_meta_obj["ownerId"] = meta.self_id
+    return {
+        "chatlab": {
+            "version": CHATLAB_VERSION,
+            "exportedAt": int(datetime.now(CST).timestamp()),
+            "generator": "Murmur",
+        },
+        "meta": chat_meta_obj,
+        "members": list(members.values()),
+        "messages": messages,
+    }
+
+
+def write_chatlab(meta: ChatMeta, records: list[dict], out: IO) -> int:
+    out.write(json.dumps(chatlab_payload(meta, records), ensure_ascii=False))
+    return len(records)
+
+
+# fmt → (writer, content type, file extension)
 _FORMATS = {
-    "json": (export_json, "application/json", "json"),
-    "txt": (export_txt, "text/plain; charset=utf-8", "txt"),
-    "html": (export_html, "text/html; charset=utf-8", "html"),
+    "json": (write_json, "application/json", "json"),
+    "txt": (write_txt, "text/plain; charset=utf-8", "txt"),
+    "html": (write_html, "text/html; charset=utf-8", "html"),
+    "csv": (write_csv, "text/csv; charset=utf-8", "csv"),
+    "md": (write_md, "text/markdown; charset=utf-8", "md"),
+    "chatlab": (write_chatlab, "application/json", "chatlab.json"),
 }
+FORMATS = tuple(_FORMATS)
+
+
+def export_json(wxid: str, out: IO) -> int:
+    return write_export(wxid, "json", out)
+
+
+def export_txt(wxid: str, out: IO) -> int:
+    return write_export(wxid, "txt", out)
+
+
+def export_html(wxid: str, out: IO) -> int:
+    return write_export(wxid, "html", out)
+
+
+def _safe_name(s: str, limit: int = 40) -> str:
+    keep = "".join(ch for ch in s if ch.isalnum() or ch in "._-")
+    return keep[:limit] or "chat"
+
+
+def export_to_dir(store, wxid: str, fmt: str, media_policy: str, base_dir: Path,
+                  resolver=None, now: Optional[datetime] = None) -> dict:
+    """Write <base_dir>/<name>_<ts>/{murmur_<id>.<ext>, media/, 导出报告.md}.
+
+    Returns the report dict (also embedded in 导出报告.md). `resolver` defaults
+    to the active WeChat account's media layout; QQ has no media support yet.
+    """
+    if fmt not in _FORMATS:
+        raise ValueError(f"未知格式: {fmt} (支持 {' / '.join(FORMATS)})")
+    from export_media import MediaExporter, resolver_for_store, format_report_md, POLICIES
+    if media_policy not in POLICIES:
+        raise ValueError(f"未知媒体策略: {media_policy} (支持 {' / '.join(POLICIES)})")
+    meta = chat_meta(store, wxid)
+    stamp = (now or datetime.now(CST)).strftime("%Y%m%d_%H%M%S")
+    out_dir = Path(base_dir) / f"{_safe_name(meta.name, 30)}_{_safe_name(wxid, 30)}_{stamp}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    platform_ok = meta.platform == "wechat"
+    if resolver is None and platform_ok and media_policy != "none":
+        resolver = resolver_for_store(store)
+    media = MediaExporter(media_policy, out_dir, resolver, platform_supported=platform_ok)
+    records = collect_records(store, wxid, media)
+    writer, _, ext = _FORMATS[fmt]
+    chat_file = out_dir / f"murmur_{_safe_name(wxid, 60)}.{ext}"
+    with open(chat_file, "w", encoding="utf-8", newline="") as f:
+        n = writer(meta, records, f)
+    report = {
+        "ok": True,
+        "chat_id": wxid,
+        "name": meta.name,
+        "format": fmt,
+        "messages": n,
+        "exported_at": _fmt_ts(int((now or datetime.now(CST)).timestamp())),
+        "dir": str(out_dir),
+        "file": str(chat_file),
+        "media": media.summary(),
+    }
+    report_file = out_dir / "导出报告.md"
+    report_file.write_text(format_report_md(report), encoding="utf-8")
+    report["report_file"] = str(report_file)
+    return report
 
 
 # ---------- Pair export (issue #10) ----------
@@ -345,17 +688,47 @@ def export_pair_html(wxid_a: str, wxid_b: str, out: IO, store_dir: Path | None =
     return 1
 
 
+PAIR_CSV_LEAD = ["evidence", "type", "source", "target"]
+
+
+def write_pair_csv(meta: dict, out: IO) -> int:
+    """One row per A↔B edge (direct + weak evidence). BOM for Excel."""
+    rows = [("direct", e) for e in meta["evidence"].get("direct_edges", [])]
+    rows += [("weak", e) for e in meta["evidence"].get("weak_edges", [])]
+    extra: list[str] = []
+    for _, e in rows:
+        for k, v in e.items():
+            if k in PAIR_CSV_LEAD or k in extra:
+                continue
+            if v is None or isinstance(v, (str, int, float, bool)):
+                extra.append(k)
+    out.write("\ufeff")
+    w = csv.writer(out, lineterminator="\r\n")
+    w.writerow(PAIR_CSV_LEAD + extra)
+    for kind, e in rows:
+        w.writerow([_csv_cell(kind)] + [_csv_cell(e.get(k)) for k in PAIR_CSV_LEAD[1:] + extra])
+    return len(rows)
+
+
+def export_pair_csv(wxid_a: str, wxid_b: str, out: IO, store_dir: Path | None = None) -> int:
+    """Pair export as a CSV table of the relationship edges."""
+    return write_pair_csv(_pair_meta(wxid_a, wxid_b, store_dir=store_dir), out)
+
+
 _PAIR_FORMATS = {
     "json": (export_pair_json, "application/json", "json"),
     "txt":  (export_pair_txt,  "text/markdown; charset=utf-8", "md"),
+    "md":   (export_pair_txt,  "text/markdown; charset=utf-8", "md"),
     "html": (export_pair_html, "text/html; charset=utf-8", "html"),
+    "csv":  (export_pair_csv,  "text/csv; charset=utf-8", "csv"),
 }
+PAIR_FORMATS = tuple(_PAIR_FORMATS)
 
 
 def write_pair_export(a: str, b: str, fmt: str, out: IO,
                        store_dir: Path | None = None) -> int:
     if fmt not in _PAIR_FORMATS:
-        raise ValueError(f"未知格式: {fmt} (支持 json / txt / html)")
+        raise ValueError(f"未知格式: {fmt} (支持 {' / '.join(PAIR_FORMATS)})")
     fn, _, _ = _PAIR_FORMATS[fmt]
     return fn(a, b, out, store_dir=store_dir)
 
@@ -367,11 +740,14 @@ def http_pair_export_meta(fmt: str) -> tuple[str, str]:
     return ct, ext
 
 
-def write_export(wxid: str, fmt: str, out: IO) -> int:
+def write_export(wxid: str, fmt: str, out: IO, store=None) -> int:
+    """Text-only export of one chat to a stream (no media)."""
     if fmt not in _FORMATS:
-        raise ValueError(f"未知格式: {fmt} (支持 json / txt / html)")
-    fn, _, _ = _FORMATS[fmt]
-    return fn(wxid, out)
+        raise ValueError(f"未知格式: {fmt} (支持 {' / '.join(FORMATS)})")
+    if store is None:
+        store = _default_store()
+    writer, _, _ = _FORMATS[fmt]
+    return writer(chat_meta(store, wxid), collect_records(store, wxid), out)
 
 
 def http_export_meta(fmt: str) -> tuple[str, str]:
@@ -387,8 +763,17 @@ def main():
     p.add_argument("format", choices=list(_FORMATS.keys()))
     p.add_argument("--wxid", required=True)
     p.add_argument("--out", help="output file (default: stdout)")
+    p.add_argument("--media", choices=["none", "originals", "best"], default="none",
+                   help="附件策略；非 none 时写入 --dir 下的新文件夹")
+    p.add_argument("--dir", help="带附件导出时的输出根目录")
     args = p.parse_args()
-    if args.out:
+    if args.media != "none":
+        if not args.dir:
+            p.error("--media originals/best 需要 --dir")
+        report = export_to_dir(_default_store(), args.wxid, args.format, args.media, Path(args.dir))
+        print(f"[OK] {report['messages']} 条消息 → {report['dir']}", file=sys.stderr)
+        print(json.dumps(report["media"], ensure_ascii=False), file=sys.stderr)
+    elif args.out:
         with open(args.out, "w", encoding="utf-8", newline="") as f:
             n = write_export(args.wxid, args.format, f)
         print(f"[OK] {n} 条消息 → {args.out}", file=sys.stderr)

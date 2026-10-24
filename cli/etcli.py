@@ -45,6 +45,11 @@ MSG_TYPES = {
 # same set; sourced from real-world databases.
 _APPMSG_LARGEINT_TYPES = {244813135921, 8589934592049, 8594229559345}
 
+# Message types whose raw XML body is kept when messages(with_raw=True):
+# image / video (media md5), appmsg (sub-type for export classification) and
+# plain-text system notices (10000, rendered as a bare "[system]" stub otherwise).
+_RAW_KEEP_TYPES = {3, 43, 49, 10000} | _APPMSG_LARGEINT_TYPES
+
 
 # `<appmsg><type>N</type>...` sub-classifier. WeFlow's xmlType set, trimmed to the
 # ones that map to a meaningful 1-line preview.
@@ -456,6 +461,10 @@ class Message:
     msg_type: int
     text: str              # cleaned text or [tag] for non-text
     raw_type_label: str
+    # Only populated by EchoStore.messages(with_raw=True) — used by the
+    # exporters to locate media (image/video md5) and appmsg sub-types.
+    local_id: int = 0
+    raw: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -659,7 +668,14 @@ class EchoStore:
         until: Optional[int] = None,
         limit: Optional[int] = None,
         text_only: bool = False,
+        with_raw: bool = False,
     ) -> Iterator[Message]:
+        """Yield messages chronologically.
+
+        with_raw=True additionally fills Message.local_id and Message.raw (the
+        decoded XML body) for media / appmsg rows — the exporters need it to
+        find image/video files. Text rows never carry raw to keep memory flat.
+        """
         locs = self._locate_msg_dbs(username)
         if not locs:
             return
@@ -680,7 +696,7 @@ class EchoStore:
         # Aggregate rows from ALL matching dbs (chronologically), merge, then yield.
         # WeChat 4.x can have the same Msg_<md5> table in multiple message_*.db files
         # (one per rolled period). We need to read every one and merge.
-        all_rows: list[tuple[int, int, str, str, str]] = []  # (ts, mtype, sender_wxid, sender_name, text)
+        all_rows: list[tuple] = []  # (ts, mtype, sender_wxid, sender_name, text, local_id, raw)
         # Dedupe key now includes local_id so two genuinely-identical short messages
         # within the same DB (e.g. user spamming "好" twice in 1 second) don't collapse
         # to one. Cross-DB rollover can leak through here — but rollover boundary
@@ -735,7 +751,10 @@ class EchoStore:
                         sender_wxid = "self" if sender_wxid_raw == self.me else sender_wxid_raw
                     sender_name = resolve_name(sender_wxid)
                     text = self._render_content(mtype, content, is_group)
-                    all_rows.append((ts, mtype, sender_wxid, sender_name, text))  # type: ignore[arg-type]
+                    raw = None
+                    if with_raw and mtype in _RAW_KEEP_TYPES:
+                        raw = self._decode_raw(content)
+                    all_rows.append((ts, mtype, sender_wxid, sender_name, text, int(local_id or 0), raw))
             except sqlite3.DatabaseError as e:
                 if "malformed" in str(e).lower():
                     if fname not in self._known_malformed:
@@ -751,9 +770,27 @@ class EchoStore:
         if limit:
             n = max(0, int(limit))
             all_rows = all_rows[-n:] if n else []
-        for ts, mtype, sender_wxid, sender_name, text in all_rows:
+        for ts, mtype, sender_wxid, sender_name, text, local_id, raw in all_rows:
             yield Message(ts, sender_wxid, sender_name, mtype, text,
-                          MSG_TYPES.get(mtype, f"type_{mtype}"))
+                          MSG_TYPES.get(mtype, f"type_{mtype}"),
+                          local_id=local_id, raw=raw)
+
+    def _decode_raw(self, content) -> Optional[str]:
+        """Best-effort decode of a raw message body (often zstd-wrapped XML)."""
+        if content is None:
+            return None
+        if isinstance(content, (bytes, bytearray)):
+            data = bytes(content)
+            if data[:4] == b"\x28\xb5\x2f\xfd":
+                try:
+                    if self._zstd is None:
+                        import zstandard as _zs
+                        self._zstd = _zs.ZstdDecompressor()
+                    data = self._zstd.decompress(data, max_output_size=4 << 20)
+                except Exception:
+                    return None
+            return data.decode("utf-8", errors="replace")
+        return str(content)
 
     def iter_table_rows(self, fname: str, table: str, after_local_id: int = 0,
                         is_group: bool = False, render_ctx=None) -> Iterator[dict]:
@@ -4529,19 +4566,35 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         if path == "/api/export":
             wxid = (qs.get("wxid", [""])[0]) or ""
             fmt = (qs.get("format", ["json"])[0]).lower()
+            media_policy = (qs.get("media", ["none"])[0]).lower()
             if not wxid:
                 return self._send_json({"error": "missing wxid"}, status=400)
             if self.store is None:
                 return self._send_json({"error": "no_decrypted_data"}, status=503)
             try:
-                from exporters import http_export_meta, write_export
+                from exporters import http_export_meta, write_export, export_to_dir
+                from export_media import POLICIES as _MEDIA_POLICIES
                 content_type, ext = http_export_meta(fmt)
             except (ImportError, ValueError) as e:
                 return self._send_json({"error": str(e)}, status=400)
+            if media_policy not in _MEDIA_POLICIES:
+                return self._send_json({"error": f"unknown media policy: {media_policy}"}, status=400)
+            if media_policy != "none":
+                # Attachments can't ride along a single download, so write a
+                # folder (chat file + media/ + 导出报告.md) under the export dir
+                # and hand back the report; the UI offers "打开文件夹".
+                try:
+                    report = export_to_dir(self.store, wxid, fmt, media_policy,
+                                           self.export_dir / "聊天导出")
+                except Exception as e:
+                    return self._send_json({"error": f"{type(e).__name__}: {e}"}, status=500)
+                return self._send_json(report)
             import io as _io
             buf = _io.StringIO()
             try:
-                count = write_export(wxid, fmt, buf)
+                # Use the active store (WeChat or QQ, whichever account is
+                # selected) instead of re-discovering profiles[0].
+                count = write_export(wxid, fmt, buf, store=self.store)
             except Exception as e:
                 return self._send_json({"error": f"{type(e).__name__}: {e}"}, status=500)
             body = buf.getvalue().encode("utf-8")
