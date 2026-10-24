@@ -164,6 +164,10 @@ export interface Diagnose {
   wechat_exe: string | null;
   murmur_home: string;
   wechat_search_roots?: string[];
+  /** macOS only: CFBundleShortVersionString of WeChat.app, e.g. "4.1.22". */
+  wechat_version?: string | null;
+  /** macOS only: whether live capture (Frida) is the recommended key path. */
+  live_key?: { recommended: boolean; frida: FridaStatus } | null;
 }
 
 export async function getDiagnose(): Promise<Diagnose> {
@@ -295,6 +299,10 @@ export async function extractKey(opts: { autoRestart?: boolean; timeout?: number
   ok: boolean; key?: string; mac_keys_count?: number; ms?: number; log?: string;
   /** Stable error code when !ok (data/errorCatalog.ts). */
   code?: string | null;
+  /** macOS: number of encrypted DBs found on disk. */
+  total_dbs?: number;
+  /** macOS: memory scan missed some/all DBs — offer live capture (Frida). */
+  suggest_live?: boolean;
 }> {
   return j('/api/extract-key', {
     method: 'POST',
@@ -304,6 +312,72 @@ export async function extractKey(opts: { autoRestart?: boolean; timeout?: number
       timeout: opts.timeout ?? 90,
     }),
   });
+}
+
+// ---- macOS live key capture (Frida hook on CommonCrypto, WeChat 4.1.9+) ----
+
+export interface FridaStatus {
+  installed: boolean;
+  version: string | null;
+  /** false in the packaged app — frida must be bundled there or run via CLI. */
+  installable: boolean;
+  frozen: boolean;
+}
+
+export type LiveKeyPhase = 'idle' | 'starting' | 'auth' | 'attaching' | 'capturing' | 'done' | 'error';
+
+export interface LiveKeyJob {
+  running: boolean;
+  phase: LiveKeyPhase;
+  seconds: number;
+  remaining: number | null;
+  /** encrypted DBs on disk */
+  total: number;
+  /** DBs that already had a working key before this round */
+  known: number;
+  /** known + matched this round */
+  matched_count: number;
+  /** DBs matched this round (relative paths) */
+  new: string[];
+  hits: number;
+  elevated: boolean;
+  /** 'frida-missing' | 'attach-denied' | 'auth-cancelled' | 'exit-N' | free text */
+  error: string | null;
+  /** Stable code for `error` (data/errorCatalog.ts). */
+  code?: string | null;
+  log: string;
+  round: number;
+}
+
+export interface LiveKeyStatus {
+  platform_ok: boolean;
+  frida: FridaStatus;
+  install: { running: boolean; ok: boolean | null; log: string };
+  job: LiveKeyJob;
+  /** pending = DBs (relative paths) that still have no working key */
+  coverage?: { total: number; known: number; pending?: string[]; error?: string };
+}
+
+export async function getLiveKeyStatus(opts: { coverage?: boolean } = {}): Promise<LiveKeyStatus> {
+  return j(`/api/live-key/status${opts.coverage ? '?coverage=1' : ''}`);
+}
+
+export async function startLiveKey(seconds: number): Promise<{
+  ok: boolean; started?: boolean; complete?: boolean; already_running?: boolean; error?: string; code?: string;
+}> {
+  return j('/api/live-key/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ seconds }),
+  });
+}
+
+export async function cancelLiveKey(): Promise<{ ok: boolean }> {
+  return j('/api/live-key/cancel', { method: 'POST' });
+}
+
+export async function installFrida(): Promise<{ ok: boolean; started?: boolean; already_running?: boolean; error?: string; code?: string }> {
+  return j('/api/live-key/install-frida', { method: 'POST' });
 }
 
 export async function saveKey(key: string): Promise<{ ok: boolean; path?: string; error?: string; code?: string }> {

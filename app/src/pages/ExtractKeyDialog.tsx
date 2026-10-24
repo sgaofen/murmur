@@ -4,6 +4,7 @@ import { lookupError } from '../data/errorCatalog';
 import { ErrorExplain } from '../components/ErrorExplain';
 import { maskText } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
+import { LiveKeyCapture } from '../components/LiveKeyCapture';
 
 interface Props {
   open: boolean;
@@ -11,7 +12,7 @@ interface Props {
   onSuccess?: (key?: string) => void;
 }
 
-type Phase = 'intro' | 'restarting' | 'waiting-login' | 'success' | 'error';
+type Phase = 'intro' | 'restarting' | 'waiting-login' | 'success' | 'error' | 'live';
 type Platform = 'windows' | 'macos' | 'linux';
 
 export function ExtractKeyDialog({ open, onClose, onSuccess }: Props) {
@@ -25,6 +26,8 @@ export function ExtractKeyDialog({ open, onClose, onSuccess }: Props) {
   const [elapsed, setElapsed] = useState(0);
   const [platform, setPlatform] = useState<Platform | null>(null);
   const [macKeysCount, setMacKeysCount] = useState(0);
+  const [liveReason, setLiveReason] = useState<'scan-empty' | 'version' | 'manual'>('manual');
+  const [wechatVersion, setWechatVersion] = useState<string | null>(null);
   const elapsedTimer = useRef<number | null>(null);
 
   useEffect(() => {
@@ -35,7 +38,7 @@ export function ExtractKeyDialog({ open, onClose, onSuccess }: Props) {
       return;
     }
     getDiagnose()
-      .then(d => setPlatform(d.platform))
+      .then(d => { setPlatform(d.platform); setWechatVersion(d.wechat_version ?? null); })
       .catch(() => setPlatform(navigator.userAgent.toLowerCase().includes('mac') ? 'macos' : 'windows'));
   }, [open]);
 
@@ -89,6 +92,10 @@ export function ExtractKeyDialog({ open, onClose, onSuccess }: Props) {
         }
         setPhase('success');
         onSuccess?.(r.key);
+      } else if (isMac && r.suggest_live === true) {
+        // WeChat 4.1.9+ keeps no key in memory — switch to live capture.
+        setLiveReason('scan-empty');
+        setPhase('live');
       } else {
         const fallback = isMac
           ? '没有在 WeChat 内存里扫到密钥。请保持微信登录，先点开几个聊天、群聊和朋友圈，再回来重试。'
@@ -115,11 +122,14 @@ export function ExtractKeyDialog({ open, onClose, onSuccess }: Props) {
     }}>
       <div style={{
         width: 600, maxWidth: '94%',
+        // Live capture adds a checklist + countdown; scroll inside the card
+        // instead of clipping it on small windows.
+        maxHeight: 'calc(100vh - 48px)', overflowY: 'auto',
         background: 'var(--et-paper)',
         borderRadius: 'var(--et-r-lg)',
         boxShadow: 'var(--et-shadow-3)',
         border: '0.5px solid var(--et-line-2)',
-        overflow: 'hidden', position: 'relative',
+        position: 'relative',
       }}>
         <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 6, background: 'var(--et-orange)' }} />
         <button onClick={onClose} style={{
@@ -139,10 +149,16 @@ export function ExtractKeyDialog({ open, onClose, onSuccess }: Props) {
             {phase === 'waiting-login' && (platform === 'macos' ? '请在 WeChat 里点开聊天和朋友圈' : '请回微信登录一次')}
             {phase === 'success' && '✓ 密钥已就位'}
             {phase === 'error' && '没读到密钥'}
+            {phase === 'live' && '实时抓取密钥（微信 4.1.9+）'}
           </div>
         </div>
         <div style={{ padding: '14px 28px 24px' }}>
-          {phase === 'intro' && <Intro isMac={platform === 'macos'} onStart={handleStart} />}
+          {phase === 'intro' && <Intro isMac={platform === 'macos'} onStart={handleStart}
+            onLive={() => { setLiveReason(wechatVersion ? 'version' : 'manual'); setPhase('live'); }} />}
+          {phase === 'live' && (
+            <LiveKeyCapture reason={liveReason} wechatVersion={wechatVersion}
+              onDecrypt={() => { onSuccess?.(); onClose(); }} />
+          )}
           {phase === 'restarting' && <Restarting isMac={platform === 'macos'} elapsed={elapsed} />}
           {phase === 'waiting-login' && <WaitingLogin isMac={platform === 'macos'} elapsed={elapsed} />}
           {phase === 'success' && <Success keyHex={key} macKeysCount={macKeysCount} isMac={platform === 'macos'} onClose={onClose} />}
@@ -175,7 +191,7 @@ function Step({ n, title, body, active }: { n: number; title: string; body: stri
   );
 }
 
-function Intro({ isMac, onStart }: { isMac: boolean; onStart: () => void }) {
+function Intro({ isMac, onStart, onLive }: { isMac: boolean; onStart: () => void; onLive: () => void }) {
   return (
     <>
       <div className="et-meta" style={{ fontSize: 13, color: 'var(--et-ink-soft)', marginBottom: 14 }}>
@@ -217,6 +233,14 @@ function Intro({ isMac, onStart }: { isMac: boolean; onStart: () => void }) {
         borderRadius: 'var(--et-r)', fontSize: 14, fontWeight: 600,
         boxShadow: '0 6px 16px rgba(255,107,71,0.32)',
       }}>{isMac ? '开始现场抓取' : '开始抓密钥'}</button>
+      {isMac && (
+        <button onClick={onLive} style={{
+          all: 'unset', cursor: 'pointer', display: 'block', width: '100%',
+          textAlign: 'center', padding: '12px 0', marginTop: 8,
+          border: '1px solid var(--et-line-2)', color: 'var(--et-ink)',
+          borderRadius: 'var(--et-r)', fontSize: 13, fontWeight: 600,
+        }}>微信 4.1.9 及以上：用「实时抓取」（内存扫不到时用这个）</button>
+      )}
     </>
   );
 }

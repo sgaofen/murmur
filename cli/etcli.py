@@ -149,6 +149,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import paths as _paths  # noqa: E402  (cross-platform discovery helper)
 import error_codes as _ec  # noqa: E402  (stable API error codes)
 import diag_redact as _redact  # noqa: E402  (diag bundle scrubbing)
+import live_key as _live_key  # noqa: E402  (macOS live key capture via Frida)
 
 
 def _flutter_prefs_path() -> Path:
@@ -203,6 +204,46 @@ def _spawn_mac_extract_key_args(tmp_dir: Path, *args: str) -> list[str]:
         except OSError:
             pass
     return [sys.executable, "-u", str(tmp_dir / "extract_key_mac.py"), *args]
+
+
+_LIVE_KEY_JOB = None
+_FRIDA_INSTALLER = None
+
+
+def _live_key_job():
+    global _LIVE_KEY_JOB
+    if _LIVE_KEY_JOB is None:
+        _LIVE_KEY_JOB = _live_key.LiveKeyJob()
+    return _LIVE_KEY_JOB
+
+
+def _frida_installer():
+    global _FRIDA_INSTALLER
+    if _FRIDA_INSTALLER is None:
+        _FRIDA_INSTALLER = _live_key.FridaInstaller()
+    return _FRIDA_INSTALLER
+
+
+def _live_key_status(with_coverage: bool = False) -> dict:
+    out = {
+        "platform_ok": _paths.IS_MAC,
+        "frida": _live_key.frida_status(),
+        "install": dict(_frida_installer().state),
+        "job": _live_key_job().status(),
+    }
+    # Stable code for the job's error token (frida-missing / attach-denied /
+    # auth-cancelled / wechat-not-running / no-dbs / exit-N / free text).
+    job = out["job"]
+    if isinstance(job, dict) and job.get("error"):
+        job = dict(job)
+        job["code"] = _ec.classify(job["error"]) or _ec.LIVE_KEY_FAILED
+        out["job"] = job
+    if with_coverage and _paths.IS_MAC:
+        try:
+            out["coverage"] = _live_key_job().coverage()
+        except Exception as e:
+            out["coverage"] = {"total": 0, "known": 0, "error": str(e)}
+    return out
 
 
 def discover_data_dir() -> Optional[Path]:
@@ -2685,6 +2726,9 @@ def main(argv=None):
     sp.add_argument("--pid", type=int, default=None)
     sp.add_argument("--auto-restart", action="store_true")
 
+    sp = sub.add_parser("hook-cc-key-frida", help="(PyInstaller) 调用 hook_cc_key_frida.py 实时抓 key (macOS)")
+    sp.add_argument("rest", nargs=argparse.REMAINDER, help="所有参数原样传给 hook_cc_key_frida")
+
     sp = sub.add_parser("batch", help="(PyInstaller) 调用 batch_analyze.py 跑批量")
     sp.add_argument("rest", nargs=argparse.REMAINDER, help="所有参数原样传给 batch_analyze")
 
@@ -2718,6 +2762,12 @@ def main(argv=None):
         if args.auto_restart: forwarded += ["--auto-restart"]
         sys.argv = ["extract_key_mac"] + forwarded
         return _ekm.main()
+
+    if args.cmd == "hook-cc-key-frida":
+        import hook_cc_key_frida as _hck
+        rest = list(args.rest or [])
+        if rest and rest[0] == "--": rest = rest[1:]
+        return _hck.main(rest)
 
     if args.cmd == "batch":
         import batch_analyze as _ba
@@ -4175,7 +4225,8 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
 
         # Bootstrap mode: only a small allowlist works without decrypted data.
         _NO_STORE_GET = {"/api/info", "/api/agents", "/api/diagnose", "/api/reports", "/api/log-tail",
-                          "/api/scan-disks/status", "/api/profiles", "/api/diag-bundle"}
+                          "/api/scan-disks/status", "/api/profiles", "/api/diag-bundle",
+                          "/api/live-key/status"}
         # QQ endpoints have their own data lifecycle (separate stores keyed by
         # qq number) so they bypass the WeChat-store bootstrap gate entirely.
         if path.startswith("/api/qq/"):
@@ -4349,6 +4400,10 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
             # Polling endpoint for the background disk scan started by POST /api/scan-disks.
             return self._send_json(_paths.get_scan_state())
 
+        if path == "/api/live-key/status":
+            # macOS live key capture (Frida) — polled by the onboarding UI.
+            return self._send_json(_live_key_status(with_coverage=qs.get("coverage", ["0"])[0] == "1"))
+
         # Onboarding gate: data-needing endpoints return 503 until store is ready.
         # Endpoints that work without a store stay above this gate.
         # NOTE: keep this allowlist in sync with `_NO_STORE_GET` above. They
@@ -4357,7 +4412,8 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         # _NO_STORE_GET but missing here, so users hit 503 the moment they
         # opened the Reports page on a fresh install.
         _gate_pass = (path in {"/api/diagnose", "/api/agents", "/api/reports", "/api/log-tail",
-                                "/api/scan-disks/status", "/api/profiles", "/api/diag-bundle"}
+                                "/api/scan-disks/status", "/api/profiles", "/api/diag-bundle",
+                                "/api/live-key/status"}
                       or path.startswith("/api/report/"))
         if _gate_pass:
             pass  # these don't need store, fall through to their handlers
@@ -4569,6 +4625,11 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 "wechat_exe": str(_paths.find_weixin_exe()) if _paths.find_weixin_exe() else None,
                 "murmur_home": str(_paths.murmur_home()),
                 "wechat_search_roots": [str(p) for p in _paths.wechat_search_paths()],
+                "wechat_version": _paths.wechat_app_version() if _paths.IS_MAC else None,
+                "live_key": ({
+                    "recommended": _live_key.version_needs_live_capture(_paths.wechat_app_version()),
+                    "frida": _live_key.frida_status(),
+                } if _paths.IS_MAC else None),
             })
         if path == "/api/annual-report":
             try:
@@ -4790,7 +4851,8 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
         # Mac onboarding adds a few extra (resign-wechat, open-fda, open-folder); keep them whitelisted.
         BOOTSTRAP_POSTS = {"/api/refresh", "/api/save-key", "/api/extract-key", "/api/wechat-root",
                            "/api/open-folder", "/api/resign-wechat", "/api/open-fda",
-                           "/api/scan-disks", "/api/scan-disks/cancel", "/api/active-profile"}
+                           "/api/scan-disks", "/api/scan-disks/cancel", "/api/active-profile",
+                           "/api/live-key/start", "/api/live-key/cancel", "/api/live-key/install-frida"}
         if path == "/api/active-profile":
             length = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(length) if length else b"{}"
@@ -5628,21 +5690,18 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                                        timeout=max(timeout + 30, 90))
                     stdout = (r.stdout or "") + (r.stderr or "")
 
-                    # Copy keys file from /tmp to user's ~/.murmur (so refresh.py finds it)
-                    dst = Path.home() / ".murmur" / "decrypted_keys.json"
+                    # Merge keys from /tmp into the user's ~/.murmur (so refresh.py
+                    # finds them). Merge, don't copy: keys from an earlier run or
+                    # from live capture (Frida) must survive a partial scan.
+                    dst = _live_key.keys_path()
                     try:
                         if Path(keys_path).exists() and Path(keys_path).stat().st_size > 0:
-                            dst.parent.mkdir(parents=True, exist_ok=True)
-                            shutil.copy(keys_path, dst)
-                            # Fix ownership (root → user) so the user can read it
-                            try:
-                                uid = int(os.environ.get("SUDO_UID", os.getuid()))
-                                gid = int(os.environ.get("SUDO_GID", os.getgid()))
-                                os.chown(dst, uid, gid)
-                            except Exception:
-                                pass
+                            found = json.loads(Path(keys_path).read_text(encoding="utf-8"))
+                            salt_by_rel = {meta["name"]: s for s, meta in salt_map.items()}
+                            _live_key.merge_keys(found.get("keys_by_db") or {}, salt_by_rel,
+                                                 found.get("wxid") or prof.wxid, dst)
                     except Exception as e:
-                        stdout += f"\n[orchestrator] copy {keys_path} → {dst} failed: {e}"
+                        stdout += f"\n[orchestrator] merge {keys_path} → {dst} failed: {e}"
                 finally:
                     # Clean up temp files even if osascript times out or is cancelled.
                     try: os.unlink(salts_path)
@@ -5684,11 +5743,18 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                     if key:
                         break
             if _paths.IS_MAC:
-                # On Mac, success = the per-DB JSON was copied into ~/.murmur
-                ok = (Path.home() / ".murmur" / "decrypted_keys.json").exists() and mac_keys_count > 0
+                # On Mac, success = the per-DB JSON was merged into ~/.murmur
+                ok = _live_key.keys_path().exists() and mac_keys_count > 0
                 return self._send_json({
                     "ok": ok,
                     "mac_keys_count": mac_keys_count,
+                    "total_dbs": len(salt_map),
+                    # WeChat 4.1.9+ often keeps no key in memory at all — the UI
+                    # switches to live capture (hook_cc_key_frida) when this is set.
+                    # Only when the scan really ran: a cancelled password dialog,
+                    # a task_for_pid denial (not re-signed) etc. must show the
+                    # real reason instead.
+                    "suggest_live": _live_key.scan_suggests_live(stdout, mac_keys_count, len(salt_map)),
                     "ms": ms,
                     "log": stdout[-3000:] or "(no output)",
                     "code": None if ok else _ec.extract_key_failure_code(stdout),
@@ -5700,6 +5766,23 @@ class _MurmurAPIHandler(BaseHTTPRequestHandler):
                 "log": stdout[-3000:],
                 "code": None if key else _ec.extract_key_failure_code(stdout),
             })
+
+        if path in ("/api/live-key/start", "/api/live-key/cancel", "/api/live-key/install-frida"):
+            if not _paths.IS_MAC:
+                return self._send_json({"ok": False, "error": "macOS only"}, 400)
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length) if length else b"{}"
+            opts = json.loads(body.decode("utf-8") or "{}")
+            if path == "/api/live-key/install-frida":
+                return self._send_json(_frida_installer().start())
+            if path == "/api/live-key/cancel":
+                return self._send_json(_live_key_job().cancel())
+            if not _live_key.frida_status()["installed"]:
+                return self._send_json({"ok": False, "error": "frida-missing"})
+            try:
+                return self._send_json(_live_key_job().start(int(opts.get("seconds") or _live_key.DEFAULT_SECONDS)))
+            except Exception as e:
+                return self._send_json({"ok": False, "error": f"{type(e).__name__}: {e}"})
 
         if path == "/api/save-key":
             # Persist a key for future use (so user doesn't need to re-extract)

@@ -114,6 +114,20 @@ export const ERROR_CATALOG: Record<string, ErrorEntry> = {
     fix: '检查是否少复制或多复制了字符、带了空格或引号；不确定的话直接用自动抓取。',
   },
 
+  // ---- Mac 实时抓取（Frida） ----
+  FRIDA_MISSING: {
+    level: 'action',
+    title: '还没装 Frida',
+    reason: '实时抓取要用 Frida 挂到微信的加密调用上，但当前后端里找不到它。打包版 App 不能在线安装。',
+    fix: '开发版点「安装 Frida」；打包版按提示用命令行方式运行实时抓取。',
+  },
+  LIVE_KEY_FAILED: {
+    level: 'retry',
+    title: '实时抓取中途退出了',
+    reason: '抓取子进程意外退出（日志里的 exit-N 是它的退出码）。',
+    fix: '再试一次；仍然失败就展开日志，复制诊断信息发 issue。',
+  },
+
   // ---- 解密与数据 ----
   NO_DECRYPTED_DATA: {
     level: 'action',

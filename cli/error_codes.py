@@ -46,6 +46,10 @@ DB_MALFORMED = "DB_MALFORMED"
 DB_BUSY = "DB_BUSY"
 DISK_IO = "DISK_IO"
 
+# macOS live key capture (Frida, cli/live_key.py)
+FRIDA_MISSING = "FRIDA_MISSING"
+LIVE_KEY_FAILED = "LIVE_KEY_FAILED"
+
 # QQ
 QQ_DATA_NOT_FOUND = "QQ_DATA_NOT_FOUND"
 QQ_KEY_NOT_FOUND = "QQ_KEY_NOT_FOUND"
@@ -71,6 +75,12 @@ ALL_CODES = frozenset(
 # extract_key_dll.py, qq endpoints.
 _RULES = (
     (ORIGIN_NOT_ALLOWED, r"origin_not_allowed"),
+    # live_key.py job error tokens (exact) and Frida install messages
+    (FRIDA_MISSING, r"^frida-missing$|不能在线安装 frida|no module named '?frida"),
+    (WECHAT_HARDENED, r"^attach-denied$"),
+    (AUTH_CANCELLED, r"^auth-cancelled$"),
+    (WECHAT_NOT_RUNNING, r"^wechat-not-running$"),
+    (WECHAT_DB_NOT_SYNCED, r"^no-dbs$"),
     (DB_MALFORMED, r"database_malformed|malformed|file is not a database"),
     (NO_DECRYPTED_DATA, r"no_decrypted_data|onboarding_required|bootstrap mode"),
     (AUTH_CANCELLED, r"user canceled|user cancelled|用户已取消|授权窗口取消|\(-128\)"),
@@ -80,9 +90,9 @@ _RULES = (
     (KEY_INVALID, r"wrong key|hmac|密钥不属于|密钥校验失败"),
     (KEY_NOT_FOUND, r"找不到 ?mac ?解密密钥|找不到密钥|no key matched|no saved key|没读到密钥|没有返回可保存的密钥|no key after \d+s"),
     (WECHAT_NOT_RUNNING, r"no wechat process|weixin\.exe / wechat\.exe not|没有检测到正在运行的|is wechat running"),
-    (WECHAT_DB_NOT_SYNCED, r"没找到加密 ?db|no encrypted dbs? found"),
+    (WECHAT_DB_NOT_SYNCED, r"没找到加密 ?(db|数据库)|no encrypted dbs? found"),
     (WECHAT_APP_NOT_FOUND, r"没找到 wechat\.app|could not find weixin\.exe path"),
-    (WECHAT_DATA_NOT_FOUND, r"未找到 wechat profile|找不到微信账号数据|no wechat profile found|wxid_\*/db_storage|未找到微信数据目录|^no profile$"),
+    (WECHAT_DATA_NOT_FOUND, r"未找到 wechat profile|未找到 wechat 账号目录|找不到微信账号数据|no wechat profile found|wxid_\*/db_storage|未找到微信数据目录|^no profile$"),
     (QQ_DATA_NOT_FOUND, r"not found in tencent files|nt_qq/nt_db/nt_msg\.db"),
     (TCC_BLOCKED, r"operation not permitted|\btcc\b|权限拦截"),
     (RESIGN_FAILED, r"codesign|重签名"),
@@ -93,6 +103,7 @@ _RULES = (
     (DISK_IO, r"disk i/o error|no space left|磁盘读写错误"),
     (PLATFORM_UNSUPPORTED, r"macos only|windows-only|只支持 windows"),
     (TIMEOUT, r"超时|timed out|timeoutexpired"),
+    (LIVE_KEY_FAILED, r"^exit-\d+$"),
     (AGENT_NOT_INSTALLED, r"(claude|codex|gemini|kimi)\b.* not installed|需要同时安装"),
 )
 _COMPILED = tuple((code, re.compile(pat, re.IGNORECASE | re.MULTILINE)) for code, pat in _RULES)

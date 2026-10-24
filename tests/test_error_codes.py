@@ -56,6 +56,16 @@ class ClassifyTest(unittest.TestCase):
         ("[X] Hook install failed: (wx_key.dll did not return detail)", ec.WIN_HOOK_FAILED),
         ("[X] No key after 90s (30 polls).", ec.KEY_NOT_FOUND),
         ("[X] Could not find Weixin.exe path. Install WeChat", ec.WECHAT_APP_NOT_FOUND),
+        # live_key.py (macOS Frida live capture) job error tokens / messages
+        ("frida-missing", ec.FRIDA_MISSING),
+        ("打包版 App 不能在线安装 Frida，请用命令行方式（见提示）。", ec.FRIDA_MISSING),
+        ("attach-denied", ec.WECHAT_HARDENED),
+        ("auth-cancelled", ec.AUTH_CANCELLED),
+        ("wechat-not-running", ec.WECHAT_NOT_RUNNING),
+        ("no-dbs", ec.WECHAT_DB_NOT_SYNCED),
+        ("exit-3", ec.LIVE_KEY_FAILED),
+        ("未找到 WeChat 账号目录（请先在微信里登录一次）", ec.WECHAT_DATA_NOT_FOUND),
+        ("没找到加密数据库 — 让微信完成首次同步后再试", ec.WECHAT_DB_NOT_SYNCED),
         # sqlite
         ("database disk image is malformed", ec.DB_MALFORMED),
         ("file is not a database", ec.DB_MALFORMED),
@@ -174,6 +184,21 @@ class EndpointCodeTest(unittest.TestCase):
         status, body = self._req("POST", "/api/qq/decrypt", {"qq": "12345"})
         self.assertEqual(status, 400)
         self.assertEqual(body["code"], ec.QQ_KEY_NOT_FOUND)
+
+    def test_live_key_status_job_gets_code(self) -> None:
+        class FakeJob:
+            def status(self):
+                return {"running": False, "phase": "error", "error": "attach-denied", "log": ""}
+
+        class FakeInstaller:
+            state = {"running": False, "ok": None, "log": ""}
+
+        with mock.patch.object(etcli, "_live_key_job", return_value=FakeJob()), \
+                mock.patch.object(etcli, "_frida_installer", return_value=FakeInstaller()), \
+                mock.patch.object(etcli._live_key, "frida_status", return_value={"installed": False}):
+            out = etcli._live_key_status()
+        self.assertEqual(out["job"]["error"], "attach-denied")
+        self.assertEqual(out["job"]["code"], ec.WECHAT_HARDENED)
 
     def test_disallowed_origin(self) -> None:
         status, body = self._req("GET", "/api/info", headers={"Origin": "http://evil.example"})
