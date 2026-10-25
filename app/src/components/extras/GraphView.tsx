@@ -1,1358 +1,512 @@
-// 3D 关系网络 — 拖拽旋转 / 滚轮缩放 / 投影。底层 SVG，无外部 force-graph 依赖。
-//
-// ╔══════════════════════════════════════════════════════════════════════════╗
-// ║  PATCH NOTES — Spotlight 功能（不影响现有 3D 建模 / 投影 / 节点 / 边）   ║
-// ╠══════════════════════════════════════════════════════════════════════════╣
-// ║  v0.3.17：核心圈 spotlight 上线，桥梁 spotlight 评估后下线（rank-by-     ║
-// ║  radius 布局下两群无法视觉分离，金光线效果鸡肋）。Spotlight 类型已收窄  ║
-// ║  到 'circle' only；type 别动，要复活桥梁直接加回 'bridge' 变体即可。    ║
-// ║                                                                          ║
-// ║  [PATCH-1] 新增 Props: spotlight / onChangeSpotlight                     ║
-// ║  [PATCH-2] <defs> 末尾追加 metaball filter (gooey)                       ║
-// ║  [PATCH-3] cluster halo 块之后追加 spotlight 渲染层                      ║
-// ║            ── 核心圈：每位成员一个 circle 走 metaball filter            ║
-// ║            ── 非聚焦节点 / 边 整体 desaturate + 降透明度（不修改原代码） ║
-// ║  [PATCH-4] OverviewPanel 「核心圈」Stat 改为可点；新增 PickerOverlay /   ║
-// ║            SpotlightBanner 组件，maskText() 走隐私模式                   ║
-// ║                                                                          ║
-// ║  3D 建模 / 投影矩阵 / 节点渲染 / 边渲染：上游真品逻辑，0 行改动。       ║
-// ║  数据通道：n.cluster, n.bridge, stats.core_circles, stats.bridges,       ║
-// ║  data.clusters[].{id, label, members} 由后端 _compute_friend_topology   ║
-// ║  计算（label-propagation + Brandes betweenness）。bridges 字段保留，    ║
-// ║  仅 UI 不渲染，避免后端 cache 失效 + 留作日后可能的复活。               ║
-// ╚══════════════════════════════════════════════════════════════════════════╝
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent } from 'react';
-import { displayName, maskText } from '../../utils/privacy';
-import { usePrivacy } from '../../utils/usePrivacy';
+/* GraphView —— 关系网页中间的 10 号模块「关系网 SOCIAL SCOPE · 3D」。
+ *
+ * 一张 canvas 画整个三维场景（引擎在 ../graph3d/engine.ts），React 只管外壳：模块抬头的视角键、
+ * 四角读数、悬停提示和扇区弹层。视角（yaw / pitch / zoom / pan）放在 ref 里，拖动时不触发 React 渲染；
+ * 每次需要重画都合并到下一帧 requestAnimationFrame，读数直接改 DOM 文本。
+ *
+ * 交互：拖动旋转 · Shift / 右键拖动平移 · 滚轮缩放 · 单击选中 · 单击选中者的连线看这一对 ·
+ * 双击聚焦他所在的核心圈 · 悬停扇区看人数、单击扇区把里面的人展开成方框。
+ * 键盘：← → 转向 · ↑ ↓ 俯仰 · + − 缩放 · W A S D 平移 · R 复位。
+ * 样式：./GraphView.css（类名前缀 gxv-，节点 / 连线配色 --gx-* 也在那里，浅色铝 / 深色石墨各一套）。 */
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { CSSProperties, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode } from 'react';
+import {
+  DEF_VIEW, PITCH_MAX, PITCH_MIN, Scene, ZOOM_MAX, ZOOM_MIN, kfmt, summarize,
+} from '../graph3d/engine';
+import type { HoverTarget, Layout, Palette, SceneState, SectorInfo, Tier, View } from '../graph3d/engine';
+import { cx } from '../../ui';
+import './GraphView.css';
 
-export interface GraphNode {
-  id: string;
+export type { Layout, SceneState, Tier } from '../graph3d/engine';
+
+export interface NodeInfo {
+  code: string;
   name: string;
-  is_self?: boolean;
-  tier: string;             // self | A | B | C | D | E
-  cluster?: string | null;
-  color?: string;
-  size: number;
-  x: number; y: number; z: number;
-  msgs?: number;             // total
-  private_msgs?: number;
-  group_msgs?: number;
-  groups?: number;
-  moments_back?: number;
-  moments_out?: number;
-  combined_score?: number;
-  isolated?: boolean;
-  bridge?: boolean;
-}
-export interface GraphEdge {
-  source: string;
-  target: string;
-  type: 'private' | 'co_group' | 'co_active' | 'mention' | 'dm_inferred' | 'mutual_reply' | 'close_pair' | 'moments_cross';
-  raw_weight?: number;
-  weight: number;
-  dashed?: boolean;
-  meta?: Record<string, any>;
-  moments_cross?: number;
-  mention_count?: number;
-  shared_group_count?: number;
-}
-export interface GraphCluster {
-  id: string;
-  label: string;
-  members?: string[];
-  // Legacy positional fields — only populated for old payloads with explicit
-  // cluster centroids. Current backend (label propagation) emits id/label/members only.
-  cx?: number; cy?: number; cz?: number;
-  color?: string;
-  n?: number;
-}
-export interface GraphData {
-  nodes: GraphNode[];
-  edges: GraphEdge[];
-  clusters: GraphCluster[];
-  stats: {
-    people: number;
-    edges: number;
-    bridges: number;
-    isolates: number;
-    clusters: number;
-    ffEdges: number;
-  };
+  tier: Tier;
+  msgs: number;
+  circle: string | null;
 }
 
-// ── [PATCH-1] Spotlight 类型 ──────────────────────────────────────────────
-// 上层 (Graph.tsx) 维护 spotlight 状态。null = 默认干净画布；'circle' =
-// 聚焦某核心圈（hull envelope 半透明 3D 包裹）。
-// 桥梁功能产品决定永久砍掉（rank-by-radius 布局下两群聚焦视觉效果鸡肋，
-// 反复迭代未达预期）。后端仍计算 bridge betweenness 留作 stats，但 UI 不
-// 再有任何入口、按钮、渲染。
-export type Spotlight =
-  | null
-  | { kind: 'circle'; clusterId: string };
-// ──────────────────────────────────────────────────────────────────────────
-
-// Colors are design tokens (app/src/tokens.css), so the canvas follows the
-// light / dark theme. SVG gets them through `style` (fill / stroke /
-// stop-color), where var() is always honoured.
-const TIER_COLORS: Record<string, string> = {
-  self: 'var(--graph-self)',
-  A: 'var(--accent)',
-  B: 'var(--et-amber)',
-  C: 'var(--et-sky)',
-  D: 'var(--text-faint)',
-  E: 'var(--et-faint)',
-};
-
-const TIER_LEGEND: Array<{ tier: string; label: string }> = [
-  { tier: 'A', label: 'A · 灵魂朋友' },
-  { tier: 'B', label: 'B · 常聊朋友' },
-  { tier: 'C', label: 'C · 一般联系' },
-  { tier: 'D', label: 'D · 弱关系' },
-  { tier: 'E', label: 'E · 沉默 / 孤岛' },
-];
-
-const EDGE_STROKE: Record<string, string> = {
-  private: 'var(--accent)',
-  co_group: 'var(--info-solid)',
-  co_active: 'var(--info-fg)',
-  mention: 'var(--warning-solid)',
-  dm_inferred: 'var(--accent-text)',
-  mutual_reply: 'var(--info-fg)',
-  close_pair: 'var(--accent-strong)',
-  moments_cross: 'var(--et-rose)',
-};
-
-// Floating panels over the canvas (legend, overview, banner, zoom buttons).
-const PANEL_BG = 'color-mix(in srgb, var(--surface-card) 86%, transparent)';
-const PANEL_BORDER = 'var(--border-subtle)';
-
-// ── [PATCH-1] 9 个核心圈固定调色板（按 cluster.id 字典序映射）──────────────
-const CIRCLE_PALETTE = Array.from({ length: 9 }, (_, i) => `var(--graph-circle-${i + 1})`);
-function clusterColor(clusterId: string, allClusters: GraphCluster[]): string {
-  const sorted = [...allClusters].map(c => c.id).sort();
-  const idx = sorted.indexOf(clusterId);
-  return CIRCLE_PALETTE[(idx >= 0 ? idx : 0) % CIRCLE_PALETTE.length];
-}
-// ──────────────────────────────────────────────────────────────────────────
-
-const EDGE_ORDER: Record<GraphEdge['type'], number> = {
-  private: 0,
-  co_group: 1,
-  co_active: 2,
-  mention: 3,
-  moments_cross: 4,
-  dm_inferred: 5,
-  mutual_reply: 6,
-  close_pair: 7,
-};
-
-interface Projected extends GraphNode {
-  proj: { x: number; y: number; depth: number };
-}
-
-// Project 3D → 2D with rotations on Y (yaw) and X (pitch) axes,
-// plus zoom (scales perspective f) and pan (offset).
-function project(
-  p: { x: number; y: number; z: number },
-  rotY: number, rotX: number,
-  zoom: number, panX: number, panY: number,
-  w: number, h: number,
-) {
-  // Rotate around Y axis (yaw)
-  const cosY = Math.cos(rotY), sinY = Math.sin(rotY);
-  const x = p.x * cosY - p.z * sinY;
-  let z = p.x * sinY + p.z * cosY;
-  let y = p.y;
-  // Rotate around X axis (pitch)
-  const cosX = Math.cos(rotX), sinX = Math.sin(rotX);
-  const y2 = y * cosX - z * sinX;
-  const z2 = y * sinX + z * cosX;
-  y = y2; z = z2;
-  // Perspective; zoom modifies effective focal length
-  const f = 800 / Math.max(0.2, zoom);
-  const scale = f / (f + z);
-  return {
-    x: w / 2 + panX + x * scale * zoom,
-    y: h / 2 + panY + y * scale * zoom,
-    depth: scale,
-  };
-}
-
-interface Props {
-  data: GraphData;
-  dark?: boolean;
-  selected: string | null;
-  selectedEdge?: GraphEdge | null;
+export interface GraphViewProps {
+  layout: Layout;
+  state: SceneState;
+  autoRotate: boolean;
+  onAutoRotateChange: (on: boolean) => void;
+  describe: (id: string) => NodeInfo | null;
+  describeEdge: (a: string, b: string) => string | null;
   onSelect: (id: string | null) => void;
-  onSelectEdge?: (edge: GraphEdge | null) => void;
-  autoRotate?: boolean;
-  autoRotateResumeSignal?: number;
-  onAutoRotatePause?: () => void;
-  height?: number;
-  // ── [PATCH-1] spotlight props ────────────────────────────────────────────
-  spotlight?: Spotlight;
-  onChangeSpotlight?: (s: Spotlight) => void;
-  // ─────────────────────────────────────────────────────────────────────────
+  onSelectEdge: (a: string, b: string) => void;
+  onFocusNode: (id: string) => void;
+  onToggleSector: (s: number) => void;
+  /** Extra control at the start of the module head (the left-panel toggle). */
+  leading?: ReactNode;
+  /** A new top-N is loading; the old graph stays on screen meanwhile. */
+  busy?: ReactNode;
+  /** Two lines that explain the picture (hidden on short windows). */
+  notes?: [ReactNode, ReactNode];
 }
 
-/** Andrew's monotone-chain convex hull — returns hull vertices in CCW order. */
-function convexHull2D(pts: { x: number; y: number }[]): { x: number; y: number }[] {
-  if (pts.length < 3) return pts.slice();
-  const sorted = [...pts].sort((a, b) => a.x - b.x || a.y - b.y);
-  const cross = (o: {x:number;y:number}, a: {x:number;y:number}, b: {x:number;y:number}) =>
-    (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
-  const lower: typeof sorted = [];
-  for (const p of sorted) {
-    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
-    lower.push(p);
-  }
-  const upper: typeof sorted = [];
-  for (let i = sorted.length - 1; i >= 0; i--) {
-    const p = sorted[i];
-    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
-    upper.push(p);
-  }
-  upper.pop(); lower.pop();
-  return lower.concat(upper);
+type Mode = 'orbit' | 'top' | 'side';
+const MODES: Mode[] = ['orbit', 'top', 'side'];
+const PRESET: Record<Mode, number> = { orbit: DEF_VIEW.pitch, top: 86, side: 3 };
+const clamp = (v: number, a: number, b: number) => (v < a ? a : v > b ? b : v);
+const norm360 = (a: number) => ((a % 360) + 360) % 360;
+const fmtDeg = (a: number) => a.toFixed(1).padStart(5, '0') + '°';
+
+function isEditable(el: Element | null): boolean {
+  if (!(el instanceof HTMLElement)) return false;
+  if (el.isContentEditable) return true;
+  const tag = el.tagName;
+  if (tag === 'TEXTAREA' || tag === 'SELECT') return true;
+  if (tag === 'INPUT') return !['button', 'checkbox', 'radio', 'range', 'submit', 'reset', 'color'].includes((el as HTMLInputElement).type);
+  return false;
 }
 
-/** Build a smooth closed SVG path that wraps a set of 2D points. Convex hull
- *  → expand each vertex outward from centroid by `margin` → Catmull-Rom-to-
- *  Bezier closed loop. Used for the cluster spotlight envelope (one big
- *  transparent 3D-feeling shape that "刚好包裹" the cluster). */
-function smoothEnvelopePath(points: { x: number; y: number }[], margin: number): string {
-  const hull = convexHull2D(points);
-  if (hull.length < 3) return '';
-  const cx = hull.reduce((s, p) => s + p.x, 0) / hull.length;
-  const cy = hull.reduce((s, p) => s + p.y, 0) / hull.length;
-  const expanded = hull.map(p => {
-    const dx = p.x - cx, dy = p.y - cy;
-    const d = Math.hypot(dx, dy) || 1;
-    return { x: p.x + (dx / d) * margin, y: p.y + (dy / d) * margin };
-  });
-  const n = expanded.length;
-  const out: string[] = [`M${expanded[0].x.toFixed(1)},${expanded[0].y.toFixed(1)}`];
-  for (let i = 0; i < n; i++) {
-    const p0 = expanded[(i - 1 + n) % n];
-    const p1 = expanded[i];
-    const p2 = expanded[(i + 1) % n];
-    const p3 = expanded[(i + 2) % n];
-    const c1x = p1.x + (p2.x - p0.x) / 6;
-    const c1y = p1.y + (p2.y - p0.y) / 6;
-    const c2x = p2.x - (p3.x - p1.x) / 6;
-    const c2y = p2.y - (p3.y - p1.y) / 6;
-    out.push(`C${c1x.toFixed(1)},${c1y.toFixed(1)} ${c2x.toFixed(1)},${c2y.toFixed(1)} ${p2.x.toFixed(1)},${p2.y.toFixed(1)}`);
-  }
-  out.push('Z');
-  return out.join(' ');
+function readPalette(el: HTMLElement): Palette {
+  const cs = getComputedStyle(el);
+  const v = (n: string) => cs.getPropertyValue(n).trim();
+  return {
+    panel: v('--surface-card'), tx: v('--text-primary'), tx2: v('--text-secondary'), tx3: v('--text-faint'),
+    sig: v('--signal'), sigInk: v('--signal-ink'), onSig: v('--text-on-signal'),
+    line: v('--border-subtle'), line2: v('--border-default'),
+    aFill: v('--gx-a-fill'), aText: v('--gx-a-text'), aSub: v('--gx-a-sub'),
+    bStroke: v('--gx-b-stroke'), bText: v('--gx-b-text'), cStroke: v('--gx-c-stroke'), cText: v('--gx-c-text'),
+    eBase: v('--gx-e-base'), eFaint: v('--gx-e-faint'), eSel: v('--gx-e-sel'), eCore: v('--gx-e-core'), eHot: v('--gx-e-hot'),
+    coreFill: v('--gx-core-fill'), coreStroke: v('--gx-core-stroke'), hullFill: v('--gx-hull-fill'), hullStroke: v('--gx-hull-stroke'),
+    selStroke: v('--gx-sel-stroke'), selSub: v('--gx-sel-sub'), selHalo: v('--gx-sel-halo'),
+    ring: v('--gx-ring'), rim: v('--gx-rim'), c2: v('--gx-c2'), c3: v('--gx-c3'),
+    cloudD: v('--text-secondary'), cloudE: v('--text-faint'),
+    mono: v('--font-mono') || 'monospace', sans: v('--font-sans') || 'sans-serif',
+  };
 }
 
-function edgeKey(edge: Pick<GraphEdge, 'source' | 'target'> | null | undefined): string {
-  if (!edge) return '';
-  return [edge.source, edge.target].sort().join('__');
-}
+/** Dev builds only: frame timings for the perf check (window.__murmurGraphPerf). */
+interface PerfLog { render: number[]; gap: number[]; last: number; layoutMs: number; scene: Scene }
+declare global { interface Window { __murmurGraphPerf?: PerfLog } }
 
-export function GraphView({
-  data,
-  dark = false,
-  selected,
-  selectedEdge = null,
-  onSelect,
-  onSelectEdge,
-  autoRotate = true,
-  autoRotateResumeSignal = 0,
-  onAutoRotatePause,
-  height = 820,
-  spotlight = null,                // [PATCH-1]
-  onChangeSpotlight,               // [PATCH-1]
-}: Props) {
-  const privacy = usePrivacy();
-  void privacy;  // re-render when privacy toggle flips (used in label render below)
-  const W = 1240, H = height;
-  // View state
-  const [rotY, setRotY] = useState(0);
-  const [rotX, setRotX] = useState(-0.15);    // slight tilt down so 3D depth is visible by default
-  const [zoom, setZoom] = useState(1);
-  const [pan, setPan] = useState({ x: 0, y: 0 });
-  const [userInteracted, setUserInteracted] = useState(false);
-  const [dragging, setDragging] = useState(false);
-  const dragRef = useRef<{ x: number; y: number; rotX: number; rotY: number; panX: number; panY: number; mode: 'rotate' | 'pan' } | null>(null);
-  const lastHoverHitTestAtRef = useRef(0);
+export function GraphView(props: GraphViewProps) {
+  const { layout, state, autoRotate, leading, busy, notes } = props;
+  const hostRef = useRef<HTMLElement>(null);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const secCardRef = useRef<HTMLDivElement>(null);
+  const yawRef = useRef<HTMLSpanElement>(null);
+  const pitchRef = useRef<HTMLSpanElement>(null);
+  const zoomRef = useRef<HTMLSpanElement>(null);
+  const chipRefs = useRef<Partial<Record<Mode, HTMLButtonElement | null>>>({});
+  const obsRefs = useRef<(HTMLElement | null)[]>([]);
+  const sceneRef = useRef<Scene | null>(null);
+  if (!sceneRef.current) sceneRef.current = new Scene();
+  const propsRef = useRef(props);
+  propsRef.current = props;
+  const scheduleRef = useRef<() => void>(() => {});
+  const obstaclesRef = useRef<() => void>(() => {});
+  const tweenRef = useRef<{ from: View; to: View; t0: number; ms: number } | null>(null);
+  const dragRef = useRef<{ x: number; y: number; v: View; pan: boolean; moved: boolean; id: number } | null>(null);
+  const [hover, setHover] = useState<HoverTarget | null>(null);
+  const [tipPos, setTipPos] = useState<{ x: number; y: number } | null>(null);
+  const [box, setBox] = useState({ w: 0, h: 0 });
 
-  const [hover, setHover] = useState<string | null>(null);
-  const [hoverEdge, setHoverEdge] = useState<{ source: string; target: string } | null>(null);
-  // [PATCH-4] picker 弹层（桥梁已永久砍掉，只剩 'circle'）
-  const [pickerKind, setPickerKind] = useState<'circle' | null>(null);
+  const summary = useMemo(() => summarize(layout, state), [layout, state]);
 
-  const pauseAutoRotateForUser = useCallback(() => {
-    setUserInteracted(true);
-    onAutoRotatePause?.();
-  }, [onAutoRotatePause]);
-
+  // ——— the frame loop (one rAF at a time; everything reads refs) ———
   useEffect(() => {
-    setUserInteracted(false);
-    setDragging(false);
-    dragRef.current = null;
-  }, [autoRotateResumeSignal]);
-
-  // Auto-rotate (paused when user interacts OR a panel is open OR spotlight is on)
-  useEffect(() => {
-    if (!autoRotate || userInteracted || selected || selectedEdge || spotlight) return;
+    const scene = sceneRef.current!;
+    const canvas = canvasRef.current!;
+    const ctx = canvas.getContext('2d');
     let raf = 0;
-    let lastFrame = 0;
-    const loop = (t: number) => {
-      if (document.visibilityState === 'visible') {
-        if (!lastFrame) lastFrame = t;
-        const delta = t - lastFrame;
-        if (delta >= 16) {
-          setRotY(r => r + delta * 0.00008);
-          lastFrame = t;
-        }
-      } else {
-        lastFrame = t;
-      }
-      raf = requestAnimationFrame(loop);
-    };
-    raf = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(raf);
-  }, [autoRotate, userInteracted, selected, selectedEdge, spotlight]);
+    let lastT = 0;
+    let lastMode: Mode | null = null;
+    let lastQuiet = false;
+    const perf: PerfLog = { render: [], gap: [], last: 0, layoutMs: 0, scene };
+    if (import.meta.env.DEV) window.__murmurGraphPerf = perf;
 
-  // Keyboard nav: arrows = rotate, WASD = pan, +/- = zoom
+    const frame = (t: number) => {
+      raf = 0;
+      if (!ctx) return;
+      const dt = lastT ? Math.min(64, t - lastT) : 16;
+      lastT = t;
+      const v = scene.view;
+      const tw = tweenRef.current;
+      const spinning = propsRef.current.autoRotate && !dragRef.current;
+      if (tw) {
+        const k = clamp((t - tw.t0) / tw.ms, 0, 1), e = 1 - Math.pow(1 - k, 3);
+        const dy = (((tw.to.yaw - tw.from.yaw) % 360) + 540) % 360 - 180;
+        v.yaw = norm360(tw.from.yaw + dy * e);
+        v.pitch = tw.from.pitch + (tw.to.pitch - tw.from.pitch) * e;
+        v.zoom = tw.from.zoom + (tw.to.zoom - tw.from.zoom) * e;
+        v.panX = tw.from.panX + (tw.to.panX - tw.from.panX) * e;
+        v.panY = tw.from.panY + (tw.to.panY - tw.from.panY) * e;
+        if (k >= 1) tweenRef.current = null;
+      } else if (spinning) {
+        v.yaw = norm360(v.yaw + dt * 0.005);
+      }
+      const r0 = performance.now();
+      const stats = scene.render(ctx);
+      if (stats) {
+        perf.render.push(performance.now() - r0);
+        if (perf.last) perf.gap.push(t - perf.last);
+        perf.last = t;
+        if (perf.render.length > 900) { perf.render.splice(0, 300); perf.gap.splice(0, 300); }
+      }
+      if (yawRef.current) yawRef.current.textContent = fmtDeg(norm360(v.yaw));
+      if (pitchRef.current) pitchRef.current.textContent = fmtDeg(v.pitch);
+      if (zoomRef.current) zoomRef.current.textContent = v.zoom.toFixed(2) + '×';
+      const mode: Mode = v.pitch >= 80 ? 'top' : v.pitch <= 6 ? 'side' : 'orbit';
+      if (mode !== lastMode) {
+        lastMode = mode;
+        for (const m of MODES) {
+          const el = chipRefs.current[m];
+          if (el) { el.classList.toggle('is-on', m === mode); el.setAttribute('aria-pressed', String(m === mode)); }
+        }
+      }
+      // looking down from high up, the ground disc reaches the notes: fade them out instead of printing over it
+      const quiet = v.pitch > 50;
+      if (quiet !== lastQuiet) { lastQuiet = quiet; obsRefs.current[2]?.classList.toggle('is-quiet', quiet); }
+      if (tweenRef.current || (propsRef.current.autoRotate && !dragRef.current)) schedule();
+      else lastT = 0;
+    };
+    const schedule = () => { if (!raf) raf = requestAnimationFrame(frame); };
+    scheduleRef.current = schedule;
+
+    // size + the DOM readouts the labels must keep clear of
+    const wrap = wrapRef.current!;
+    const measure = () => {
+      const r = wrap.getBoundingClientRect();
+      const W = Math.max(1, Math.round(r.width)), H = Math.max(1, Math.round(r.height));
+      const dpr = Math.min(3, window.devicePixelRatio || 1);
+      canvas.width = Math.round(W * dpr);
+      canvas.height = Math.round(H * dpr);
+      canvas.style.width = W + 'px';
+      canvas.style.height = H + 'px';
+      scene.resize(W, H, dpr);
+      obstacles();
+      setBox(b => (b.w === W && b.h === H ? b : { w: W, h: H }));
+      schedule();
+    };
+    const obstacles = () => {
+      const r = wrap.getBoundingClientRect();
+      scene.obstacles = obsRefs.current.filter((el): el is HTMLElement => !!el).map(el => {
+        const b = el.getBoundingClientRect();
+        return { x0: b.left - r.left - 4, y0: b.top - r.top - 4, x1: b.right - r.left + 4, y1: b.bottom - r.top + 4 };
+      }).filter(o => o.x1 > o.x0 + 8 && o.y1 > o.y0 + 8);
+      scene.obstacles.push({ x0: r.width - 92, y0: r.height - 92, x1: r.width - 6, y1: r.height - 14 });   // axis gizmo
+      schedule();
+    };
+    obstaclesRef.current = obstacles;
+    const ro = new ResizeObserver(measure);
+    ro.observe(wrap);
+    measure();
+
+    // theme: the palette lives in CSS variables; re-read when <html> switches .et-dark
+    const host = hostRef.current!;
+    const repaint = () => { scene.pal = readPalette(host); schedule(); };
+    repaint();
+    const mo = new MutationObserver(repaint);
+    mo.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme', 'style'] });
+    // fonts: label widths are measured once per string — redo after the mono face arrives
+    const fonts = document.fonts;
+    const onFonts = () => { scene.resetMeasure(); schedule(); };
+    fonts?.ready.then(onFonts).catch(() => {});
+    fonts?.addEventListener?.('loadingdone', onFonts);
+
+    return () => {
+      if (raf) cancelAnimationFrame(raf);
+      ro.disconnect();
+      mo.disconnect();
+      fonts?.removeEventListener?.('loadingdone', onFonts);
+      scheduleRef.current = () => {};
+      obstaclesRef.current = () => {};
+      if (import.meta.env.DEV && window.__murmurGraphPerf === perf) delete window.__murmurGraphPerf;
+    };
+  }, []);
+
+  // data / state → scene
   useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      // Skip if user is typing in an input
-      const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
-      if (tag === 'input' || tag === 'textarea') return;
-      const rotStep = 0.06;
-      const panStep = 30;
-      const zoomStep = 0.1;
-      let handled = true;
-      let shouldPauseAutoRotate = true;
-      switch (e.key) {
-        case 'ArrowLeft':  setRotY(r => r - rotStep); break;
-        case 'ArrowRight': setRotY(r => r + rotStep); break;
-        case 'ArrowUp':    setRotX(r => Math.max(-Math.PI / 2 + 0.05, r - rotStep)); break;
-        case 'ArrowDown':  setRotX(r => Math.min(Math.PI / 2 - 0.05, r + rotStep)); break;
-        case 'w': case 'W': setPan(p => ({ ...p, y: p.y + panStep })); break;
-        case 's': case 'S': setPan(p => ({ ...p, y: p.y - panStep })); break;
-        case 'a': case 'A': setPan(p => ({ ...p, x: p.x + panStep })); break;
-        case 'd': case 'D': setPan(p => ({ ...p, x: p.x - panStep })); break;
-        case '+': case '=': setZoom(z => Math.min(4, z + zoomStep)); break;
-        case '-': case '_': setZoom(z => Math.max(0.25, z - zoomStep)); break;
-        case 'r': case 'R':
-          setRotX(-0.15); setRotY(0); setZoom(1); setPan({ x: 0, y: 0 });
-          setUserInteracted(false);
-          shouldPauseAutoRotate = false;
-          break;
-        case 'Escape':
-          // [PATCH-4] Esc 优先关 spotlight，再关选中
-          if (spotlight && onChangeSpotlight) onChangeSpotlight(null);
-          else { onSelect(null); if (onSelectEdge) onSelectEdge(null); }
-          shouldPauseAutoRotate = false;
-          break;
-        default: handled = false;
-      }
-      if (handled) {
-        e.preventDefault();
-        if (shouldPauseAutoRotate) pauseAutoRotateForUser();
-      }
+    sceneRef.current!.setLayout(layout);
+    if (import.meta.env.DEV && window.__murmurGraphPerf) window.__murmurGraphPerf.layoutMs = layout.ms;
+    scheduleRef.current();
+  }, [layout]);
+  useEffect(() => {
+    sceneRef.current!.st = state;
+    scheduleRef.current();
+  }, [state]);
+  useEffect(() => { if (autoRotate) scheduleRef.current(); }, [autoRotate]);
+  // the readouts change size (the LOADING line, the LINKED count): keep labels clear of them
+  const hasNotes = !!notes;
+  useEffect(() => { obstaclesRef.current(); }, [busy, hasNotes, state.selected]);
+
+  // ——— view helpers ———
+  const tweenTo = (to: Partial<View>, ms = 320) => {
+    const v = sceneRef.current!.view;
+    tweenRef.current = { from: { ...v }, to: { ...v, ...to }, t0: performance.now(), ms };
+    scheduleRef.current();
+  };
+  const setMode = (m: Mode) => tweenTo({ pitch: PRESET[m] });
+  const reset = () => tweenTo({ ...DEF_VIEW });
+  const resetRef = useRef(reset);
+  resetRef.current = reset;
+
+  // ——— pointer ———
+  const hoverKey = (h: HoverTarget | null) => (h ? (h.kind === 'node' ? 'n' + h.id : h.kind === 'edge' ? 'e' + h.key : 's' + h.s) : '');
+  const local = (e: { clientX: number; clientY: number }) => {
+    const r = wrapRef.current!.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  };
+  const applyHover = (h: HoverTarget | null, p: { x: number; y: number } | null) => {
+    const scene = sceneRef.current!;
+    if (hoverKey(h) !== hoverKey(scene.hover)) {
+      scene.hover = h;
+      setHover(h);
+      if (!h || h.kind !== 'sector') scene.sectorAnchor = null;
+      scheduleRef.current();
     }
+    setTipPos(h ? p : null);
+    if (canvasRef.current) canvasRef.current.style.cursor = h ? 'pointer' : '';
+  };
+
+  const onPointerDown = (e: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (e.button !== 0 && e.button !== 2) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    tweenRef.current = null;
+    const p = local(e);
+    dragRef.current = { x: p.x, y: p.y, v: { ...sceneRef.current!.view }, pan: e.button === 2 || e.shiftKey, moved: false, id: e.pointerId };
+  };
+  const onPointerMove = (e: ReactPointerEvent<HTMLCanvasElement>) => {
+    const p = local(e);
+    const d = dragRef.current;
+    if (d && d.id === e.pointerId) {
+      const dx = p.x - d.x, dy = p.y - d.y;
+      if (!d.moved && Math.hypot(dx, dy) < 4) return;
+      if (!d.moved) {
+        d.moved = true;
+        applyHover(null, null);
+        if (canvasRef.current) canvasRef.current.style.cursor = d.pan ? 'move' : 'grabbing';
+        if (propsRef.current.autoRotate) propsRef.current.onAutoRotateChange(false);
+      }
+      const v = sceneRef.current!.view;
+      if (d.pan) { v.panX = d.v.panX + dx; v.panY = d.v.panY + dy; }
+      else { v.yaw = norm360(d.v.yaw - dx * 0.35); v.pitch = clamp(d.v.pitch + dy * 0.3, PITCH_MIN, PITCH_MAX); }
+      scheduleRef.current();
+      return;
+    }
+    applyHover(sceneRef.current!.hitTest(p.x, p.y), p);
+  };
+  const onPointerUp = (e: ReactPointerEvent<HTMLCanvasElement>) => {
+    const d = dragRef.current;
+    if (!d || d.id !== e.pointerId) return;
+    dragRef.current = null;
+    if (canvasRef.current) canvasRef.current.style.cursor = '';
+    if (d.moved) { scheduleRef.current(); return; }
+    if (e.button !== 0) return;
+    const p = local(e);
+    const h = sceneRef.current!.hitTest(p.x, p.y);
+    const P = propsRef.current;
+    if (!h) P.onSelect(null);
+    else if (h.kind === 'node') P.onSelect(h.id);
+    else if (h.kind === 'edge') P.onSelectEdge(h.a, h.b);
+    else P.onToggleSector(h.s);
+  };
+  const onDoubleClick = (e: ReactMouseEvent<HTMLCanvasElement>) => {
+    const p = local(e);
+    const h = sceneRef.current!.hitTest(p.x, p.y);
+    if (h?.kind === 'node') propsRef.current.onFocusNode(h.id);
+  };
+
+  // wheel needs a non-passive listener to keep the page from scrolling
+  useEffect(() => {
+    const c = canvasRef.current!;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      tweenRef.current = null;
+      const v = sceneRef.current!.view;
+      const dy = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+      v.zoom = clamp(v.zoom * Math.exp(-dy * 0.0012), ZOOM_MIN, ZOOM_MAX);
+      scheduleRef.current();
+    };
+    c.addEventListener('wheel', onWheel, { passive: false });
+    return () => c.removeEventListener('wheel', onWheel);
+  }, []);
+
+  // keyboard: R anywhere on the page; arrows / + − / WASD while nothing else has focus
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || e.isComposing || e.metaKey || e.ctrlKey || e.altKey) return;
+      const ae = document.activeElement;
+      if (isEditable(ae)) return;
+      if (document.querySelector('[aria-modal="true"]')) return;
+      const v = sceneRef.current!.view;
+      const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+      if (k === 'r') { e.preventDefault(); resetRef.current(); return; }
+      const ours = !ae || ae === document.body || !!hostRef.current?.contains(ae);
+      if (!ours) return;
+      let used = true;
+      if (k === 'ArrowLeft') v.yaw = norm360(v.yaw + 6);
+      else if (k === 'ArrowRight') v.yaw = norm360(v.yaw - 6);
+      else if (k === 'ArrowUp') v.pitch = clamp(v.pitch + 4, PITCH_MIN, PITCH_MAX);
+      else if (k === 'ArrowDown') v.pitch = clamp(v.pitch - 4, PITCH_MIN, PITCH_MAX);
+      else if (k === '+' || k === '=') v.zoom = clamp(v.zoom * 1.15, ZOOM_MIN, ZOOM_MAX);
+      else if (k === '-' || k === '_') v.zoom = clamp(v.zoom / 1.15, ZOOM_MIN, ZOOM_MAX);
+      else if (k === 'w') v.panY += 30;
+      else if (k === 's') v.panY -= 30;
+      else if (k === 'a') v.panX += 30;
+      else if (k === 'd') v.panX -= 30;
+      else used = false;
+      if (!used) return;
+      e.preventDefault();
+      tweenRef.current = null;
+      if (propsRef.current.autoRotate && k.startsWith('Arrow')) propsRef.current.onAutoRotateChange(false);
+      scheduleRef.current();
+    };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onSelect, onSelectEdge, pauseAutoRotateForUser, spotlight, onChangeSpotlight]);
-
-  function svgPoint(e: ReactPointerEvent<SVGSVGElement>) {
-    const svg = e.currentTarget as SVGSVGElement;
-    const matrix = svg.getScreenCTM();
-    if (matrix) {
-      const point = svg.createSVGPoint();
-      point.x = e.clientX;
-      point.y = e.clientY;
-      const local = point.matrixTransform(matrix.inverse());
-      return { x: local.x, y: local.y };
-    }
-    const rect = svg.getBoundingClientRect();
-    return {
-      x: (e.clientX - rect.left) * (W / rect.width),
-      y: (e.clientY - rect.top) * (H / rect.height),
-    };
-  }
-
-  function nodeHitRadius(n: Projected) {
-    const visual = n.size * n.proj.depth;
-    if (selected) {
-      if (n.id === selected) return Math.max(22, visual + 8);
-      if (n.is_self) return Math.max(24, visual + 10);
-      if (neighbors.has(n.id)) return Math.max(17, visual + 6);
-      return Math.max(12, visual + 4);
-    }
-    return Math.max(n.is_self ? 34 : 40, visual + (n.is_self ? 22 : 30));
-  }
-
-  function nodeCoreRadius(n: Projected) {
-    const visual = n.size * n.proj.depth;
-    if (selected) {
-      if (n.id === selected) return Math.max(16, visual + 3);
-      if (n.is_self) return Math.max(18, visual + 4);
-      return Math.max(11, visual + 2);
-    }
-    return Math.max(n.is_self ? 24 : 18, visual + (n.is_self ? 10 : 8));
-  }
-
-  function nodeLabelHitScore(n: Projected, sx: number, sy: number): number | null {
-    if (selected && n.id !== selected) return null;
-    const r = n.size * n.proj.depth;
-    const isNeighbor = neighbors.has(n.id);
-    const dim = !!selected && !n.is_self && selected !== n.id && !isNeighbor;
-    if (dim || (!n.is_self && n.tier === 'E')) return null;
-    const labelY = n.proj.y + r + (n.is_self ? 18 : 14);
-    const label = n.is_self ? '你' : displayName(n.id, n.name);
-    const halfWidth = Math.min(150, Math.max(36, label.length * 8 + 22));
-    const dx = Math.abs(sx - n.proj.x);
-    const dy = Math.abs(sy - labelY);
-    if (dx > halfWidth || dy > 20) return null;
-    return 0.18 + (dx / halfWidth) * 0.35 + (dy / 20) * 0.25;
-  }
-
-  function findNodeHit(sx: number, sy: number, includeLabels = false): Projected | null {
-    let best: Projected | null = null;
-    let bestScore = Infinity;
-    let bestDepth = -Infinity;
-    for (const n of projNodes) {
-      const r = nodeHitRadius(n);
-      const d = Math.hypot(n.proj.x - sx, n.proj.y - sy);
-      let score = d <= r ? d / r : Infinity;
-      if (includeLabels) {
-        const labelScore = nodeLabelHitScore(n, sx, sy);
-        if (labelScore !== null) score = Math.min(score, labelScore);
-      }
-      if (score === Infinity) continue;
-      if (score < bestScore || (Math.abs(score - bestScore) < 0.08 && n.proj.depth > bestDepth)) {
-        best = n;
-        bestScore = score;
-        bestDepth = n.proj.depth;
-      }
-    }
-    return best;
-  }
-
-  function findNodeCoreHit(sx: number, sy: number): Projected | null {
-    let best: Projected | null = null;
-    let bestD = Infinity;
-    let bestDepth = -Infinity;
-    for (const n of projNodes) {
-      const d = Math.hypot(n.proj.x - sx, n.proj.y - sy);
-      if (d > nodeCoreRadius(n)) continue;
-      if (d < bestD || (Math.abs(d - bestD) < 2 && n.proj.depth > bestDepth)) {
-        best = n;
-        bestD = d;
-        bestDepth = n.proj.depth;
-      }
-    }
-    return best;
-  }
-
-  function isNearAnyNode(sx: number, sy: number, extra = 8, coreOnly = false) {
-    for (const n of projNodes) {
-      const r = coreOnly ? nodeCoreRadius(n) : nodeHitRadius(n);
-      if (Math.hypot(n.proj.x - sx, n.proj.y - sy) <= r + extra) return true;
-    }
-    return false;
-  }
-
-  function edgeDistance(edge: GraphEdge, sx: number, sy: number, tolerance: number) {
-    const a = projById[edge.source];
-    const b = projById[edge.target];
-    if (!a || !b) return Infinity;
-    const isSelfEdge = edge.source === 'self' || edge.target === 'self';
-    const dx = b.proj.x - a.proj.x;
-    const dy = b.proj.y - a.proj.y;
-    const len = Math.hypot(dx, dy) || 1;
-    const bow = isSelfEdge ? 0 : Math.min(28, len * 0.12);
-    const pad = tolerance + bow + 6;
-    if (sx < Math.min(a.proj.x, b.proj.x) - pad || sx > Math.max(a.proj.x, b.proj.x) + pad ||
-        sy < Math.min(a.proj.y, b.proj.y) - pad || sy > Math.max(a.proj.y, b.proj.y) + pad) {
-      return Infinity;
-    }
-    if (isSelfEdge) {
-      const t = Math.max(0, Math.min(1, ((sx - a.proj.x) * dx + (sy - a.proj.y) * dy) / (len * len)));
-      const px = a.proj.x + dx * t;
-      const py = a.proj.y + dy * t;
-      return Math.hypot(px - sx, py - sy);
-    }
-
-    const mx = (a.proj.x + b.proj.x) / 2;
-    const my = (a.proj.y + b.proj.y) / 2;
-    let nx = -dy / len, ny = dx / len;
-    if (nx * (mx - W / 2) + ny * (my - H / 2) < 0) { nx = -nx; ny = -ny; }
-    const cx = mx + nx * bow, cy = my + ny * bow;
-    const nSamples = Math.max(8, Math.min(48, Math.round(len / 5)));
-    let minD = Infinity;
-    for (let i = 0; i <= nSamples; i++) {
-      const t = i / nSamples;
-      const it = 1 - t;
-      const px = it * it * a.proj.x + 2 * it * t * cx + t * t * b.proj.x;
-      const py = it * it * a.proj.y + 2 * it * t * cy + t * t * b.proj.y;
-      const d = Math.hypot(px - sx, py - sy);
-      if (d < minD) minD = d;
-    }
-    return minD;
-  }
-
-  function findEdgeHitResult(sx: number, sy: number, tolerance: number): { edge: GraphEdge; distance: number } | null {
-    let bestEdge: GraphEdge | null = null;
-    let bestEdgeScore = Infinity;
-    for (const eg of data.edges) {
-      if (selected && eg.source !== selected && eg.target !== selected) continue;
-      const minD = edgeDistance(eg, sx, sy, tolerance);
-      if (minD <= tolerance && minD < bestEdgeScore) {
-        bestEdgeScore = minD;
-        bestEdge = eg;
-      }
-    }
-    return bestEdge ? { edge: bestEdge, distance: bestEdgeScore } : null;
-  }
-
-  function findEdgeHit(sx: number, sy: number, tolerance: number): GraphEdge | null {
-    return findEdgeHitResult(sx, sy, tolerance)?.edge || null;
-  }
-
-  function selectedModeHit(sx: number, sy: number): { node: Projected | null; edge: GraphEdge | null } {
-    const coreNode = findNodeCoreHit(sx, sy);
-    const edgeHit = selected ? findEdgeHitResult(sx, sy, 13) : null;
-    if (edgeHit) {
-      if (!coreNode || edgeHit.distance <= 6) {
-        return { node: null, edge: edgeHit.edge };
-      }
-    }
-    return { node: coreNode || findNodeHit(sx, sy, true), edge: edgeHit?.edge || null };
-  }
-
-  function handlePointerDown(e: ReactPointerEvent<SVGSVGElement>) {
-    pauseAutoRotateForUser();
-    setDragging(true);
-    (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
-    const isPan = e.button === 2 || e.shiftKey || e.altKey;
-    dragRef.current = { x: e.clientX, y: e.clientY, rotX, rotY, panX: pan.x, panY: pan.y, mode: isPan ? 'pan' : 'rotate' };
-  }
-  function handlePointerMove(e: ReactPointerEvent<SVGSVGElement>) {
-    if (dragging && dragRef.current) {
-      const dx = e.clientX - dragRef.current.x;
-      const dy = e.clientY - dragRef.current.y;
-      if (dragRef.current.mode === 'rotate') {
-        setRotY(dragRef.current.rotY + dx * 0.005);
-        const newRotX = dragRef.current.rotX + dy * 0.005;
-        setRotX(Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05, newRotX)));
-      } else {
-        setPan({ x: dragRef.current.panX + dx, y: dragRef.current.panY + dy });
-      }
-      return;
-    }
-    const now = performance.now();
-    if (now - lastHoverHitTestAtRef.current < 32) return;
-    lastHoverHitTestAtRef.current = now;
-
-    const { x: sx, y: sy } = svgPoint(e);
-
-    const selectedHit = selected ? selectedModeHit(sx, sy) : null;
-    if (selectedHit?.edge && !selectedHit.node) {
-      if (hover) setHover(null);
-      const sameEdge = hoverEdge
-        && selectedHit.edge.source === hoverEdge.source && selectedHit.edge.target === hoverEdge.target;
-      if (!sameEdge) setHoverEdge({ source: selectedHit.edge.source, target: selectedHit.edge.target });
-      return;
-    }
-
-    const bestNode = selectedHit?.node || findNodeHit(sx, sy, true);
-    const bestNodeId = bestNode?.id || null;
-    if (bestNodeId !== hover) setHover(bestNodeId);
-
-    if (bestNodeId) {
-      if (hoverEdge) setHoverEdge(null);
-      return;
-    }
-    const bestEdge = selected && !isNearAnyNode(sx, sy, 2, true) ? findEdgeHit(sx, sy, 11) : null;
-    const sameEdge = bestEdge && hoverEdge
-      && bestEdge.source === hoverEdge.source && bestEdge.target === hoverEdge.target;
-    if (!sameEdge) {
-      setHoverEdge(bestEdge ? { source: bestEdge.source, target: bestEdge.target } : null);
-    }
-  }
-
-  function handlePointerLeave() {
-    lastHoverHitTestAtRef.current = 0;
-    setHover(null);
-    setHoverEdge(null);
-  }
-  function handlePointerUp(e: ReactPointerEvent<SVGSVGElement>) {
-    setDragging(false);
-    if (dragRef.current) {
-      const dx = e.clientX - dragRef.current.x;
-      const dy = e.clientY - dragRef.current.y;
-      const wasClick = (dx * dx + dy * dy) < 256;
-      if (wasClick) {
-        const { x: sx, y: sy } = svgPoint(e);
-        const hit = selected ? selectedModeHit(sx, sy) : { node: findNodeHit(sx, sy, true), edge: null };
-        if (hit.edge && onSelectEdge && !hit.node) {
-          onSelectEdge(hit.edge);
-        } else if (hit.node) {
-          onSelect(hit.node.id);
-        } else if (onSelectEdge) {
-          const bestEdge = selected && !isNearAnyNode(sx, sy, 2, true) ? findEdgeHit(sx, sy, 11) : null;
-          if (bestEdge) onSelectEdge(bestEdge);
-        }
-      }
-      dragRef.current = null;
-    }
-    (e.currentTarget as Element).releasePointerCapture?.(e.pointerId);
-  }
-  function handleWheel(e: ReactWheelEvent<SVGSVGElement>) {
-    e.stopPropagation();
-    pauseAutoRotateForUser();
-    const lineToPx = e.deltaMode === 1 ? 16 : 1;
-    const px = e.deltaY * lineToPx;
-    const factor = Math.exp(-px * 0.002);
-    setZoom(z => Math.max(0.25, Math.min(4, z * factor)));
-  }
-  function resetView() {
-    setRotX(-0.15); setRotY(0); setZoom(1); setPan({ x: 0, y: 0 });
-    setUserInteracted(false);
-  }
-
-  const projNodes: Projected[] = useMemo(
-    () => data.nodes.map(n => ({ ...n, proj: project(n, rotY, rotX, zoom, pan.x, pan.y, W, H) })),
-    [data.nodes, rotY, rotX, zoom, pan.x, pan.y, H]
-  );
-  const projById = useMemo(() => Object.fromEntries(projNodes.map(n => [n.id, n])), [projNodes]);
-  const sortedNodes = useMemo(() => [...projNodes].sort((a, b) => a.proj.depth - b.proj.depth), [projNodes]);
-  const selectedEdgeKey = edgeKey(selectedEdge);
-  const selectedEdgeEndpoints = useMemo(() => {
-    if (!selectedEdge) return new Set<string>();
-    return new Set([selectedEdge.source, selectedEdge.target]);
-  }, [selectedEdge]);
-
-  const neighbors = useMemo(() => {
-    const s = new Set<string>();
-    if (selected) {
-      data.edges.forEach(e => {
-        if (e.source === selected) s.add(e.target);
-        if (e.target === selected) s.add(e.source);
-      });
-    }
-    return s;
-  }, [selected, data.edges]);
-
-  const sortedEdges = useMemo(
-    () => [...data.edges].sort((a, b) => {
-      const aSelected = selectedEdgeKey && edgeKey(a) === selectedEdgeKey;
-      const bSelected = selectedEdgeKey && edgeKey(b) === selectedEdgeKey;
-      if (aSelected !== bSelected) return aSelected ? 1 : -1;
-      return (EDGE_ORDER[a.type] ?? 0) - (EDGE_ORDER[b.type] ?? 0);
-    }),
-    [data.edges, selectedEdgeKey]
-  );
-
-  // ── [PATCH-3] Spotlight 派生数据 ─────────────────────────────────────────
-  // 这些值仅用于额外渲染层，不修改 projNodes / sortedEdges。
-  const spotMembers = useMemo<Set<string>>(() => {
-    if (!spotlight) return new Set();
-    if (spotlight.kind === 'circle') {
-      const c = data.clusters.find(x => x.id === spotlight.clusterId);
-      return new Set(c?.members || []);
-    }
-    return new Set();
-  }, [spotlight, data.clusters]);
-
-  // dim 比例：spotlight 时非聚焦节点/边降到很低
-  const isNodeInSpot = useCallback((id: string): boolean => {
-    if (!spotlight) return true;
-    if (spotlight.kind === 'circle') return spotMembers.has(id);
-    return false;
-  }, [spotlight, spotMembers]);
-  // ─────────────────────────────────────────────────────────────────────────
-
-  return (
-    <div style={{
-      position: 'relative', width: '100%', height: '100%',
-      background: 'var(--graph-backdrop)',
-      overflow: 'hidden',
-    }}>
-      {dark && <Starfield />}
-
-      <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`}
-           style={{
-             position: 'absolute', inset: 0, width: '100%', height: '100%',
-             cursor: dragging ? (dragRef.current?.mode === 'pan' ? 'grabbing' : 'move') : 'grab',
-             touchAction: 'none', userSelect: 'none',
-           }}
-           onPointerDown={handlePointerDown}
-           onPointerMove={handlePointerMove}
-           onPointerUp={handlePointerUp}
-           onPointerCancel={handlePointerUp}
-           onPointerLeave={handlePointerLeave}
-           onWheel={handleWheel}
-           onContextMenu={(e) => e.preventDefault()}>
-        <defs>
-          <radialGradient id="self-glow" cx="0.5" cy="0.5" r="0.5">
-            <stop offset="0%" style={{ stopColor: 'var(--graph-self)' }} stopOpacity="1" />
-            <stop offset="60%" style={{ stopColor: 'var(--accent)' }} stopOpacity="0.6" />
-            <stop offset="100%" style={{ stopColor: 'var(--accent)' }} stopOpacity="0" />
-          </radialGradient>
-          <radialGradient id="sel-glow" cx="0.5" cy="0.5" r="0.5">
-            <stop offset="0%" style={{ stopColor: 'var(--accent)' }} stopOpacity="0.5" />
-            <stop offset="100%" style={{ stopColor: 'var(--accent)' }} stopOpacity="0" />
-          </radialGradient>
-          <filter id="edge-selected-glow" x="-30%" y="-30%" width="160%" height="160%">
-            <feGaussianBlur stdDeviation="3" result="blur" />
-            <feMerge>
-              <feMergeNode in="blur" />
-              <feMergeNode in="SourceGraphic" />
-            </feMerge>
-          </filter>
-          {/* ── [PATCH-2] Metaball gooey filter ──────────────────────────
-              Bigger blur (24) than design default (14) so spherical-cap
-              wedge members spread along a 150-700 px radial spoke can
-              still merge into a single ribbon-shaped blob. Threshold
-              alpha matrix kept aggressive (22, -10) for crisp edges.
-              Drop-shadow + inner-highlight stacked outside this filter
-              add the 3D feel (see render block). */}
-          <filter id="metaball" x="-30%" y="-30%" width="160%" height="160%">
-            <feGaussianBlur in="SourceGraphic" stdDeviation="24" result="blur" />
-            <feColorMatrix in="blur"
-              values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 22 -10"
-              result="goo" />
-            <feBlend in="SourceGraphic" in2="goo" />
-          </filter>
-          {/* Sharp inner-highlight layer — small white circles offset toward
-              upper-left of each member to fake light source / 3D bump. */}
-          <filter id="metaball-sharp" x="-20%" y="-20%" width="140%" height="140%">
-            <feGaussianBlur in="SourceGraphic" stdDeviation="9" result="blur" />
-            <feColorMatrix in="blur"
-              values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 26 -12"
-              result="goo" />
-          </filter>
-          {/* Soft outer shadow — gives the blob a 3D "lift off the
-              background" feel. Layered behind the metaball. */}
-          <filter id="metaball-shadow" x="-50%" y="-50%" width="200%" height="200%">
-            <feGaussianBlur in="SourceGraphic" stdDeviation="18" result="blur" />
-            <feColorMatrix in="blur"
-              values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.6 0"
-              result="shadow" />
-          </filter>
-          {/* Envelope soft-edge — light gaussian blur on the hull path so
-              the boundary reads as 3D shell, not a flat polygon. */}
-          <filter id="envelope-soft" x="-20%" y="-20%" width="140%" height="140%">
-            <feGaussianBlur stdDeviation="2" result="b1" />
-            <feMerge>
-              <feMergeNode in="b1" />
-              <feMergeNode in="SourceGraphic" />
-            </feMerge>
-          </filter>
-          {/* Envelope outer glow — wider blur for the outermost layer of the
-              cluster envelope, gives the wrap a "lit-up" 3D feel. */}
-          <filter id="envelope-glow" x="-40%" y="-40%" width="180%" height="180%">
-            <feGaussianBlur stdDeviation="10" result="b1" />
-            <feMerge>
-              <feMergeNode in="b1" />
-              <feMergeNode in="SourceGraphic" />
-            </feMerge>
-          </filter>
-          <filter id="hot-edge" x="-30%" y="-30%" width="160%" height="160%">
-            <feGaussianBlur stdDeviation="4" result="b1" />
-            <feMerge>
-              <feMergeNode in="b1" />
-              <feMergeNode in="SourceGraphic" />
-            </feMerge>
-          </filter>
-          {/* ───────────────────────────────────────────────────────────── */}
-        </defs>
-
-        {/* Legacy cluster halos — only renders when backend ships explicit
-            centroid coords (cx/cy/cz). Current backend (_compute_friend_topology)
-            does not. Default canvas stays clean; spotlight visualization is
-            delegated to a design pass. */}
-        {data.clusters.filter(c => typeof c.cx === 'number').map(c => {
-          const center = project({ x: c.cx!, y: c.cy!, z: c.cz! }, rotY, rotX, zoom, pan.x, pan.y, W, H);
-          const r = 80 + (c.n || 0) * 1.8;
-          return (
-            <g key={c.id}>
-              <circle cx={center.x} cy={center.y} r={r * center.depth}
-                fill={c.color} opacity={dark ? 0.08 : 0.06} />
-              <circle cx={center.x} cy={center.y} r={r * center.depth}
-                fill="none" stroke={c.color} strokeOpacity={dark ? 0.32 : 0.25} strokeWidth="0.5" strokeDasharray="3 4" />
-            </g>
-          );
-        })}
-
-        {/* ── [PATCH-3] Spotlight: 核心圈 hull envelope ───────────────────
-            一个大的半透明 3D 包络，把整个 cluster 的成员 "刚好" 罩在里
-            面。算法：取所有成员投影后 (x, y) 的凸包 → 整体往外膨胀 ~50 px
-            → Catmull-Rom 转 cubic Bezier 平滑 → 三层叠加做立体感 (外发
-            光 + 主体 + 内描边)。膨胀后的 hull 形状跟成员真实分布 "贴合"，
-            不是硬圆，符合用户「立体的大的东西刚好包裹起来」诉求。 */}
-        {spotlight?.kind === 'circle' && (() => {
-          const color = clusterColor(spotlight.clusterId, data.clusters);
-          const members = projNodes.filter(n => spotMembers.has(n.id));
-          if (members.length < 3) return null;
-          const points = members.map(n => ({ x: n.proj.x, y: n.proj.y }));
-          // Inflate per-vertex by depth-aware margin so the envelope hugs
-          // member spheres, not their centers
-          const margin = 55;
-          const innerPath = smoothEnvelopePath(points, margin);
-          const outerPath = smoothEnvelopePath(points, margin + 22);
-          const innerLinePath = smoothEnvelopePath(points, margin - 6);
-          if (!innerPath || !outerPath) return null;
-          return (
-            <g style={{ pointerEvents: 'none' }}>
-              {/* 外发光：大半径软描边 + 极低透明度，烘 3D 立体感 */}
-              <path d={outerPath}
-                style={{ fill: color, stroke: color }} fillOpacity={0.05}
-                strokeOpacity={0.25} strokeWidth={1}
-                filter="url(#envelope-glow)" />
-              {/* 主体：半透明填充 + 中等描边 */}
-              <path d={innerPath}
-                style={{ fill: color, stroke: color }} fillOpacity={dark ? 0.13 : 0.10}
-                strokeOpacity={0.7} strokeWidth={2}
-                filter="url(#envelope-soft)" />
-              {/* 内描边：细线，靠近成员一点点，加深「贴合」感 */}
-              <path d={innerLinePath}
-                fill="none"
-                style={{ stroke: color }} strokeOpacity={0.5} strokeWidth={1}
-                strokeDasharray="3 5" />
-            </g>
-          );
-        })()}
-
-        {/* Bridge spotlight render permanently removed (feature deprecated). */}
-
-        {/* Edges */}
-        <g opacity={spotlight ? 0.18 : 1} style={{ filter: spotlight ? 'saturate(0.4)' : undefined }}>
-          {/* [PATCH-3] 包裹一层 g，spotlight 时整体 dim+desaturate；不修改原 edge 渲染 */}
-        {sortedEdges.map((e, i) => {
-          const a = projById[e.source], b = projById[e.target];
-          if (!a || !b) return null;
-          const isSelfEdge = e.source === 'self' || e.target === 'self';
-          const isHighlight = !!selected && (e.source === selected || e.target === selected);
-          const isSelectedEdge = !!selectedEdgeKey && edgeKey(e) === selectedEdgeKey;
-          const isHoverEdge = !!hoverEdge && hoverEdge.source === e.source && hoverEdge.target === e.target;
-          const styleByType: Record<string, { stroke: string; width: number; opMul: number; dash: string | null }> = {
-            private:      { stroke: EDGE_STROKE.private,       width: 1.2, opMul: 0.5,  dash: e.dashed ? '2 4' : null },
-            co_group:     { stroke: EDGE_STROKE.co_group,      width: 0.8, opMul: 0.32, dash: '1 3' },
-            co_active:    { stroke: EDGE_STROKE.co_active,     width: 1.4, opMul: 0.6,  dash: null },
-            mention:      { stroke: EDGE_STROKE.mention,       width: 1.0, opMul: 0.5,  dash: null },
-            dm_inferred:  { stroke: EDGE_STROKE.dm_inferred,   width: 1.1, opMul: 0.55, dash: '5 4' },
-            mutual_reply: { stroke: EDGE_STROKE.mutual_reply,  width: 1.6, opMul: 0.7,  dash: null },
-            close_pair:   { stroke: EDGE_STROKE.close_pair,    width: 2.4, opMul: 0.95, dash: null },
-            moments_cross:{ stroke: EDGE_STROKE.moments_cross, width: 1.2, opMul: 0.55, dash: '6 3' },
-          };
-          const s = styleByType[e.type] || styleByType.co_group;
-          const baseOp = e.weight * s.opMul + 0.05;
-          let op = isSelectedEdge ? 1 : (isHoverEdge ? 1 : (isHighlight ? Math.min(1, baseOp * 2.5) : baseOp));
-          if (selected && !isHighlight && !isHoverEdge) op = baseOp * 0.18;
-          const widthMul = isSelectedEdge ? 3.4 : (isHoverEdge ? 2.4 : (isHighlight ? 1.8 : 1));
-          const edgeStroke = (isSelectedEdge || isHoverEdge) ? 'var(--graph-highlight)' : s.stroke;
-          const edgeFilter = isSelectedEdge ? 'url(#edge-selected-glow)' : undefined;
-          const edgeDash = isSelectedEdge ? undefined : (s.dash || undefined);
-          if (isSelfEdge) {
-            const strokeWidth = (s.width * Math.max(0.4, e.weight)) * widthMul;
-            return (
-              <line key={i}
-                x1={a.proj.x} y1={a.proj.y} x2={b.proj.x} y2={b.proj.y}
-                style={{ stroke: edgeStroke }}
-                strokeOpacity={op}
-                strokeWidth={isSelectedEdge ? Math.max(strokeWidth, 5.5) : strokeWidth}
-                strokeLinecap="round"
-                strokeDasharray={edgeDash}
-                filter={edgeFilter} />
-            );
-          }
-          const mx = (a.proj.x + b.proj.x) / 2;
-          const my = (a.proj.y + b.proj.y) / 2;
-          const dx = b.proj.x - a.proj.x;
-          const dy = b.proj.y - a.proj.y;
-          const len = Math.hypot(dx, dy) || 1;
-          const bow = Math.min(28, len * 0.12);
-          let nx = -dy / len, ny = dx / len;
-          const cxFromMid = mx - W / 2, cyFromMid = my - H / 2;
-          if (nx * cxFromMid + ny * cyFromMid < 0) { nx = -nx; ny = -ny; }
-          const cx = mx + nx * bow, cy = my + ny * bow;
-          const strokeWidth = (s.width * Math.max(0.5, e.weight)) * widthMul;
-          return (
-            <path key={i}
-              d={`M${a.proj.x},${a.proj.y} Q${cx},${cy} ${b.proj.x},${b.proj.y}`}
-              style={{ stroke: edgeStroke }}
-              strokeOpacity={op}
-              strokeWidth={isSelectedEdge ? Math.max(strokeWidth, 5.5) : strokeWidth}
-              strokeDasharray={edgeDash}
-              fill="none" strokeLinecap="round"
-              filter={edgeFilter} />
-          );
-        })}
-        </g>
-
-        {/* Self ping ripples */}
-        {!selected && !selectedEdge && !spotlight && (
-          <g>
-            {[0, 1].map(i => (
-              <circle key={i}
-                cx={W / 2} cy={H / 2} r="20"
-                fill="none" style={{ stroke: 'var(--accent)' }}
-                strokeOpacity="0.35"
-                strokeWidth="1">
-                <animate
-                  attributeName="r"
-                  values="20;240"
-                  dur="4.8s"
-                  begin={`${i * 2.4}s`}
-                  repeatCount="indefinite" />
-                <animate
-                  attributeName="stroke-opacity"
-                  values="0.35;0"
-                  dur="4.8s"
-                  begin={`${i * 2.4}s`}
-                  repeatCount="indefinite" />
-              </circle>
-            ))}
-          </g>
-        )}
-
-        {/* Nodes */}
-        {sortedNodes.map(n => {
-          const r = n.size * n.proj.depth;
-          const isSel = selected === n.id;
-          const isHov = hover === n.id;
-          const isNeighbor = neighbors.has(n.id);
-          const isEdgeEndpoint = selectedEdgeEndpoints.has(n.id);
-          const dim = !!selected && !isSel && !isNeighbor && !isEdgeEndpoint && !n.is_self;
-          // [PATCH-3] spotlight 时非聚焦节点降到 0.18 + 去饱和
-          const inSpot = isNodeInSpot(n.id);
-          const spotDim = !!spotlight && !inSpot && !n.is_self;
-          const op = spotDim ? 0.18 : (dim ? 0.32 : 1);
-          const color = n.color || TIER_COLORS[n.tier] || TIER_COLORS.D;
-          return (
-            <g key={n.id}
-               style={{ cursor: 'pointer', filter: spotDim ? 'saturate(0.3)' : undefined }}
-               onMouseEnter={() => setHover(n.id)}
-               onMouseLeave={() => setHover(null)}
-               onClick={(e) => { e.stopPropagation(); onSelect(n.id); }}
-               opacity={op}>
-              {n.is_self && (
-                <circle cx={n.proj.x} cy={n.proj.y} r={r * 4} fill="url(#self-glow)" opacity={0.7} />
-              )}
-              {isSel && !n.is_self && (
-                <circle cx={n.proj.x} cy={n.proj.y} r={r * 3.2} fill="url(#sel-glow)" />
-              )}
-              {isHov && !isSel && !n.is_self && (
-                <circle cx={n.proj.x} cy={n.proj.y} r={r + 6}
-                  fill="none" style={{ stroke: 'var(--graph-highlight)' }} strokeWidth="2" opacity="0.85" />
-              )}
-              {isEdgeEndpoint && !n.is_self && (
-                <circle cx={n.proj.x} cy={n.proj.y} r={r + 7}
-                  fill="none" style={{ stroke: 'var(--graph-highlight)' }} strokeWidth="2.4" opacity="0.95" />
-              )}
-              <circle cx={n.proj.x} cy={n.proj.y} r={r}
-                style={{ fill: color, stroke: 'var(--graph-node-rim)' }}
-                strokeWidth={n.proj.depth * 0.6} />
-              <circle cx={n.proj.x - r * 0.3} cy={n.proj.y - r * 0.3} r={r * 0.35}
-                style={{ fill: 'var(--graph-specular)' }} />
-              {!dim && !spotDim && n.tier !== 'E' && (
-                <text x={n.proj.x} y={n.proj.y + r + (n.is_self ? 18 : 14)}
-                  textAnchor="middle"
-                  fontFamily={n.is_self || isSel ? 'var(--et-serif)' : 'var(--et-sans)'}
-                  fontSize={n.is_self ? 16 : isSel ? 14 : isHov ? 13 : 11}
-                  fontWeight={n.is_self || isSel ? 700 : (n.tier === 'A' || n.tier === 'B') ? 600 : 500}
-                  strokeWidth={3}
-                  paintOrder="stroke fill"
-                  style={{
-                    pointerEvents: 'none', fill: 'var(--text-primary)',
-                    stroke: 'color-mix(in srgb, var(--surface-page) 85%, transparent)',
-                  }}>
-                  {n.is_self ? '你' : displayName(n.id, n.name)}
-                </text>
-              )}
-            </g>
-          );
-        })}
-      </svg>
-
-      {hover && projById[hover] && hover !== selected && (
-        <NodeTooltip node={projById[hover]} />
-      )}
-
-      <Legend />
-      <OverviewPanel
-        stats={data.stats}
-        onPickCircle={onChangeSpotlight ? () => setPickerKind('circle') : undefined}      // [PATCH-4]
-      />
-
-      {/* ── [PATCH-4] Spotlight banner（顶部） ────────────────────────── */}
-      {spotlight && onChangeSpotlight && (
-        <SpotlightBanner
-          spotlight={spotlight}
-          data={data}
-          onClose={() => onChangeSpotlight(null)}
-        />
-      )}
-
-      {/* ── [PATCH-4] 选择列表弹层 ───────────────────────────────────── */}
-      {pickerKind && onChangeSpotlight && (
-        <PickerOverlay
-          kind={pickerKind}
-          data={data}
-          onPick={(s) => { setPickerKind(null); onChangeSpotlight(s); }}
-          onClose={() => setPickerKind(null)}
-        />
-      )}
-      {/* ──────────────────────────────────────────────────────────────── */}
-
-      <div style={{
-        position: 'absolute', left: 24, top: 74, display: 'flex', alignItems: 'center', gap: 12,
-        color: 'var(--text-muted)',
-        fontFamily: 'var(--et-sans)', fontSize: 11,
-      }}>
-        <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--accent)',
-          animation: 'mr-pulse 2.4s ease-in-out infinite' }} />
-        <span>
-          <b>拖拽</b>旋转 · <b>Shift+拖拽</b>平移 · <b>滚轮</b>缩放（{Math.round(zoom * 100)}%）
-          ·  键盘：<b>↑↓←→</b>转 · <b>WASD</b>移 · <b>+/-</b>放缩 · <b>R</b>重置 · <b>Esc</b>取消选中
-        </span>
-        {userInteracted && (
-          <button onClick={resetView} style={{
-            all: 'unset', cursor: 'pointer',
-            padding: '3px 10px', borderRadius: 999, fontSize: 10,
-            background: 'var(--accent-soft)',
-            color: 'var(--accent-text)',
-            border: '0.5px solid var(--accent-border)',
-          }}>重置视角</button>
-        )}
-      </div>
-
-      <div style={{
-        position: 'absolute', left: 24, top: 110,
-        display: 'flex', flexDirection: 'column', gap: 6,
-        fontFamily: 'var(--et-sans)',
-      }}>
-        <button onClick={() => setZoom(z => Math.min(4, z + 0.2))}
-          title="放大 (键盘 +)"
-          style={{
-            all: 'unset', cursor: 'pointer',
-            width: 36, height: 36, borderRadius: 999,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            fontSize: 20, fontWeight: 300, lineHeight: 1,
-            background: 'color-mix(in srgb, var(--surface-raised) 88%, transparent)',
-            color: 'var(--text-primary)',
-            border: '0.5px solid var(--border-default)',
-            boxShadow: 'var(--shadow-md)',
-            backdropFilter: 'blur(6px)',
-          }}>+</button>
-        <button onClick={() => setZoom(z => Math.max(0.25, z - 0.2))}
-          title="缩小 (键盘 -)"
-          style={{
-            all: 'unset', cursor: 'pointer',
-            width: 36, height: 36, borderRadius: 999,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            fontSize: 22, fontWeight: 300, lineHeight: 1,
-            background: 'color-mix(in srgb, var(--surface-raised) 88%, transparent)',
-            color: 'var(--text-primary)',
-            border: '0.5px solid var(--border-default)',
-            boxShadow: 'var(--shadow-md)',
-            backdropFilter: 'blur(6px)',
-          }}>−</button>
-      </div>
-      <style>{`@keyframes mr-pulse{0%,100%{opacity:.4;transform:scale(1)}50%{opacity:1;transform:scale(1.6)}}`}</style>
-    </div>
-  );
-
-}
-
-function Starfield() {
-  const stars = useMemo(() => {
-    const arr: { x: number; y: number; s: number; o: number }[] = [];
-    for (let i = 0; i < 72; i++) {
-      arr.push({
-        x: Math.random() * 100, y: Math.random() * 100,
-        s: Math.random() < 0.85 ? 1 : 1.6,
-        o: 0.3 + Math.random() * 0.7,
-      });
-    }
-    return arr;
   }, []);
-  return (
-    <svg style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none' }}>
-      {stars.map((s, i) => (
-        <circle key={i} cx={`${s.x}%`} cy={`${s.y}%`} r={s.s} style={{ fill: 'var(--graph-star)' }} opacity={s.o} />
-      ))}
-    </svg>
-  );
-}
 
-function NodeTooltip({ node }: { node: Projected }) {
-  const name = displayName(node.id, node.name);
-  return (
-    <div style={{
-      position: 'absolute',
-      left: node.proj.x + 12, top: node.proj.y - 30,
-      padding: '8px 12px', borderRadius: 10,
-      background: 'color-mix(in srgb, var(--surface-inverse) 94%, transparent)',
-      color: 'var(--text-inverse)',
-      fontFamily: 'var(--et-sans)', fontSize: 11,
-      boxShadow: 'var(--shadow-lg)',
-      pointerEvents: 'none',
-    }}>
-      <div style={{ fontWeight: 600, fontSize: 12.5 }}>{name}</div>
-      <div style={{ opacity: 0.75, marginTop: 2 }}>
-        {node.is_self ? '是你' : `${node.tier} 级 · ${(node.private_msgs || 0).toLocaleString()} 条私聊`}
-        {!node.is_self && node.group_msgs ? ` · ${node.group_msgs.toLocaleString()} 条群聊` : ''}
-      </div>
-    </div>
-  );
-}
-
-function Legend() {
-  const bg = PANEL_BG;
-  const border = PANEL_BORDER;
-  return (
-    <div style={{
-      position: 'absolute', left: 24, bottom: 24,
-      padding: '14px 16px', borderRadius: 14,
-      background: bg, border: `0.5px solid ${border}`,
-      backdropFilter: 'blur(12px)',
-    }}>
-      <div style={{ fontFamily: 'var(--et-sans)', fontSize: 10, letterSpacing: '0.18em',
-        color: 'var(--text-muted)', textTransform: 'uppercase' }}>
-        关系层级
-      </div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8 }}>
-        {TIER_LEGEND.map(t => (
-          <div key={t.label} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ width: 10, height: 10, borderRadius: '50%', background: TIER_COLORS[t.tier], boxShadow: 'inset 0 0 2px var(--graph-specular)' }} />
-            <span style={{ fontFamily: 'var(--et-sans)', fontSize: 11, color: 'var(--text-primary)' }}>{t.label}</span>
+  // ——— hover card / sector card ———
+  let tip: ReactNode = null;
+  let sector: SectorInfo | null = null;
+  if (hover?.kind === 'node') {
+    const n = props.describe(hover.id);
+    if (n) {
+      tip = (
+        <>
+          <div className="gxv-tip__row">
+            <span className={cx('gxv-tip__code', `is-${n.tier.toLowerCase()}`)}>{n.code}</span>
+            <span className="gxv-tip__name">{n.name}</span>
           </div>
-        ))}
-      </div>
-      <div style={{ marginTop: 12, paddingTop: 10, borderTop: `0.5px dashed ${border}` }}>
-        <div style={{ fontFamily: 'var(--et-sans)', fontSize: 10, letterSpacing: '0.18em',
-          color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: 8 }}>
-          关系类型
-        </div>
-        {[
-          { stroke: EDGE_STROKE.private, dash: null, width: 2.2, label: '你 ↔ 他（私聊）' },
-          { stroke: EDGE_STROKE.close_pair, dash: null, width: 3, label: '挚友对（朋友间最强）' },
-          { stroke: EDGE_STROKE.co_active, dash: null, width: 1.8, label: '群里互动密切' },
-          { stroke: EDGE_STROKE.mention, dash: null, width: 1.4, label: '在你私聊里被一起提到' },
-          { stroke: EDGE_STROKE.dm_inferred, dash: '4 3', width: 1.4, label: '推测他俩私下也聊（虚线）' },
-          { stroke: EDGE_STROKE.co_group, dash: '1 3', width: 1, label: '共群（点状）' },
-        ].map((e, i) => (
-          <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 5 }}>
-            <svg width="22" height="6" style={{ flexShrink: 0 }}>
-              <line x1="0" y1="3" x2="22" y2="3"
-                style={{ stroke: e.stroke }} strokeWidth={e.width}
-                strokeDasharray={e.dash || undefined} strokeLinecap="round" />
-            </svg>
-            <span style={{ fontFamily: 'var(--et-sans)', fontSize: 11, color: 'var(--text-primary)' }}>{e.label}</span>
+          <div className="gxv-tip__meta">
+            <span>TIER {n.tier}</span>
+            <span>私聊 {kfmt(n.msgs)}</span>
+            {n.circle && <span>{n.circle}</span>}
           </div>
-        ))}
-      </div>
-    </div>
-  );
-}
+          <div className="gxv-tip__hint">单击选中{n.circle ? ' · 双击聚焦这一圈' : ''}</div>
+        </>
+      );
+    }
+  } else if (hover?.kind === 'edge') {
+    const label = props.describeEdge(hover.a, hover.b);
+    tip = (
+      <>
+        <div className="gxv-tip__row"><span className="gxv-tip__name">{label}</span></div>
+        <div className="gxv-tip__hint">单击看这两个人之间</div>
+      </>
+    );
+  } else if (hover?.kind === 'sector') {
+    sector = sceneRef.current.sectorInfo(hover.s, state.codes);
+  }
 
-// ── [PATCH-4] OverviewPanel: 两个 Stat 改为可点 ────────────────────────────
-function OverviewPanel({ stats, onPickCircle }: {
-  stats: GraphData['stats'];
-  onPickCircle?: () => void;
-}) {
-  const bg = PANEL_BG;
-  const border = PANEL_BORDER;
-  const tColor = 'var(--text-primary)';
-  const mute = 'var(--text-muted)';
+  // the engine draws the sector card's leader line to the card's lower-left corner
+  useEffect(() => {
+    const scene = sceneRef.current!;
+    if (hover?.kind !== 'sector' || !secCardRef.current || !wrapRef.current) {
+      if (scene.sectorAnchor) { scene.sectorAnchor = null; scheduleRef.current(); }
+      return;
+    }
+    const r = wrapRef.current.getBoundingClientRect(), b = secCardRef.current.getBoundingClientRect();
+    const px = tipPos?.x ?? 0, py = tipPos?.y ?? 0;
+    const L = b.left - r.left, R = b.right - r.left, T = b.top - r.top, B = b.bottom - r.top;
+    const a = { x: px < L ? L : px > R ? R : L, y: py < T ? T : B };
+    if (!scene.sectorAnchor || Math.abs(scene.sectorAnchor.x - a.x) > 0.5 || Math.abs(scene.sectorAnchor.y - a.y) > 0.5) {
+      scene.sectorAnchor = a;
+      scheduleRef.current();
+    }
+  });
+
+  const tipStyle = (w: number, h: number): CSSProperties | undefined => {
+    if (!tipPos) return undefined;
+    let x = tipPos.x + 16, y = tipPos.y + 18;
+    if (x + w > box.w - 8) x = tipPos.x - 16 - w;
+    if (y + h > box.h - 8) y = tipPos.y - 18 - h;
+    return { left: Math.max(8, x), top: Math.max(8, y) };
+  };
+  const secStyle = (): CSSProperties | undefined => {
+    if (!tipPos) return undefined;
+    // below the bar when there is room (that is rim and floor, not people), otherwise above it
+    const w = 214, h = 132;
+    let x = tipPos.x + 26, y = tipPos.y + 34;
+    if (x + w > box.w - 8) x = tipPos.x - 26 - w;
+    if (y + h > box.h - 8) y = tipPos.y - 34 - h;
+    return { left: Math.max(8, x), top: Math.min(Math.max(8, y), box.h - h - 8) };
+  };
+
+  const v0 = sceneRef.current.view;
   return (
-    <div style={{
-      position: 'absolute', right: 24, bottom: 24,
-      width: 300, padding: '18px 20px',
-      background: bg, border: `0.5px solid ${border}`,
-      backdropFilter: 'blur(12px)', borderRadius: 14,
-    }}>
-      <div style={{ fontFamily: 'var(--et-sans)', fontSize: 10, letterSpacing: '0.18em',
-        color: mute, textTransform: 'uppercase' }}>关于这张图</div>
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 8 }}>
-        <span style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--graph-self)', boxShadow: '0 0 8px var(--accent)' }} />
-        <span style={{ fontFamily: 'var(--et-serif)', fontSize: 14, fontWeight: 600, color: tColor }}>
-          你处在中心
-        </span>
-      </div>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 14 }}>
-        <Stat num={stats.people} label="个节点" />
-        <Stat num={stats.ffEdges} label="朋友间互连" />
-        <Stat num={stats.clusters} label="个核心圈" onClick={onPickCircle} />
-        <Stat num={stats.isolates} label="个孤立点" />
-      </div>
-      <div style={{ marginTop: 14, paddingTop: 12, borderTop: `0.5px dashed ${border}`,
-        fontFamily: 'var(--et-serif)', fontSize: 13, lineHeight: 1.6, color: tColor, fontStyle: 'italic' }}>
-        “你不在场时，他们也在彼此身上留下痕迹——{stats.ffEdges} 条不经过你的连线。”
-      </div>
-    </div>
-  );
-}
-
-function Stat({ num, label, onClick }: {
-  num: number; label: string; onClick?: () => void;
-}) {
-  const clickable = !!onClick;
-  return (
-    <button
-      onClick={onClick}
-      disabled={!clickable}
-      style={{
-        all: 'unset',
-        textAlign: 'left',
-        cursor: clickable ? 'pointer' : 'default',
-        padding: clickable ? '4px 6px' : 0,
-        margin: clickable ? '-4px -6px' : 0,
-        borderRadius: 8,
-        transition: 'background 160ms ease',
-      }}
-      onMouseEnter={(e) => { if (clickable) e.currentTarget.style.background = 'var(--surface-hover)'; }}
-      onMouseLeave={(e) => { if (clickable) e.currentTarget.style.background = 'transparent'; }}
-    >
-      <div style={{ fontFamily: 'var(--et-serif)', fontSize: 24, fontWeight: 600,
-        color: 'var(--text-primary)', fontVariantNumeric: 'tabular-nums', lineHeight: 1,
-        textDecoration: clickable ? 'underline dotted' : 'none', textUnderlineOffset: 4,
-        textDecorationColor: clickable ? 'var(--accent-border)' : 'transparent',
-      }}>
-        {num.toLocaleString()}
-      </div>
-      <div style={{ fontFamily: 'var(--et-sans)', fontSize: 11,
-        color: 'var(--text-muted)', marginTop: 2,
-        display: 'flex', alignItems: 'center', gap: 4,
-      }}>
-        {label}{clickable && <span style={{ fontSize: 9 }}>›</span>}
-      </div>
-    </button>
-  );
-}
-
-// ── [PATCH-4] Spotlight 顶栏 ───────────────────────────────────────────────
-function SpotlightBanner({ spotlight, data, onClose }: {
-  spotlight: Spotlight; data: GraphData; onClose: () => void;
-}) {
-  if (!spotlight) return null;
-  // Cluster labels embed the anchor's real name ("朋友K 这一圈 (11 人)").
-  // maskText routes the anchor name through the privacy alias table that
-  // PrivacyIdentityIndex pre-populates for all friends, so toggling 隐私
-  // mode swaps "朋友K" → "朋友 XX" without us re-fetching anything.
-  const c = data.clusters.find(x => x.id === spotlight.clusterId);
-  const title = maskText(c?.label || '核心圈');
-  const sub = `${c?.members?.length || 0} 位成员 · 你不在场时，他们仍在一起说话`;
-  const bg = 'color-mix(in srgb, var(--surface-raised) 92%, transparent)';
-  const border = 'var(--border-default)';
-  return (
-    <div style={{
-      position: 'absolute', top: 18, left: '50%', transform: 'translateX(-50%)',
-      padding: '10px 16px 10px 18px', borderRadius: 14,
-      background: bg, border: `0.5px solid ${border}`, backdropFilter: 'blur(12px)',
-      display: 'flex', alignItems: 'center', gap: 14,
-      boxShadow: 'var(--shadow-lg)',
-      maxWidth: 'calc(100% - 80px)',
-    }}>
-      <div style={{ fontFamily: 'var(--et-sans)', fontSize: 10, letterSpacing: '0.18em',
-        textTransform: 'uppercase',
-        color: 'var(--text-muted)' }}>
-        聚焦核心圈
-      </div>
-      <div style={{ width: 1, height: 28, background: border }} />
-      <div>
-        <div style={{ fontFamily: 'var(--et-serif)', fontSize: 16, fontWeight: 700,
-          color: 'var(--text-primary)' }}>{title}</div>
-        <div style={{ fontFamily: 'var(--et-sans)', fontSize: 11,
-          color: 'var(--text-secondary)', marginTop: 2 }}>{sub}</div>
-      </div>
-      <button onClick={onClose} style={{
-        all: 'unset', cursor: 'pointer', padding: '4px 10px', borderRadius: 999,
-        fontSize: 11, marginLeft: 8,
-        background: 'var(--surface-pressed)',
-        color: 'var(--text-primary)',
-      }}>退出 · Esc</button>
-    </div>
-  );
-}
-
-// ── [PATCH-4] 列表选择层 ───────────────────────────────────────────────────
-function PickerOverlay({ kind, data, onPick, onClose }: {
-  kind: 'circle'; data: GraphData;
-  onPick: (s: Spotlight) => void; onClose: () => void;
-}) {
-  void kind;  // bridge 永久砍掉；保留参数形状方便日后扩展
-  const items = data.clusters.map(c => ({
-    id: c.id, label: c.label,
-    sub: `${c.members?.length || 0} 位成员`,
-    size: c.members?.length || 0,
-    color: clusterColor(c.id, data.clusters),
-  }));
-  items.sort((a, b) => b.size - a.size);
-
-  const bg = 'var(--surface-overlay)';
-  const card = 'var(--surface-raised)';
-  const border = 'var(--border-default)';
-  return (
-    <div onClick={onClose} style={{
-      position: 'absolute', inset: 0, zIndex: 200, background: bg,
-      backdropFilter: 'blur(2px)',
-      display: 'flex', alignItems: 'center', justifyContent: 'center',
-    }}>
-      <div onClick={e => e.stopPropagation()} style={{
-        width: 480, maxHeight: '70%', display: 'flex', flexDirection: 'column',
-        background: card, borderRadius: 16, border: `0.5px solid ${border}`,
-        boxShadow: 'var(--shadow-lg)',
-        overflow: 'hidden',
-      }}>
-        <div style={{ padding: '16px 20px 12px',
-          borderBottom: `0.5px solid ${border}`,
-          display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
-          <div>
-            <div style={{ fontFamily: 'var(--et-sans)', fontSize: 10, letterSpacing: '0.18em',
-              textTransform: 'uppercase',
-              color: 'var(--text-muted)' }}>
-              选一个
-            </div>
-            <div style={{ fontFamily: 'var(--et-serif)', fontSize: 18, fontWeight: 700,
-              marginTop: 2, color: 'var(--text-primary)' }}>
-              {`${items.length} 个核心圈`}
-            </div>
-          </div>
-          <button onClick={onClose} style={{
-            all: 'unset', cursor: 'pointer', fontSize: 22,
-            color: 'var(--text-muted)',
-          }}>×</button>
-        </div>
-        <div style={{ padding: '12px 18px 12px 12px', overflow: 'auto', scrollbarGutter: 'stable' }}>
-          {items.map(it => (
-            <button key={it.id}
-              onClick={() => onPick({ kind: 'circle', clusterId: it.id })}
-              style={{
-                all: 'unset', cursor: 'pointer', display: 'flex', alignItems: 'center',
-                gap: 14, padding: '10px 12px', borderRadius: 10, width: '100%',
-                boxSizing: 'border-box', marginBottom: 4,
-              }}
-              onMouseEnter={(e) => e.currentTarget.style.background = 'var(--surface-hover)'}
-              onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
-            >
-              <span style={{
-                width: 14, height: 14, borderRadius: '50%', background: it.color,
-                flexShrink: 0,
-                boxShadow: `0 0 12px color-mix(in srgb, ${it.color} 40%, transparent)`,
-              }} />
-              <span style={{ flex: 1, fontFamily: 'var(--et-serif)', fontSize: 15, fontWeight: 600,
-                color: 'var(--text-primary)',
-                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-              }}>{maskText(it.label)}</span>
-              <span style={{ fontFamily: 'var(--et-sans)', fontSize: 11,
-                color: 'var(--text-muted)' }}>{it.sub}</span>
+    <section ref={hostRef} className="ui-mod gxv" aria-label="三维关系网">
+      <header className="ui-mod__head gxv__head">
+        {leading}
+        <span className="ui-mod__id">10</span>
+        <span className="ui-mod__title">关系网</span>
+        <span className="ui-mod__en gxv__en">SOCIAL SCOPE · 3D</span>
+        <span className="ui-mod__right gxv__views" role="group" aria-label="视角">
+          {MODES.map(m => (
+            <button key={m} type="button" ref={el => { chipRefs.current[m] = el; }}
+              className={cx('gxv-chip', m === 'orbit' && 'is-on')} aria-pressed={m === 'orbit'}
+              title={m === 'orbit' ? '斜俯视（默认）' : m === 'top' ? '从正上方往下看' : '贴着赤道面平视'}
+              onClick={() => setMode(m)}>
+              {m.toUpperCase()}
             </button>
           ))}
+          <button type="button" className="gxv-chip gxv-chip--reset" onClick={reset} title="回到默认视角（R）">
+            RESET<kbd>R</kbd>
+          </button>
+        </span>
+      </header>
+      <div ref={wrapRef} className="gxv__wrap">
+        <canvas
+          ref={canvasRef}
+          className="gxv__canvas"
+          role="img"
+          aria-label={`三维关系网：${summary.total} 人，单独画出 ${summary.shown} 人，${summary.edges} 条朋友间连线。右侧面板列出同样的信息。`}
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onPointerCancel={() => { dragRef.current = null; }}
+          onPointerLeave={() => { if (!dragRef.current) applyHover(null, null); }}
+          onDoubleClick={onDoubleClick}
+          onContextMenu={e => e.preventDefault()}
+        />
+        <div className="gxv-ro gxv-ro--tl" ref={el => { obsRefs.current[0] = el; }}>
+          <div>YAW<span ref={yawRef}>{fmtDeg(norm360(v0.yaw))}</span></div>
+          <div>PITCH<span ref={pitchRef}>{fmtDeg(v0.pitch)}</span></div>
+          <div>ZOOM<span ref={zoomRef}>{v0.zoom.toFixed(2)}×</span></div>
         </div>
+        <div className="gxv-ro gxv-ro--tr" ref={el => { obsRefs.current[1] = el; }}>
+          {busy && <div className="gxv-ro__busy"><span className="ui-led is-pulse" />{busy}</div>}
+          <div>SHOWN<span>{summary.shown} / {summary.total}</span></div>
+          <div>MERGED D·E<span>{summary.merged}</span></div>
+          <div>EDGES<span>{summary.edges}{state.selected ? <> · <em>{summary.linked} LINKED</em></> : null}</span></div>
+        </div>
+        <div className="gxv-foot" ref={el => { obsRefs.current[2] = el; }}>
+          {notes && (
+            <div className="gxv-notes">
+              <p>{notes[0]}</p>
+              <p>{notes[1]}</p>
+            </div>
+          )}
+          <div className="gxv-hint">
+            拖动旋转<b>·</b><b>滚轮缩放</b><b>·</b><b>单击选中</b><b>·</b><b>双击聚焦核心圈</b>
+            <span className="gxv-hint__x"><b>·</b><b>悬停扇区展开</b></span>
+          </div>
+        </div>
+        <span className="ui-crop" aria-hidden="true" />
+        {tip && tipPos && <div className="gxv-tip" style={tipStyle(232, 76)} role="tooltip">{tip}</div>}
+        {sector && tipPos && (
+          <div ref={secCardRef} className="gxv-sec" style={secStyle()} role="tooltip">
+            <div className="gxv-sec__head">
+              <span>扇区 {String(sector.s * 10).padStart(3, '0')}°–{String(sector.s * 10 + 10).padStart(3, '0')}°</span>
+              <b>{sector.nD + sector.nE} 人</b>
+            </div>
+            <div className="gxv-sec__row"><i className="is-d" />D 偶尔<span>{sector.nD}</span></div>
+            <div className="gxv-sec__row"><i className="is-e" />E 疏远<span>{sector.nE}</span></div>
+            {sector.d.length + sector.e.length > 0 && (
+              <div className="gxv-sec__codes">
+                {[...sector.d, ...sector.e].slice(0, 14).join(' ')}{sector.d.length + sector.e.length > 14 ? ' …' : ''}
+              </div>
+            )}
+            <div className="gxv-sec__hint">{state.expanded.has(sector.s) ? '单击收起' : '单击把这些人展开成方框'}</div>
+          </div>
+        )}
       </div>
-    </div>
+    </section>
   );
 }
