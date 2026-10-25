@@ -2,19 +2,34 @@
 
 html, body, #root {
   width: 100%;
-  height: 100%;
+  min-height: 100%;
   margin: 0;
   padding: 0;
+}
+html, body {
   background: var(--surface-page);
   color: var(--text-primary);
   font-family: var(--font-sans);
+  font-size: 13px;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
 }
+#root { height: 100%; }
 
 * { box-sizing: border-box; }
 
 button { font-family: inherit; }
 input  { font-family: inherit; outline: none; }
 
-/* hide ugly Chrome focus ring on buttons that handle focus themselves */
-button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; border-radius: 6px; }
+::selection { background: var(--signal); color: var(--text-on-signal); }
+
+/* hide the default focus ring on buttons that draw their own */
+button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; border-radius: var(--radius-sm); }
+
+/* thin, quiet scrollbars that match the panel */
+* { scrollbar-width: thin; scrollbar-color: var(--border-default) transparent; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 0; border: 2px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background-color: var(--border-strong); }
+::-webkit-scrollbar-track { background: transparent; }

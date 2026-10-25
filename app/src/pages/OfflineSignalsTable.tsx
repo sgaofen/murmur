@@ -5,12 +5,21 @@ import { lookupError } from '../data/errorCatalog';
 import { displayName, maskedWxid, maskText } from '../utils/privacy';
 import { usePrivacy } from '../utils/usePrivacy';
 import { PageHeader } from '../shell/PageHeader';
-import { Button, Chip, EmptyState, ErrorState, Skeleton, cx } from '../ui';
-import type { ChipTone } from '../ui';
+import { Button, EmptyState, ErrorState, Module, Skeleton, cx } from '../ui';
 import { IconClose, IconInbox, IconSearch } from '../ui/icons';
 import { signalsOutcome } from '../utils/pageStates';
 import type { SignalsOutcome } from '../utils/pageStates';
 import './OfflineSignalsTable.css';
+
+/* 证据表 (#/table) — the top 100 private friends × hard offline signals,
+ * counted locally (no AI).
+ *
+ *   49 汇总   collection progress, then totals + the tier mix
+ *   50 矩阵   the sortable 13-column matrix (click a row → profile)
+ *
+ * The page is `.app-fill`; the matrix scrolls on its own with a sticky
+ * header and the name column pinned. Styles: ./OfflineSignalsTable.css
+ * (prefix ot-). */
 
 interface SignalRow {
   id: string;
@@ -38,18 +47,18 @@ function tierFromTag(tagKind: string): string {
   return tagKind === 'orange' ? 'A' : tagKind === 'amber' ? 'B' : tagKind === 'sage' ? 'C' : 'D';
 }
 
-const COLUMNS: Array<{ k: keyof SignalRow; l: string; w: number }> = [
+const COLUMNS: Array<{ k: keyof SignalRow; l: string; w: number; num?: boolean }> = [
   { k: 'name', l: '朋友', w: 140 },
   { k: 'tier', l: '层级', w: 60 },
-  { k: 'msg_count', l: '消息数', w: 80 },
-  { k: 'span_days', l: '跨度(天)', w: 80 },
-  { k: 'longevity_years', l: '持续年', w: 70 },
-  { k: 'longest_silence', l: '最长沉默', w: 80 },
-  { k: 'offline_evidence', l: '线下证据', w: 80 },
-  { k: 'vuln_total', l: '脆弱表达', w: 80 },
-  { k: 'call_count', l: '通话', w: 60 },
-  { k: 'apology_count', l: '道歉', w: 60 },
-  { k: 'lifecycle_count', l: '人生节点', w: 80 },
+  { k: 'msg_count', l: '消息数', w: 80, num: true },
+  { k: 'span_days', l: '跨度(天)', w: 80, num: true },
+  { k: 'longevity_years', l: '持续年', w: 70, num: true },
+  { k: 'longest_silence', l: '最长沉默', w: 80, num: true },
+  { k: 'offline_evidence', l: '线下证据', w: 80, num: true },
+  { k: 'vuln_total', l: '脆弱表达', w: 80, num: true },
+  { k: 'call_count', l: '通话', w: 60, num: true },
+  { k: 'apology_count', l: '道歉', w: 60, num: true },
+  { k: 'lifecycle_count', l: '人生节点', w: 80, num: true },
   { k: 'last_active', l: '最近', w: 100 },
   { k: 'signature_summary', l: '特征摘要', w: 280 },
 ];
@@ -189,7 +198,7 @@ export function OfflineSignalsTable({ onOpenFriend }: Props) {
     const entry = lookupError(code);
     const raw = error instanceof Error ? error.message : String(error);
     return (
-      <div className="signals-page et-root">
+      <div className="ot-state">
         {header}
         <ErrorState
           layout="page"
@@ -210,11 +219,13 @@ export function OfflineSignalsTable({ onOpenFriend }: Props) {
 
   if (rows && rows.length === 0) {
     return (
-      <div className="signals-page et-root">
+      <div className="ot-state">
         {header}
         <EmptyState
+          className="ot-empty"
           layout="page"
-          icon={<IconInbox size={26} />}
+          icon={<IconInbox size={24} />}
+          label="ROWS · 00"
           title="还没有可以统计的朋友"
           description="解密后的数据里还没有私聊记录。去首页点「更新数据」，解密完成后这里会列出前 100 位朋友的线下证据、通话、道歉等硬信号。"
         />
@@ -222,98 +233,113 @@ export function OfflineSignalsTable({ onOpenFriend }: Props) {
     );
   }
 
+  const pct = Math.round(progress);
   return (
-    <div className="signals-page et-root">
+    <div className="ot-page app-fill">
       {header}
-
-      {!sorted && (
-        <div aria-busy="true">
-          <div className="signals-progress" role="status">
-            <h2 className="et-h3 signals-progress__title">
-              正在收集{total != null ? ` ${total} 个` : ''}朋友的全部信号…
-            </h2>
-            <div className="et-meta signals-progress__meta">{Math.round(progress)}% · 大约 50 秒</div>
-            <div className="signals-progress__track" role="progressbar" aria-valuemin={0} aria-valuemax={100}
-              aria-valuenow={Math.round(progress)} aria-label="收集进度">
-              <div className="signals-progress__fill" style={{ width: `${progress}%` }} />
-            </div>
-          </div>
-          <div className="signals-skel" aria-hidden="true">
-            {Array.from({ length: 8 }, (_, i) => (
-              <div key={i} className="signals-skel__row">
-                <Skeleton height={12} width={`${80 - (i % 3) * 15}%`} />
-                <Skeleton height={16} radius={4} />
-                {Array.from({ length: 5 }, (_, k) => <Skeleton key={k} height={11} width={`${60 - ((i + k) % 3) * 15}%`} />)}
+      <div className="ot-rack ui-rack">
+        {!sorted || !rows ? (
+          <Module as="div" className="ot-m49" aria-busy="true">
+            <div className="ot-scan" role="status">
+              <div className="ot-scan__code" aria-hidden="true">{String(pct).padStart(2, '0')}<small>%</small></div>
+              <div className="ot-scan__text">
+                <div className="ui-label">COLLECT<b>正在收集{total != null ? ` ${total} 个` : ''}朋友的全部信号…</b></div>
+                <div className="ot-scan__bar" role="progressbar" aria-valuemin={0} aria-valuemax={100}
+                  aria-valuenow={pct} aria-label="收集进度">
+                  {Array.from({ length: 50 }, (_, i) => <i key={i} className={cx(i < Math.round(progress / 2) && 'on')} />)}
+                </div>
+                <div className="ot-scan__meta">{pct}% · 大约 50 秒 · 每位朋友读一次详情</div>
               </div>
-            ))}
-          </div>
-        </div>
-      )}
+            </div>
+          </Module>
+        ) : (
+          <Summary rows={rows} />
+        )}
 
-      {sorted && (
-        <>
-          <div className="signals-toolbar">
-            <label className="signals-search">
-              <IconSearch size={13} />
-              <input
-                type="search"
-                value={filter}
-                onChange={e => setFilter(e.target.value)}
-                placeholder="搜索名字 / wxid"
-                aria-label="按名字或 wxid 筛选"
-              />
-              {filter && (
-                <button type="button" className="ui-icon-btn" aria-label="清除搜索" title="清除搜索" onClick={() => setFilter('')}>
-                  <IconClose size={12} />
-                </button>
-              )}
-            </label>
-            <span className="et-meta">共 {sorted.length} 行 · 点击列头排序 · 点击行进入个人档案</span>
-          </div>
-
-          {sorted.length === 0 ? (
-            <div className="signals-empty">
+        <Module
+          id="50" title="矩阵" en="SIGNAL MATRIX" className="ot-m50" bodyClassName="ot-m50__body"
+          right={sorted ? (
+            <>
+              <span className="ot-hd-n ot-hide-md">{String(sorted.length).padStart(3, '0')} ROWS · 点列头排序 · 点行进入档案</span>
+              <label className="ui-field ot-find">
+                <IconSearch size={12} />
+                <input
+                  type="search"
+                  value={filter}
+                  onChange={e => setFilter(e.target.value)}
+                  placeholder="搜索名字 / wxid"
+                  aria-label="按名字或 wxid 筛选"
+                />
+                {filter && (
+                  <button type="button" className="ui-icon-btn ot-find__clear" aria-label="清除搜索" title="清除搜索" onClick={() => setFilter('')}>
+                    <IconClose size={11} />
+                  </button>
+                )}
+              </label>
+            </>
+          ) : undefined}
+        >
+          {!sorted ? (
+            <div className="ot-skel" aria-hidden="true">
+              {Array.from({ length: 12 }, (_, i) => (
+                <div key={i} className="ot-skel__row">
+                  <Skeleton height={11} width={`${80 - (i % 3) * 15}%`} />
+                  <Skeleton height={14} width={16} />
+                  {Array.from({ length: 6 }, (_, k) => <Skeleton key={k} height={10} width={`${60 - ((i + k) % 3) * 15}%`} />)}
+                </div>
+              ))}
+            </div>
+          ) : sorted.length === 0 ? (
+            <div className="ot-none">
               <EmptyState
-                icon={<IconSearch size={24} />}
+                className="ot-empty"
+                icon={<IconSearch size={22} />}
+                label="MATCH · 00"
                 title={`没有名字或 wxid 包含「${maskText(filter)}」的朋友`}
                 actions={<Button size="sm" onClick={() => setFilter('')}>清除搜索</Button>}
               />
             </div>
           ) : (
-            <div className="signals-scroll">
-              <table className="signals-table">
+            <div className="ot-scroll">
+              <table className="ot-table">
+                <colgroup>
+                  <col style={{ width: 40 }} />
+                  {COLUMNS.map(col => <col key={col.k} style={{ width: col.w }} />)}
+                </colgroup>
                 <thead>
                   <tr>
+                    <th className="ot-no" aria-hidden="true">#</th>
                     {COLUMNS.map(col => (
-                      <th key={col.k} style={{ width: col.w }}
+                      <th key={col.k} className={cx(col.num && 'r', col.k === 'name' && 'ot-pin', sortKey === col.k && 'is-sorted')}
                         aria-sort={sortKey === col.k ? (sortDir === -1 ? 'descending' : 'ascending') : 'none'}>
-                        <button type="button" className="signals-sort" onClick={() => sortBy(col.k)}>
+                        <button type="button" className="ot-sort" onClick={() => sortBy(col.k)}>
                           {col.l}
-                          {sortKey === col.k && <span className="signals-sort__dir" aria-hidden="true">{sortDir === -1 ? '↓' : '↑'}</span>}
+                          <span className="ot-sort__dir" aria-hidden="true">{sortKey === col.k ? (sortDir === -1 ? '↓' : '↑') : ''}</span>
                         </button>
                       </th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
-                  {sorted.map(r => (
+                  {sorted.map((r, i) => (
                     <tr key={r.id}
                       tabIndex={0}
                       onClick={() => onOpenFriend(r.id)}
                       onKeyDown={e => { if (e.key === 'Enter') onOpenFriend(r.id); }}>
-                      <td>{displayName(r.id, r.name)}</td>
-                      <td><Chip size="sm" tone={tierTone(r.tier)}>{r.tier}</Chip></td>
-                      <td className="et-num">{r.msg_count.toLocaleString()}</td>
-                      <td className="et-num">{r.span_days}</td>
-                      <td className={cx('et-num signals-num', (r.longevity_years || 0) >= 3 && 'is-strong')}>{r.longevity_years || 0}</td>
-                      <td className="et-num">{r.longest_silence}</td>
-                      <td className={cx('et-num signals-num', r.offline_evidence >= 50 && 'is-strong')}>{r.offline_evidence}</td>
-                      <td className={cx('et-num signals-num', r.vuln_total >= 5 && 'is-strong')}>{r.vuln_total}</td>
-                      <td className="et-num">{r.call_count}</td>
-                      <td className="et-num">{r.apology_count}</td>
-                      <td className="et-num">{r.lifecycle_count}</td>
-                      <td className="signals-muted">{r.last_active}</td>
-                      <td className="signals-summary" title={maskText(r.signature_summary)}>
+                      <td className="ot-no">{String(i + 1).padStart(2, '0')}</td>
+                      <td className="ot-pin ot-name">{displayName(r.id, r.name)}</td>
+                      <td><span className={cx('ui-tsq', tierClass(r.tier))}>{r.tier}</span></td>
+                      <td className="r">{r.msg_count.toLocaleString('en-US')}</td>
+                      <td className="r">{r.span_days}</td>
+                      <td className={cx('r', (r.longevity_years || 0) >= 3 && 'is-strong')}>{r.longevity_years || 0}</td>
+                      <td className="r">{r.longest_silence}</td>
+                      <td className={cx('r', r.offline_evidence >= 50 && 'is-strong')}>{r.offline_evidence}</td>
+                      <td className={cx('r', r.vuln_total >= 5 && 'is-strong')}>{r.vuln_total}</td>
+                      <td className="r">{r.call_count}</td>
+                      <td className="r">{r.apology_count}</td>
+                      <td className="r">{r.lifecycle_count}</td>
+                      <td className="ot-muted">{r.last_active}</td>
+                      <td className="ot-summary" title={maskText(r.signature_summary)}>
                         <span>{maskText(r.signature_summary)}</span>
                       </td>
                     </tr>
@@ -322,19 +348,73 @@ export function OfflineSignalsTable({ onOpenFriend }: Props) {
               </table>
             </div>
           )}
-          {outcome?.kind === 'rows' && outcome.failed > 0 && (
-            <div className="et-meta signals-foot" role="status">
-              另有 {outcome.failed} 位朋友的详情读取失败，没有列进表里 ·{' '}
-              <button type="button" className="signals-retry" onClick={() => setNonce(n => n + 1)}>重新收集</button>
+          {sorted && (
+            <div className="ot-foot">
+              {outcome?.kind === 'rows' && outcome.failed > 0 && (
+                <span className="ot-foot__warn" role="status">
+                  另有 {outcome.failed} 位朋友的详情读取失败，没有列进表里 ·{' '}
+                  <button type="button" className="ot-retry" onClick={() => setNonce(n => n + 1)}>重新收集</button>
+                </span>
+              )}
+              <span>只统计消息最多的前 100 位私聊朋友 · 全部在本机计算</span>
+              <span className="ot-foot__k"><i className="is-strong" />高于阈值：持续 ≥ 3 年 · 线下证据 ≥ 50 · 脆弱表达 ≥ 5</span>
             </div>
           )}
-          <div className="et-meta signals-foot">只统计消息最多的前 100 位私聊朋友 · 全部在本机计算</div>
-        </>
-      )}
+        </Module>
+      </div>
     </div>
   );
 }
 
-function tierTone(t: string): ChipTone {
-  return ({ A: 'accent', B: 'warning', C: 'info' } as Record<string, ChipTone>)[t] || 'neutral';
+function tierClass(t: string): string | false {
+  return t === 'A' ? 'is-signal' : t === 'B' ? 'is-solid' : t === 'C' ? false : 'is-faint';
+}
+
+const TIERS = ['A', 'B', 'C', 'D', 'E'] as const;
+const TIER_LABEL: Record<string, string> = { A: '老朋友', B: '常聊', C: '有联系', D: '弱联系', E: '已疏远' };
+
+/** 49 — totals over every collected row (not the filtered view). */
+function Summary({ rows }: { rows: SignalRow[] }) {
+  const sum = (k: keyof SignalRow) => rows.reduce((s, r) => s + (Number(r[k]) || 0), 0);
+  const counts = TIERS.map(t => rows.filter(r => r.tier === t).length);
+  const other = rows.length - counts.reduce((a, b) => a + b, 0);
+  const longLived = rows.filter(r => (r.longevity_years || 0) >= 3).length;
+  return (
+    <Module as="div" className="ot-m49" aria-label="汇总">
+      <div className="ot-sum">
+        <div className="ot-ro">
+          <div className="ui-label">FRIENDS<b>统计的朋友</b></div>
+          <div className="ui-big ot-ro__v">{rows.length}</div>
+          <div className="ot-ro__s">持续 3 年以上 {longLived} 位</div>
+        </div>
+        <div className="ot-ro">
+          <div className="ui-label">MSG<b>消息合计</b></div>
+          <div className="ui-big ot-ro__v">{sum('msg_count').toLocaleString('en-US')}</div>
+          <div className="ot-ro__s">私聊，不含群</div>
+        </div>
+        <div className="ot-ro">
+          <div className="ui-label">OFFLINE<b>线下证据</b></div>
+          <div className="ui-big ot-ro__v">{sum('offline_evidence').toLocaleString('en-US')}</div>
+          <div className="ot-ro__s">约见面 · 到了 · 见面聊</div>
+        </div>
+        <div className="ot-ro">
+          <div className="ui-label">CALLS<b>通话</b></div>
+          <div className="ui-big ot-ro__v">{sum('call_count').toLocaleString('en-US')}</div>
+          <div className="ot-ro__s">道歉 {sum('apology_count')} · 人生节点 {sum('lifecycle_count')}</div>
+        </div>
+        <div className="ot-tiers">
+          <div className="ui-label">TIERS<b>层级分布</b></div>
+          <div className="ot-tiers__bar" aria-hidden="true">
+            {counts.map((n, i) => n > 0 && <i key={TIERS[i]} className={`t-${TIERS[i]}`} style={{ flexGrow: n }} />)}
+            {other > 0 && <i className="t-x" style={{ flexGrow: other }} />}
+          </div>
+          <ul className="ot-tiers__k">
+            {TIERS.map((t, i) => (
+              <li key={t}><span className={cx('ui-tsq', tierClass(t))}>{t}</span><span>{TIER_LABEL[t]}</span><b>{counts[i]}</b></li>
+            ))}
+          </ul>
+        </div>
+      </div>
+    </Module>
+  );
 }

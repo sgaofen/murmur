@@ -1,7 +1,8 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
-// Bundled serif (all weights, unicode-range slices) — no network font requests.
-import '@fontsource-variable/noto-serif-sc/wght.css'
+// Bundled mono (JetBrains Mono, SIL OFL 1.1; variable 100–800, latin slices
+// only load when used) — every label and readout. No network font requests.
+import '@fontsource-variable/jetbrains-mono/wght.css'
 import './index.css'
 import './ui/ui.css'
 import App from './App.tsx'

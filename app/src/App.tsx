@@ -1,4 +1,5 @@
 import { lazy, Suspense, useEffect, useState } from 'react';
+import type { CSSProperties } from 'react';
 import { HomePage } from './pages/Home';
 import { FriendPage } from './pages/Friend';
 import { LoadingPage } from './pages/Loading';
@@ -70,19 +71,19 @@ function safeDecode(s: string): string {
   }
 }
 
-/** Which nav entry is lit, and what the top bar says until the page mounts
+/** Which key is lit, and what the status strip says until the page mounts
  * its own <PageHeader> (loading / error states). */
 function shellFor(route: Route, go: (path: string) => void): { active: NavKey | null; header: PageHeaderProps } {
   switch (route.name) {
     case 'friend':
-      return { active: 'home', header: { title: '朋友', back: { label: '首页', onClick: () => go('') } } };
+      return { active: 'profile', header: { title: '档案', back: { label: '年代记', onClick: () => go('') } } };
     case 'yearbook':
       return {
-        active: 'home',
+        active: 'profile',
         header: { title: '双人年代记', back: { label: '朋友页', onClick: () => go(`friend/${route.id}`) } },
       };
     case 'graph':
-      return { active: 'graph', header: { title: '关系网络' } };
+      return { active: 'graph', header: { title: '关系网' } };
     case 'annual':
       return { active: 'annual', header: { title: '年度总览' } };
     case 'reports':
@@ -90,28 +91,39 @@ function shellFor(route: Route, go: (path: string) => void): { active: NavKey | 
     case 'table':
       return { active: 'table', header: { title: '离线证据表' } };
     case 'search':
-      return { active: 'search', header: { title: '搜索' } };
+      return { active: 'search', header: { title: '检索' } };
     case 'chat': {
       const params = new URLSearchParams(route.query);
       if (params.get('from') === 'search') {
-        return { active: 'search', header: { title: '聊天', back: { label: '搜索', onClick: () => go(searchBackPath(params)) } } };
+        return { active: 'chat', header: { title: '对话', back: { label: '检索', onClick: () => go(searchBackPath(params)) } } };
       }
       // Same rule as the page's own header: groups have no friend page.
       return route.id.endsWith('@chatroom')
-        ? { active: 'home', header: { title: '聊天', back: { label: '首页', onClick: () => go('') } } }
-        : { active: 'home', header: { title: '聊天', back: { label: '朋友页', onClick: () => go(`friend/${route.id}`) } } };
+        ? { active: 'chat', header: { title: '对话', back: { label: '年代记', onClick: () => go('') } } }
+        : { active: 'chat', header: { title: '对话', back: { label: '档案', onClick: () => go(`friend/${route.id}`) } } };
     }
     case 'settings':
       return { active: 'settings', header: { title: '设置' } };
     default:
-      return { active: 'home', header: { title: '首页' } };
+      return { active: 'home', header: { title: '年代记' } };
   }
+}
+
+/** The last person / chat opened this session, for the 3 档案 / 4 对话 keys.
+ * Memory only: nothing about who you looked at is written to disk. */
+function lastOpened(route: Route, prev: { friend: string | null; chat: string | null }) {
+  if (route.name === 'friend' || route.name === 'yearbook') return { ...prev, friend: route.id };
+  if (route.name === 'chat') {
+    return { friend: route.id.endsWith('@chatroom') ? prev.friend : route.id, chat: route.id };
+  }
+  return prev;
 }
 
 const ONBOARDING_SEEN_KEY = 'murmur.onboarding.seen';
 
 export default function App() {
   const [route, setRoute] = useState<Route>(() => parseHash(window.location.hash));
+  const [recent, setRecent] = useState(() => lastOpened(parseHash(window.location.hash), { friend: null, chat: null }));
   const { resolved: theme, toggle: toggleTheme } = useTheme();
   const [onboarding, setOnboarding] = useState(false);
   const [qqOnboarding, setQQOnboarding] = useState(false);
@@ -124,7 +136,9 @@ export default function App() {
 
   useEffect(() => {
     const onHash = () => {
-      setRoute(parseHash(window.location.hash));
+      const next = parseHash(window.location.hash);
+      setRoute(next);
+      setRecent(prev => lastOpened(next, prev));
       // The document scrolls (not the content pane), so a new page would
       // otherwise open at the previous page's scroll offset.
       window.scrollTo(0, 0);
@@ -222,22 +236,19 @@ export default function App() {
   // Floating dev/utility controls — bottom right
   const DevControls = (
     <div style={{
-      position: 'fixed', bottom: 16, right: 16, zIndex: 9999,
-      display: 'flex', gap: 6, padding: 6,
-      background: 'var(--et-paper)', border: '0.5px solid var(--et-line-2)',
-      borderRadius: 999, boxShadow: 'var(--et-shadow-2)', fontSize: 11,
+      position: 'fixed', bottom: 'calc(var(--shell-bottom, 0px) + 12px)', right: 12, zIndex: 9999,
+      display: 'flex', gap: 4, padding: 4,
+      background: 'var(--surface-raised)', border: '1px solid var(--border-default)',
+      borderRadius: 'var(--radius-md)', boxShadow: 'var(--shadow-md)', fontSize: 11,
+      fontFamily: 'var(--font-mono)',
     }}>
       <button onClick={() => { localStorage.removeItem(ONBOARDING_SEEN_KEY); setOnboarding(true); }}
               title="重新打开首次引导"
-              style={{
-                all: 'unset', cursor: 'pointer', padding: '4px 10px', borderRadius: 999,
-                background: 'transparent', color: 'var(--et-mute)', fontWeight: 500,
-              }}>引导</button>
+              style={chipBtn}>引导</button>
       <button onClick={() => go('loading')} style={chipBtn}>加载</button>
       <button onClick={() => go('')} style={chipBtn}>首页</button>
       <button onClick={toggleTheme} style={{
-        all: 'unset', cursor: 'pointer', padding: '4px 10px', borderRadius: 999,
-        background: 'var(--et-ink)', color: 'var(--et-paper)', fontWeight: 500,
+        ...chipBtn, background: 'var(--surface-inverse)', color: 'var(--text-inverse)',
       }}>{theme === 'dark' ? '亮' : '暗'}</button>
     </div>
   );
@@ -296,7 +307,9 @@ export default function App() {
       <BatchTrackerProvider>
         <PrivacyIdentityIndex />
         {bare ? body : (
-          <AppShell active={shell.active} fallbackHeader={shell.header}>
+          <AppShell active={shell.active} fallbackHeader={shell.header}
+            profileHref={recent.friend ? `#friend/${recent.friend}` : null}
+            chatHref={recent.chat ? `#chat/${encodeURIComponent(recent.chat)}` : null}>
             {body}
             <BatchStatusPill onOpenReports={() => go('reports')} />
           </AppShell>
@@ -321,7 +334,7 @@ export default function App() {
   );
 }
 
-const chipBtn: React.CSSProperties = {
-  all: 'unset', cursor: 'pointer', padding: '4px 10px', borderRadius: 999,
-  background: 'transparent', color: 'var(--et-mute)', fontWeight: 500,
+const chipBtn: CSSProperties = {
+  all: 'unset', cursor: 'pointer', padding: '4px 9px', borderRadius: 'var(--radius-xs)',
+  background: 'transparent', color: 'var(--text-muted)', fontWeight: 500,
 };

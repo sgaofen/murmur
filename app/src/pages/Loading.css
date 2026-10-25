@@ -1,0 +1,72 @@
+/* First-run loading screen (pages/Loading.tsx) · tokens only. */
+.ld {
+  min-height: 100vh;
+  box-sizing: border-box;
+  display: flex; flex-direction: column;
+  background: var(--surface-page);
+  font-family: var(--font-sans);
+  color: var(--text-secondary);
+}
+.ld-strip {
+  flex: none;
+  height: 38px;
+  display: flex; align-items: center; gap: 22px;
+  padding: 0 16px;
+  font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.06em;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+.ld-brand { color: var(--text-primary); font-weight: 600; letter-spacing: 0.18em; }
+.ld-brand span { margin-left: 8px; font-family: var(--font-sans); font-size: 11.5px; letter-spacing: 0.1em; }
+.ld-crumb { color: var(--text-secondary); }
+.ld-crumb b {
+  margin-left: 6px;
+  font-family: var(--font-sans); font-size: 12px; font-weight: 500; letter-spacing: 0.04em;
+  color: var(--text-primary);
+}
+.ld-strip__r { margin-left: auto; display: inline-flex; align-items: center; gap: 7px; }
+
+.ld-stage {
+  flex: 1 1 auto;
+  display: flex; align-items: center; justify-content: center;
+  padding: 32px 16px;
+}
+.ld-panel { width: 100%; max-width: 560px; }
+.ld-panel .ui-label b { color: var(--text-secondary); }
+.ld-read { margin-top: 14px; display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; }
+.ld-big { font-size: clamp(88px, 18vw, 148px); letter-spacing: -0.04em; }
+.ld-big small { font-family: var(--font-display); font-size: 0.3em; font-weight: 200; letter-spacing: 0; margin-left: 8px; }
+.ld-meta { padding-bottom: 14px; text-align: right; }
+.ld-segs { margin-top: 22px; display: flex; gap: 3px; }
+.ld-segs i { flex: 1 1 0; height: 14px; display: block; background: var(--heat-1); transition: background-color 0.2s linear; }
+.ld-segs i.on { background: var(--signal); }
+.ld-scale {
+  margin-top: 6px;
+  display: flex; justify-content: space-between;
+  font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.1em; color: var(--text-faint);
+}
+.ld-line {
+  margin: 26px 0 0;
+  font-size: 15px; font-weight: 500; line-height: 1.6;
+  color: var(--text-primary);
+  animation: ld-in 0.4s var(--ease-out);
+}
+@keyframes ld-in { from { opacity: 0; } }
+.ld-local {
+  margin-top: 22px; padding-top: 12px;
+  display: flex; align-items: baseline; gap: 12px;
+  border-top: 1px solid var(--border-subtle);
+  font-size: 12.5px; line-height: 1.7; color: var(--text-muted);
+}
+.ld-local .ui-label { flex: none; }
+.ld-local > span:last-child { text-wrap: pretty; }
+.ld-foot {
+  flex: none;
+  padding: 0 16px 18px;
+  font-family: var(--font-sans); font-size: 11.5px; color: var(--text-faint);
+  text-align: center;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ld-line { animation: none; }
+  .ld-segs i { transition: none; }
+}

@@ -49,19 +49,19 @@ export function ErrorState({
             {tone === 'warning' ? <IconWarning size={22} /> : <IconAlertCircle size={22} />}
           </div>
           <div className="ui-error__heading">
-            {code && <div className="ui-error__code">错误码 <span>{code}</span></div>}
+            {code && <div className="ui-error__code">ERR · 错误码 <span>{code}</span></div>}
             <div className="ui-error__title">{title}</div>
           </div>
         </div>
         {reason && (
           <section className="ui-error__section">
-            <div className="ui-error__label">原因</div>
+            <div className="ui-error__label">CAUSE<b>原因</b></div>
             <div className="ui-error__text">{reason}</div>
           </section>
         )}
         {fixes != null && (fixList ? fixList.length > 0 : true) && (
           <section className="ui-error__section">
-            <div className="ui-error__label">怎么办</div>
+            <div className="ui-error__label">FIX<b>怎么办</b></div>
             {fixList ? (
               <ol className="ui-error__fixes">
                 {fixList.map((f, i) => <li key={isValidElement(f) && f.key != null ? f.key : i}>{f}</li>)}

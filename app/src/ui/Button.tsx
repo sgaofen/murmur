@@ -27,20 +27,24 @@ export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement>, Bu
   icon?: ReactNode;
   /** Icon after the label. */
   iconAfter?: ReactNode;
+  /** Keycap glyph drawn in a small box before the label (e.g. "↵", "R", "⌘K") —
+   * the instrument "function key" look. Purely visual; wire the shortcut yourself. */
+  kbd?: ReactNode;
 }
 
 export function Button({
   variant = 'secondary', size = 'md', block, pill, loading = false,
-  icon, iconAfter, className, children, disabled, type = 'button', ...rest
+  icon, iconAfter, kbd, className, children, disabled, type = 'button', ...rest
 }: ButtonProps) {
   return (
     <button
       type={type}
-      className={buttonClass({ variant, size, block, pill, className: cx(loading && 'ui-btn--loading', className) })}
+      className={buttonClass({ variant, size, block, pill, className: cx(loading && 'ui-btn--loading', kbd != null && 'ui-btn--kbd', className) })}
       disabled={disabled || loading}
       aria-busy={loading || undefined}
       {...rest}
     >
+      {kbd != null && <kbd className="ui-kbd" aria-hidden="true">{kbd}</kbd>}
       {loading ? <span className="ui-spinner" aria-hidden="true" /> : icon}
       {children != null && <span className="ui-btn__label">{children}</span>}
       {!loading && iconAfter}

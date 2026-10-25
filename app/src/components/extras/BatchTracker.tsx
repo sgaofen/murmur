@@ -4,6 +4,7 @@ import { getBatchStatus, startBatch as startBatchApi } from '../../data/api';
 import type { BatchStartReq, BatchStatus } from '../../data/api';
 import { maskText } from '../../utils/privacy';
 import { usePrivacy } from '../../utils/usePrivacy';
+import './BatchTracker.css';
 
 const STORAGE_KEY = 'murmur.batch.current';
 
@@ -172,46 +173,19 @@ export function BatchStatusPill({ onOpenReports }: { onOpenReports: () => void }
     : `完成 · 朋友 ${friendDone} · 关系 ${pairDone}`;
 
   return (
-    <div style={{
-      // Bottom-left of the content area, clear of the app shell's nav.
-      position: 'fixed', left: 'calc(var(--shell-left, 0px) + 18px)', bottom: 18, zIndex: 9998,
-      width: 300, padding: '11px 12px',
-      background: 'var(--et-paper)',
-      border: '0.5px solid var(--et-line-2)',
-      borderRadius: 10,
-      boxShadow: 'var(--et-shadow-3)',
-      color: 'var(--et-ink)',
-    }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        <button onClick={onOpenReports} style={{
-          all: 'unset', cursor: 'pointer', flex: 1, minWidth: 0,
-        }}>
-          <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
-            <span style={{ fontSize: 12.5, fontWeight: 700, color: status.running ? 'var(--et-orange-2)' : 'var(--et-ink)' }}>
-              {status.running ? '正在分析' : '分析完成'}
-            </span>
-            <span className="et-num" style={{ fontSize: 11, color: 'var(--et-mute)' }}>{pct}%</span>
-          </div>
-          <div style={{ height: 4, marginTop: 6, background: 'var(--surface-pressed)', borderRadius: 999, overflow: 'hidden' }}>
-            <div style={{
-              width: `${pct}%`, height: '100%', borderRadius: 999,
-              background: status.running ? 'var(--accent)' : 'var(--success-solid)',
-              transition: 'width .25s ease',
-            }} />
-          </div>
-          <div style={{ marginTop: 5, fontSize: 11, color: 'var(--et-mute)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {maskText(title)} · {maskText(sub)}
-          </div>
-        </button>
-        {!status.running && (
-          <button onClick={clearBatch} title="清除完成状态" style={{
-            all: 'unset', cursor: 'pointer',
-            width: 24, height: 24, borderRadius: 7,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            color: 'var(--et-mute)', border: '0.5px solid var(--et-line-2)',
-          }}>×</button>
-        )}
-      </div>
+    <div className={`bpill${status.running ? ' is-run' : ''}`}>
+      <button type="button" className="bpill__main" onClick={onOpenReports} title="打开 AI 关系档案">
+        <span className="bpill__top">
+          <i className={`ui-led${status.running ? ' is-pulse' : ''}`} aria-hidden="true" />
+          <span className="bpill__state">{status.running ? '正在分析' : '分析完成'}</span>
+          <span className="bpill__pct">{pct}%</span>
+        </span>
+        <span className="bpill__bar" aria-hidden="true"><i style={{ width: `${pct}%` }} /></span>
+        <span className="bpill__sub">{maskText(title)} · {maskText(sub)}</span>
+      </button>
+      {!status.running && (
+        <button type="button" className="ui-icon-btn bpill__x" onClick={clearBatch} title="清除完成状态" aria-label="清除完成状态">×</button>
+      )}
     </div>
   );
 }

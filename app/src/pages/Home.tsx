@@ -1,11 +1,19 @@
-import { useEffect, useRef, useState } from 'react';
+/* 年代记 (#/) — the instrument's front panel. Six numbered modules on a 1px
+ * grid, all read from the local backend:
+ *
+ *   01 联系人   /api/friends (people / groups / message sums) + /api/home-summary
+ *   02 月度热度  /api/home-summary heat — the last 12 months, % of the peak
+ *   03 常聊     top 8 private chats by message count
+ *   04 名录     every chat, filterable (私聊 / 群聊) and searchable
+ *   05 标签     the backend's automatic labels (count + recency), as a distribution
+ *   06 数据源   实时同步, 更新数据, 密钥, 后台任务
+ *
+ * Nothing on this page is estimated or invented: where the backend has no
+ * figure (weekly sparklines, reply ratios, tiers) the module shows a figure
+ * it does have instead. Styles: ./Home.css. */
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { Avatar } from '../components/Avatar';
-import { FriendCard } from '../components/FriendCard';
-import { Postmark } from '../components/Postmark';
-import { Ribbon } from '../components/Ribbon';
-import { Sparkline } from '../components/Sparkline';
-import { APP_VERSION, ApiError, errorCode, getAllFriends, getDiagBundle, getHomeSummary, getLogTail, getTauriLogTail, refreshData } from '../data/api';
+import { API_BASE, APP_VERSION, ApiError, errorCode, getAllFriends, getDiagBundle, getHomeSummary, getLogTail, getTauriLogTail, refreshData } from '../data/api';
 import { lookupError } from '../data/errorCatalog';
 import type { LogTailResponse } from '../data/api';
 import type { Friend, HomeSummary } from '../data/types';
@@ -15,7 +23,8 @@ import { displayName, maskText } from '../utils/privacy';
 import { redactDiagnostics } from '../utils/diagRedact';
 import { usePrivacy } from '../utils/usePrivacy';
 import { LiveSyncToggle } from '../components/LiveSyncToggle';
-import { Button, EmptyState, ErrorState, SegmentedControl, Skeleton, SkeletonText, cx } from '../ui';
+import { clockTime, pollLiveSyncNow, useLiveSync } from '../utils/liveSync';
+import { Button, EmptyState, ErrorState, Module, SegmentedControl, Skeleton, cx } from '../ui';
 import { IconClose, IconInbox, IconKey, IconRefresh, IconSearch } from '../ui/icons';
 import { PageHeader } from '../shell/PageHeader';
 import './Home.css';
@@ -27,197 +36,508 @@ interface Props {
   onOpenQQ?: () => void;
 }
 
-type Tab = 'private' | 'group' | 'time';
+type Tab = 'private' | 'group';
 
-function HomeChromeBar({ onRefresh, refreshing, refreshMsg, onExtractKey, onToggleTaskCenter, taskCenterActive, onLiveSynced }: {
-  onRefresh: () => void; refreshing: boolean; refreshMsg: string; onExtractKey: () => void;
-  onToggleTaskCenter: () => void; taskCenterActive: boolean; onLiveSynced: () => void;
+/** Fixed thousands separators ("418,906") whatever the OS locale. */
+function fmt(n: number): string {
+  return Math.round(n).toLocaleString('en-US');
+}
+
+function pct(part: number, whole: number, digits = 1): string {
+  if (!whole) return '0.0';
+  return ((part / whole) * 100).toFixed(digits);
+}
+
+/** "3月" → "03" (the backend sends short month labels without the year). */
+function monthCode(label: string): string {
+  const m = /^(\d{1,2})/.exec(label);
+  return m ? m[1].padStart(2, '0') : label;
+}
+
+function sumCounts(list: Friend[]): number {
+  let s = 0;
+  for (const f of list) s += f.count;
+  return s;
+}
+
+/** The backend's automatic labels (cli/etcli.py `_quick_label`), most active
+ * first. Unknown labels are appended in the order they appear. */
+const TAG_ORDER = ['话痨型', '正在升温', '老朋友', '最近常聊', '熟人', '私聊', '近期断联', '久未联系', '—'];
+const TAG_RULE: Record<string, string> = {
+  话痨型: '消息超过 2,000 条，两周内聊过',
+  正在升温: '消息超过 500 条，三天内聊过',
+  老朋友: '消息超过 1,500 条，一个月内聊过',
+  最近常聊: '一周内聊过',
+  熟人: '消息超过 1,000 条',
+  私聊: '其余的私聊',
+  近期断联: '超过 60 天没聊',
+  久未联系: '超过一年没聊',
+  '—': '没有时间记录',
+};
+
+const INDEX_PAGE = 300;
+const IS_MAC = typeof navigator !== 'undefined' && navigator.userAgent.toLowerCase().includes('mac');
+/** "127.0.0.1:9100" — where the boot probe is knocking. */
+const BACKEND_HOST = API_BASE.replace(/^https?:\/\//, '').replace(/\/+$/, '');
+
+// ———————————————————————— 01 联系人 ————————————————————————
+
+function ContactsModule({ summary, people, groups, totalMsgs, stale }: {
+  summary: HomeSummary;
+  people: number | null;
+  groups: number | null;
+  totalMsgs: number | null;
+  stale: number | null;
 }) {
-  // Logo, account switcher and the 年度 / 关系网 / 报告 / 表格 links moved to
-  // the app shell's left nav; only Home's own actions stay here.
+  const dash = <span className="home-dash">—</span>;
   return (
-    <PageHeader title="首页" subtitle="年代记 · 你和朋友们的这些年">
-      {refreshMsg && (
-        <span className="home-refresh-msg" role="status" title={maskText(refreshMsg)}>{maskText(refreshMsg)}</span>
-      )}
-      <TaskCenterBell onClick={onToggleTaskCenter} active={taskCenterActive} />
-      <Button variant="ghost" size="sm" className="home-action" icon={<IconKey size={14} />} onClick={onExtractKey}
-        title="重新读取微信密钥，按引导操作" aria-label="密钥">
-        密钥
-      </Button>
-      <LiveSyncToggle onSynced={onLiveSynced} disabled={refreshing} />
-      <Button variant="ghost" size="sm" className="home-action" icon={<IconRefresh size={14} />} onClick={onRefresh} loading={refreshing}
-        aria-label={refreshing ? '正在解密最新数据' : '更新数据'}>
-        {refreshing ? '正在解密最新数据…' : '更新数据'}
-      </Button>
-    </PageHeader>
-  );
-}
-
-function HeroFrame({ summary, onOpen }: { summary: HomeSummary; onOpen: (id: string) => void }) {
-  void usePrivacy();
-  return (
-    <section className="home-hero et-paper-grain" aria-label="年代记">
-      <div className="home-hero__frame" aria-hidden="true" />
-      <div className="home-hero__postmark" aria-hidden="true">
-        <Postmark size={86} />
+    <Module id="01" title="联系人" right="CONTACTS" className="home-m01">
+      <div className="home-m01__main">
+        <div className="ui-label">PEOPLE<b>聊过天的人</b></div>
+        <div className="ui-big home-m01__big">{people == null ? <Skeleton width={150} height={70} /> : fmt(people)}</div>
+        <div className="home-m01__sub">
+          深聊 ≥500 条 <span className="ui-num">{fmt(summary.closeFriends)}</span>
+          <span className="home-sep">·</span>
+          超过一年未联系 <span className="ui-num">{stale == null ? '—' : fmt(stale)}</span>
+        </div>
       </div>
-      <div className="home-hero__ribbon">
-        <Ribbon color="var(--accent-solid)" tone="solid">2026 · 年代记</Ribbon>
-        <span className="et-meta">Murmur · Vol. 01</span>
-      </div>
-      <h2 className="home-hero__title">
-        这些年，时间带你遇见了 <em className="et-num">{summary.totalContacts.toLocaleString()}</em> 个人，<br />
-        其中 <em className="et-num">{summary.closeFriends.toLocaleString()}</em> 位朋友，陪你走过了{' '}
-        <em className="et-num">{summary.daysSinceFirst.toLocaleString()}</em> 天。
-      </h2>
-      <p className="home-hero__lede">翻一翻今年最常聊的人，这是 Murmur 写给你的一封小信。</p>
-      {summary.topFriends.length > 0 && (
-        <ol className="home-top" aria-label="今年最常聊的人">
-          {summary.topFriends.map((f, i) => (
-            <li key={f.id}>
-              <button type="button" className={cx('home-top__item', i === 0 && 'is-first')} onClick={() => onOpen(f.id)}>
-                <span className="home-top__rank">No.{i + 1}</span>
-                <Avatar friend={f} size={i === 0 ? 64 : 52} ring={i === 0} />
-                <span className="home-top__text">
-                  <span className="home-top__name">{displayName(f.id, f.name)}</span>
-                  <span className="home-top__count et-num">
-                    {f.count.toLocaleString()}<span className="home-top__unit">条</span>
-                  </span>
-                  <span className="home-top__last">{f.last}</span>
-                </span>
-              </button>
-            </li>
-          ))}
-        </ol>
-      )}
-    </section>
-  );
-}
-
-function Timeline({ summary }: { summary: HomeSummary }) {
-  return (
-    <section className="home-card home-timeline">
-      <div className="home-timeline__head">
+      <div className="home-ro">
         <div>
-          <div className="et-eyebrow">时光线 · 一年里你和谁说话最多</div>
-          <div className="home-timeline__title">{summary.heat.peakLabel}最响，{summary.heat.troughLabel}最静。</div>
+          <div className="ui-label">GROUPS<b>群聊</b></div>
+          <div className="home-ro__v">{groups == null ? dash : fmt(groups)}</div>
         </div>
-        <div className="home-timeline__stats">
-          <span className="et-meta">高峰 · {summary.heat.peakLabel} <span className="et-num home-timeline__peak">{summary.heat.peakCount.toLocaleString()}</span> 条</span>
-          <span className="et-meta">沉默 · {summary.heat.troughLabel} <span className="et-num">{summary.heat.troughCount.toLocaleString()}</span> 条</span>
+        <div>
+          <div className="ui-label">MESSAGES<b>消息</b></div>
+          <div className="home-ro__v">{totalMsgs == null ? dash : fmt(totalMsgs)}</div>
+        </div>
+        <div>
+          <div className="ui-label">SPAN<b>跨度</b></div>
+          <div className="home-ro__v">{fmt(summary.daysSinceFirst)}<small> D</small></div>
+        </div>
+        <div>
+          <div className="ui-label">SESSIONS<b>会话</b></div>
+          <div className="home-ro__v">{fmt(summary.totalContacts)}</div>
         </div>
       </div>
-      <Sparkline data={summary.heat.values} months={summary.heat.months} w={870} h={88} />
-    </section>
+    </Module>
   );
 }
 
-function FilterBar({
-  tab, setTab, search, setSearch, count,
-}: {
-  tab: Tab; setTab: (s: Tab) => void;
-  search: string; setSearch: (s: string) => void;
-  count: number;
-}) {
-  return (
-    <div className="home-filter">
-      <div className="home-filter__left">
-        <SegmentedControl
-          label="朋友类型"
-          value={tab === 'group' ? 'group' : 'private'}
-          onChange={(v) => setTab(v as Tab)}
-          options={[{ value: 'private', label: '私聊朋友' }, { value: 'group', label: '群聊' }]}
-        />
-        <span className="et-meta">共 {count.toLocaleString()} 个 · 按总消息数排序</span>
-      </div>
-      <label className="home-search">
-        <IconSearch size={14} />
-        <input
-          type="search"
-          placeholder="搜索朋友（姓名 / 微信号 / 备注）"
-          aria-label="搜索朋友"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-        />
-        {search && (
-          <button type="button" className="ui-icon-btn" aria-label="清除搜索" title="清除搜索" onClick={() => setSearch('')}>
-            <IconClose size={12} />
-          </button>
-        )}
-      </label>
-    </div>
-  );
-}
+// ———————————————————————— 02 月度热度 ————————————————————————
 
-/** Placeholder for one FriendCard while the list loads. */
-function FriendCardSkeleton() {
-  return (
-    <div className="home-skel-card" aria-hidden="true">
-      <div className="home-skel-card__row">
-        <Skeleton width={42} circle />
-        <div className="home-skel-card__lines">
-          <Skeleton width="58%" height={15} />
-          <Skeleton width="40%" height={11} />
-        </div>
-      </div>
-      <div className="home-skel-card__row">
-        <div className="home-skel-card__lines">
-          <Skeleton width={96} height={22} />
-          <Skeleton width="52%" height={11} />
-        </div>
-        <Skeleton width={56} height={20} radius={999} />
-      </div>
-    </div>
-  );
-}
+const SEQ_SEGMENTS = 20;
 
-function FriendGridSkeleton({ n = 8 }: { n?: number }) {
+function HeatModule({ summary }: { summary: HomeSummary }) {
+  const { heat } = summary;
+  const values = heat.values.length ? heat.values : new Array(12).fill(0);
+  const labels = heat.months.length === values.length ? heat.months : values.map((_, i) => `${i + 1}月`);
+  const hasData = heat.peakCount > 0;
+  const peakIdx = hasData ? values.indexOf(Math.max(...values)) : -1;
+  const lowIdx = hasData ? values.indexOf(Math.min(...values)) : -1;
   return (
-    <div className="home-grid" aria-busy="true" aria-label="正在加载朋友列表">
-      {Array.from({ length: n }, (_, i) => <FriendCardSkeleton key={i} />)}
-    </div>
-  );
-}
-
-/** The whole page while the local backend starts (cold launch can take a while). */
-function HomeSkeleton({ waitSec }: { waitSec: number }) {
-  return (
-    <div className="home-page et-root" aria-busy="true">
-      <PageHeader title="首页" subtitle="年代记 · 你和朋友们的这些年" />
-      <div className="home-boot" role="status">
-        <span className="ui-spinner" aria-hidden="true" />
-        <span>正在启动本地服务…</span>
-        <span className="home-boot__hint">
-          {waitSec >= 8
-            ? `首次打开时，本地后端正在启动；Windows 杀毒/Defender 扫描 etcli.exe 时可能要等 10-60 秒。已等待 ${waitSec} 秒`
-            : '正在连接 127.0.0.1:9100'}
-        </span>
-      </div>
-      <section className="home-hero home-hero--skeleton" aria-hidden="true">
-        <Skeleton width={150} height={26} radius={4} />
-        <Skeleton width="72%" height={34} />
-        <Skeleton width="54%" height={34} />
-        <Skeleton width="40%" height={13} />
-        <div className="home-top">
-          {Array.from({ length: 5 }, (_, i) => (
-            <div key={i} className="home-top__skel">
-              <Skeleton width={i === 0 ? 64 : 52} circle />
-              <Skeleton width="60%" height={14} />
-              <Skeleton width="44%" height={16} />
+    <Module
+      id="02" title="月度热度" en="LAST 12 MONTHS · UNIT % OF PEAK" crop="bottom" className="home-m02"
+      right={(
+        <>
+          <span className="home-legend" aria-hidden="true">
+            <i style={{ background: 'var(--heat-1)' }} /><i style={{ background: 'var(--heat-3)' }} />
+            <i style={{ background: 'var(--heat-4)' }} /><i style={{ background: 'var(--signal)' }} />
+          </span>
+          <span className="home-hide-md">0 — 100%</span>
+          {hasData && (
+            <>
+              <span className="home-hd-strong">PEAK {monthCode(heat.peakLabel)} · {fmt(heat.peakCount)}</span>
+              <span className="home-hide-md">LOW {monthCode(heat.troughLabel)} · {fmt(heat.troughCount)}</span>
+            </>
+          )}
+        </>
+      )}
+    >
+      <div className="home-seq" role="img"
+        aria-label={hasData
+          ? `最近 12 个月的消息量，${heat.peakLabel}最多（${fmt(heat.peakCount)} 条），${heat.troughLabel}最少（${fmt(heat.troughCount)} 条）`
+          : '最近 12 个月还没有消息'}>
+        {values.map((v, i) => {
+          const lit = v > 0 ? Math.max(1, Math.round(v * SEQ_SEGMENTS)) : 0;
+          const isPeak = i === peakIdx;
+          const isLow = i === lowIdx && lowIdx !== peakIdx;
+          const yearTurn = i > 0 && monthCode(labels[i]) === '01';
+          return (
+            <div key={i} className={cx('home-seq__col', isPeak && 'is-peak', isLow && 'is-low', yearTurn && 'is-turn')}>
+              <span className="home-seq__read">{Math.round(v * 100)}</span>
+              <span className="home-seq__meter" aria-hidden="true">
+                {Array.from({ length: SEQ_SEGMENTS }, (_, s) => (
+                  <i key={s} className={cx(s < lit && 'on', isPeak && s < lit && s >= lit - 3 && 'tip')} />
+                ))}
+              </span>
+              <span className="home-seq__m">{monthCode(labels[i])}</span>
+              <span className="home-seq__tag">{isPeak ? 'PEAK' : isLow ? 'LOW' : ''}</span>
             </div>
-          ))}
-        </div>
-      </section>
-      <section className="home-card home-timeline" aria-hidden="true">
-        <SkeletonText lines={2} lastLineWidth="36%" />
-        <div className="ui-mt-4"><Skeleton height={70} radius={6} /></div>
-      </section>
-      <div className="home-filter" aria-hidden="true">
-        <Skeleton width={150} height={30} radius={999} />
-        <Skeleton width={240} height={34} radius={999} />
+          );
+        })}
       </div>
-      <FriendGridSkeleton />
+    </Module>
+  );
+}
+
+// ———————————————————————— 03 常聊 ————————————————————————
+
+const VU_SEGMENTS = 30;
+
+function TopModule({ top, privateTotal, onOpen, loading }: {
+  top: Friend[]; privateTotal: number; onOpen: (id: string) => void; loading: boolean;
+}) {
+  const max = top[0]?.count || 1;
+  const topSum = sumCounts(top);
+  const share = pct(topSum, privateTotal);
+  return (
+    <Module id="03" title="常聊" right={`TOP ${String(Math.max(top.length, loading ? 8 : 0)).padStart(2, '0')} · BY MSG`} className="home-m03">
+      <div className="home-vu">
+        {loading && Array.from({ length: 8 }, (_, i) => (
+          <div key={i} className="home-vu__row is-skel" aria-hidden="true">
+            <span className="home-vu__top"><Skeleton width="46%" height={11} /></span>
+            <Skeleton width="80%" height={6} />
+          </div>
+        ))}
+        {!loading && top.length === 0 && <div className="home-note">还没有私聊记录。</div>}
+        {!loading && top.map((f, i) => {
+          const n = Math.max(1, Math.round((f.count / max) * VU_SEGMENTS));
+          return (
+            <button key={f.id} type="button" className="home-vu__row" onClick={() => onOpen(f.id)}
+              title={`打开 ${displayName(f.id, f.name)} 的档案`}>
+              <span className="home-vu__top">
+                <span className="home-vu__rk">{String(i + 1).padStart(2, '0')}</span>
+                <span className="home-vu__name">{displayName(f.id, f.name)}</span>
+                {f.tag && f.tag !== '—' && <span className="home-vu__tag">{f.tag}</span>}
+                <span className="home-vu__val">{fmt(f.count)}</span>
+              </span>
+              <span className="home-vu__seg" aria-hidden="true">
+                {Array.from({ length: VU_SEGMENTS }, (_, s) => (
+                  <i key={s} className={cx(s < n && (i === 0 && s >= n - 4 ? 'pk' : 'on'))} />
+                ))}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+      {!loading && top.length > 0 && (
+        <div className="home-m03__foot">
+          <div className="home-m03__share">
+            <span className="ui-label">SHARE<b>前 {top.length} 位占私聊消息</b></span>
+            <span className="ui-num">{share}%</span>
+          </div>
+          <div className="home-bar" aria-hidden="true">
+            <i style={{ width: `${share}%` }} /><i />
+          </div>
+        </div>
+      )}
+    </Module>
+  );
+}
+
+// ———————————————————————— 04 名录 ————————————————————————
+
+function IndexModule({
+  tab, setTab, search, setSearch, rows, tabTotal, tabMax, counts, loading, error, onRetry, onOpen,
+}: {
+  tab: Tab; setTab: (t: Tab) => void;
+  search: string; setSearch: (s: string) => void;
+  rows: Friend[] | null;
+  /** Messages in the whole tab (私聊 or 群聊) — the share column's 100%. */
+  tabTotal: number;
+  /** Largest chat in the tab — the bar column's full length. */
+  tabMax: number;
+  counts: { private: number | null; group: number | null };
+  loading: boolean;
+  error: unknown;
+  onRetry: () => void;
+  onOpen: (id: string) => void;
+}) {
+  const [limit, setLimit] = useState(INDEX_PAGE);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  // New filter / query: back to the top, first page only.
+  useEffect(() => {
+    setLimit(INDEX_PAGE);
+    scrollRef.current?.scrollTo({ top: 0 });
+  }, [tab, search]);
+
+  const label = (n: number | null) => (n == null ? '—' : fmt(n));
+  let body: ReactNode;
+  if (error && !rows) {
+    const code = errorCode(error);
+    const entry = lookupError(code);
+    const raw = error instanceof Error ? error.message : String(error);
+    body = (
+      <ErrorState
+        title={entry?.title ?? '名录没能加载'}
+        code={code ?? undefined}
+        reason={entry?.reason ?? '读取聊天列表时本地服务返回了错误。'}
+        fixes={entry ? [entry.fix] : ['点「重试」再读一次', '还不行就在 06 数据源里点「更新数据」']}
+        onRetry={onRetry}
+        details={raw ? <pre>{maskText(redactDiagnostics(raw))}</pre> : undefined}
+      />
+    );
+  } else if (!rows) {
+    body = (
+      <div className="home-idx__skel" aria-busy="true" aria-label="正在加载名录">
+        {Array.from({ length: 12 }, (_, i) => (
+          <div key={i}><Skeleton width={18} height={10} /><Skeleton width={`${30 + ((i * 37) % 40)}%`} height={10} /><Skeleton width={56} height={10} /></div>
+        ))}
+      </div>
+    );
+  } else if (rows.length === 0) {
+    body = (
+      <EmptyState
+        icon={search ? <IconSearch size={22} /> : <IconInbox size={22} />}
+        label={search ? 'NO MATCH' : 'EMPTY'}
+        title={search ? `没找到「${maskText(search)}」` : tab === 'group' ? '还没有群聊记录' : '还没有私聊记录'}
+        description={search
+          ? '试试备注、昵称或微信号里的一部分。'
+          : '解密后的数据里还没有这类聊天。聊过天之后在 06 数据源里点「更新数据」再看。'}
+        actions={search ? <Button size="sm" onClick={() => setSearch('')}>清除搜索</Button> : undefined}
+      />
+    );
+  } else {
+    const shown = rows.slice(0, limit);
+    const more = rows.length - shown.length;
+    body = (
+      <table className={cx('home-idx', loading && 'is-refreshing')} aria-busy={loading || undefined}>
+        <colgroup>
+          <col className="home-idx__c-rk" /><col /><col className="home-idx__c-tag" />
+          <col className="home-idx__c-n" /><col className="home-idx__c-share" /><col className="home-idx__c-last" />
+        </colgroup>
+        <thead>
+          <tr>
+            <th scope="col">#</th>
+            <th scope="col">名字</th>
+            <th scope="col" className="home-idx__tag">标签</th>
+            <th scope="col" className="r">消息<span className="home-idx__sort" aria-label="（按消息数从多到少）">↓</span></th>
+            <th scope="col" className="home-idx__share">占{tab === 'group' ? '群聊' : '私聊'} %</th>
+            <th scope="col" className="home-idx__last">最近</th>
+          </tr>
+        </thead>
+        <tbody>
+          {shown.map((f, i) => {
+            const share = tabTotal ? (f.count / tabTotal) * 100 : 0;
+            const bar = tabMax ? (f.count / tabMax) * 100 : 0;
+            return (
+              <tr key={f.id} onClick={() => onOpen(f.id)}>
+                <td className="home-idx__rk">{String(i + 1).padStart(2, '0')}</td>
+                <td className="home-idx__name">
+                  <button type="button" onClick={(e) => { e.stopPropagation(); onOpen(f.id); }}>
+                    {displayName(f.id, f.name)}
+                  </button>
+                </td>
+                <td className="home-idx__tag">{f.tag && f.tag !== '—' ? f.tag : ''}</td>
+                <td className="r home-idx__n">{fmt(f.count)}</td>
+                <td className="home-idx__share">
+                  <span className="home-idx__bar" aria-hidden="true">
+                    <i style={{ width: `${Math.min(100, Math.max(bar, bar > 0 ? 2 : 0))}%` }} />
+                  </span>
+                  <span>{share.toFixed(share >= 10 ? 1 : 2)}</span>
+                </td>
+                <td className="home-idx__last">{f.last}</td>
+              </tr>
+            );
+          })}
+          {more > 0 && (
+            <tr className="home-idx__more">
+              <td />
+              <td colSpan={5}>
+                <button type="button" onClick={() => setLimit(l => l + INDEX_PAGE)}>
+                  +{fmt(more)} MORE<span>显示后 {fmt(Math.min(more, INDEX_PAGE))} 个</span>
+                </button>
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+    );
+  }
+
+  return (
+    <Module
+      id="04" title="名录" en="INDEX" className="home-m04" bodyClassName="home-m04__body"
+      right={(
+        <>
+          <SegmentedControl
+            label="聊天类型"
+            size="sm"
+            value={tab}
+            onChange={setTab}
+            options={[
+              { value: 'private', label: <>私聊 <span className="ui-num">{label(counts.private)}</span></> , title: '私聊' },
+              { value: 'group', label: <>群聊 <span className="ui-num">{label(counts.group)}</span></>, title: '群聊' },
+            ]}
+          />
+          <label className="ui-field home-find">
+            <IconSearch size={13} />
+            <input
+              type="search"
+              placeholder="名字 / 微信号 / 备注"
+              aria-label="在名录里搜索"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+            {search && (
+              <button type="button" className="ui-icon-btn home-find__clear" aria-label="清除搜索" title="清除搜索" onClick={() => setSearch('')}>
+                <IconClose size={11} />
+              </button>
+            )}
+          </label>
+        </>
+      )}
+    >
+      <div className="home-m04__scroll" ref={scrollRef}>{body}</div>
+    </Module>
+  );
+}
+
+// ———————————————————————— 05 标签 ————————————————————————
+
+function LabelsModule({ people }: { people: Friend[] | null }) {
+  const rows = useMemo(() => {
+    if (!people) return null;
+    const counts = new Map<string, number>();
+    for (const f of people) {
+      const t = f.tag || '—';
+      counts.set(t, (counts.get(t) ?? 0) + 1);
+    }
+    const order = [...TAG_ORDER, ...[...counts.keys()].filter(t => !TAG_ORDER.includes(t))];
+    return order.filter(t => counts.has(t)).map(t => ({ tag: t, n: counts.get(t) as number }));
+  }, [people]);
+  const total = people?.length ?? 0;
+  const max = rows ? Math.max(1, ...rows.map(r => r.n)) : 1;
+  return (
+    <Module id="05" title="标签" en="AUTO LABEL" right={people ? `PRIVATE · ${fmt(total)}` : undefined} className="home-m05">
+      <div className="home-lab">
+        {!rows && Array.from({ length: 6 }, (_, i) => (
+          <div key={i} className="home-lab__row" aria-hidden="true"><Skeleton width={48} height={10} /><Skeleton height={6} /><Skeleton width={40} height={10} /></div>
+        ))}
+        {rows && rows.length === 0 && <div className="home-note">还没有私聊记录。</div>}
+        {rows && rows.map(r => (
+          <div key={r.tag} className="home-lab__row" title={TAG_RULE[r.tag] ?? '后端自动打的标签'}>
+            <span className="home-lab__name">{r.tag === '—' ? '无时间' : r.tag}</span>
+            <span className="home-lab__bar" aria-hidden="true"><i style={{ width: `${(r.n / max) * 100}%` }} /></span>
+            <span className="home-lab__n">{fmt(r.n)}</span>
+            <span className="home-lab__p">{pct(r.n, total)}%</span>
+          </div>
+        ))}
+      </div>
+    </Module>
+  );
+}
+
+// ———————————————————————— 06 数据源 ————————————————————————
+
+function SourceModule({ refreshing, refreshLog, onRefresh, onExtractKey, onToggleTasks, tasksOpen, onLiveSynced }: {
+  refreshing: boolean;
+  refreshLog: { at: Date; ok: boolean; text: string } | null;
+  onRefresh: () => void;
+  onExtractKey: () => void;
+  onToggleTasks: () => void;
+  tasksOpen: boolean;
+  onLiveSynced: () => void;
+}) {
+  const { status } = useLiveSync();
+  const syncOn = !!status?.enabled;
+  const stamp = (d: Date) => d.toLocaleTimeString('zh-CN', { hour12: false });
+  return (
+    <Module id="06" title="数据源" en="SOURCE" right="LOCAL ONLY" className="home-m06">
+      <div className="home-m06__sync">
+        <LiveSyncToggle onSynced={onLiveSynced} disabled={refreshing} />
+        {status && <span className="home-m06__iv">{syncOn ? `EVERY ${status.interval} S` : 'MANUAL'}</span>}
+      </div>
+      <div className="home-ro">
+        <div>
+          <div className="ui-label">LAST SYNC<b>最后同步</b></div>
+          <div className="home-ro__v home-ro__v--sm">{syncOn ? clockTime(status?.last_sync_ts ?? null) : '—'}</div>
+        </div>
+        <div>
+          <div className="ui-label">NEW<b>本次新增</b></div>
+          <div className="home-ro__v home-ro__v--sm">{syncOn && status ? fmt(status.total_new_messages) : '—'}</div>
+        </div>
+      </div>
+      <div className="home-m06__keys">
+        <Button size="sm" kbd={<IconRefresh size={11} />} onClick={onRefresh} loading={refreshing}
+          title="重新解密一遍微信数据库，读进最新的消息"
+          aria-label={refreshing ? '正在解密最新数据' : '更新数据'}>
+          {refreshing ? '解密中…' : '更新数据'}
+        </Button>
+        <Button size="sm" kbd={<IconKey size={11} />} onClick={onExtractKey} title="重新读取微信密钥，按引导操作">
+          密钥
+        </Button>
+        <TaskCenterBell onClick={onToggleTasks} active={tasksOpen} />
+      </div>
+      <div className="home-m06__log" role="status" aria-live="polite">
+        {refreshing ? (
+          <><span className="home-m06__t">{stamp(new Date())}</span><span className="home-m06__w">RUN</span><span>正在解密最新数据…</span></>
+        ) : refreshLog ? (
+          <>
+            <span className="home-m06__t">{stamp(refreshLog.at)}</span>
+            <span className={refreshLog.ok ? 'home-m06__ok' : 'home-m06__err'}>{refreshLog.ok ? 'OK' : 'ERR'}</span>
+            <span title={maskText(refreshLog.text)}>{maskText(refreshLog.text)}</span>
+          </>
+        ) : (
+          <><span className="home-m06__t">{APP_VERSION.split(' ')[0]}</span><span>全部数据只在这台电脑上，不会上传</span></>
+        )}
+      </div>
+    </Module>
+  );
+}
+
+// ———————————————————————— loading ————————————————————————
+
+/** The whole panel while the local backend starts (cold launch can take a while). */
+function HomeSkeleton({ waitSec }: { waitSec: number }) {
+  const segs = 30;
+  return (
+    <div className="home-page" aria-busy="true">
+      <PageHeader title="年代记" />
+      <div className="home-rack ui-rack">
+        <Module id="01" title="联系人" right="CONTACTS" className="home-m01">
+          <div className="home-m01__main home-boot" role="status">
+            <div className="ui-label">BOOT<b>正在启动本地服务</b></div>
+            <div className="ui-big home-m01__big home-boot__big">{String(waitSec).padStart(2, '0')}<small>S</small></div>
+            <div className="home-boot__bar" aria-hidden="true">
+              {Array.from({ length: segs }, (_, i) => <i key={i} style={{ animationDelay: `${(i * 60) % 1800}ms` }} />)}
+            </div>
+            <div className="home-m01__sub home-boot__hint">
+              {waitSec >= 8
+                ? (IS_MAC
+                  ? '首次打开时，本地后端正在启动，可能要等 10–60 秒。'
+                  : '首次打开时，本地后端正在启动；Windows 杀毒 / Defender 扫描 etcli.exe 时可能要等 10–60 秒。')
+                : `正在连接 ${BACKEND_HOST}`}
+            </div>
+          </div>
+        </Module>
+        <Module id="02" title="月度热度" en="LAST 12 MONTHS" crop="bottom" className="home-m02">
+          <div className="home-seq" aria-hidden="true">
+            {Array.from({ length: 12 }, (_, i) => (
+              <div key={i} className="home-seq__col">
+                <span className="home-seq__read">··</span>
+                <span className="home-seq__meter">{Array.from({ length: SEQ_SEGMENTS }, (_, s) => <i key={s} />)}</span>
+                <span className="home-seq__m">{String(i + 1).padStart(2, '0')}</span>
+                <span className="home-seq__tag" />
+              </div>
+            ))}
+          </div>
+        </Module>
+        <TopModule top={[]} privateTotal={0} onOpen={() => {}} loading />
+        <Module id="04" title="名录" en="INDEX" className="home-m04" bodyClassName="home-m04__body">
+          <div className="home-idx__skel" aria-hidden="true">
+            {Array.from({ length: 12 }, (_, i) => (
+              <div key={i}><Skeleton width={18} height={10} /><Skeleton width={`${30 + ((i * 37) % 40)}%`} height={10} /><Skeleton width={56} height={10} /></div>
+            ))}
+          </div>
+        </Module>
+        <div className="home-side">
+          <LabelsModule people={null} />
+          <Module id="06" title="数据源" en="SOURCE" right="LOCAL ONLY" className="home-m06">
+            <div className="home-m06__log"><span className="home-m06__t">—</span><span>等待本地服务…</span></div>
+          </Module>
+        </div>
+      </div>
     </div>
   );
 }
@@ -231,29 +551,34 @@ function isOnboardingNeededError(e: any): boolean {
     text.includes('bootstrap mode');
 }
 
+// ———————————————————————— page ————————————————————————
+
 export function HomePage({ onOpenFriend, onOpenOnboarding }: Props) {
   void usePrivacy();
   const [tab, setTab] = useState<Tab>('private');
   const [search, setSearch] = useState('');
   const [searchDebounced, setSearchDebounced] = useState('');
   const [summary, setSummary] = useState<HomeSummary | null>(null);
-  const [allFriends, setAllFriends] = useState<Friend[]>([]);
-  const [loadingFriends, setLoadingFriends] = useState(true);
-  // First list response arrived (skeleton until then), and its failure if any.
-  const [friendsLoaded, setFriendsLoaded] = useState(false);
-  const [friendsError, setFriendsError] = useState<unknown>(null);
-  const [friendsNonce, setFriendsNonce] = useState(0);
+  // Every chat with messages (kind=all) — feeds 01 / 03 / 04 / 05.
+  const [everyone, setEveryone] = useState<Friend[] | null>(null);
+  const [everyoneError, setEveryoneError] = useState<unknown>(null);
+  const [everyoneNonce, setEveryoneNonce] = useState(0);
+  // 名录 search results (backend `q`, which also matches 微信号 / 备注).
+  const [found, setFound] = useState<Friend[] | null>(null);
+  const [findError, setFindError] = useState<unknown>(null);
+  const [finding, setFinding] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [bootWaitSec, setBootWaitSec] = useState(0);
   const [bootLogs, setBootLogs] = useState<LogTailResponse | null>(null);
   // Bumped by the error screen's retry button to re-run the boot probe.
   const [bootNonce, setBootNonce] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
-  const [refreshMsg, setRefreshMsg] = useState('');
+  const [refreshLog, setRefreshLog] = useState<{ at: Date; ok: boolean; text: string } | null>(null);
   const [extractOpen, setExtractOpen] = useState(false);
   const [taskCenterOpen, setTaskCenterOpen] = useState(false);
   const taskCenter = useTaskCenter();
-  const debounceRef = useRef<number | null>(null);
+  const onOpenOnboardingRef = useRef(onOpenOnboarding);
+  useEffect(() => { onOpenOnboardingRef.current = onOpenOnboarding; }, [onOpenOnboarding]);
 
   // Initial load
   useEffect(() => {
@@ -279,7 +604,7 @@ export function HomePage({ onOpenFriend, onOpenOnboarding }: Props) {
           if (isOnboardingNeededError(e)) {
             setError(String(e?.message || e));
             setBootWaitSec(0);
-            onOpenOnboarding?.();
+            onOpenOnboardingRef.current?.();
             return;
           }
           // Last attempt (or the backend answered a reconnect) — surface the error
@@ -304,53 +629,53 @@ export function HomePage({ onOpenFriend, onOpenOnboarding }: Props) {
 
   // Debounce search
   useEffect(() => {
-    if (debounceRef.current) window.clearTimeout(debounceRef.current);
-    debounceRef.current = window.setTimeout(() => setSearchDebounced(search), 220);
-    return () => { if (debounceRef.current) window.clearTimeout(debounceRef.current); };
+    const t = window.setTimeout(() => setSearchDebounced(search.trim()), 220);
+    return () => window.clearTimeout(t);
   }, [search]);
 
-  // Fetch friends only after the boot probe succeeds. Otherwise this request
+  // Every chat — only after the boot probe succeeds. Otherwise this request
   // can race the 60s startup retry and falsely flip the page into error state.
+  const summaryReady = summary != null;
   useEffect(() => {
-    if (!summary) return;
+    if (!summaryReady) return;
     let cancelled = false;
-    setLoadingFriends(true);
-    getAllFriends({ kind: tab === 'time' ? 'all' : tab, q: searchDebounced })
-      .then(fs => {
-        if (!cancelled) {
-          setAllFriends(fs);
-          setFriendsError(null);
-        }
-      })
-      .catch(e => {
-        if (!cancelled) setFriendsError(e);
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setLoadingFriends(false);
-          setFriendsLoaded(true);
-        }
-      });
+    getAllFriends({ kind: 'all' })
+      .then(fs => { if (!cancelled) { setEveryone(fs); setEveryoneError(null); } })
+      .catch(e => { if (!cancelled) setEveryoneError(e); });
     return () => { cancelled = true; };
-  }, [summary, tab, searchDebounced, friendsNonce]);
+  }, [summaryReady, everyoneNonce]);
+
+  // 名录 search goes to the backend (it also matches 微信号 / 备注, which the
+  // list payload doesn't carry).
+  useEffect(() => {
+    if (!summaryReady || !searchDebounced) { setFound(null); setFindError(null); return; }
+    let cancelled = false;
+    setFinding(true);
+    getAllFriends({ kind: tab, q: searchDebounced })
+      .then(fs => { if (!cancelled) { setFound(fs); setFindError(null); } })
+      .catch(e => { if (!cancelled) setFindError(e); })
+      .finally(() => { if (!cancelled) setFinding(false); });
+    return () => { cancelled = true; };
+  }, [summaryReady, tab, searchDebounced, everyoneNonce]);
+
+  const reloadAll = useCallback(async () => {
+    const [s, fs] = await Promise.all([getHomeSummary(), getAllFriends({ kind: 'all' })]);
+    setSummary(s);
+    setEveryone(fs);
+    setEveryoneError(null);
+    setEveryoneNonce(n => n + 1);
+  }, []);
 
   // Live sync swapped in new DB files: quietly re-fetch what the page shows.
-  async function handleLiveSynced() {
-    try {
-      const [s, fs] = await Promise.all([
-        getHomeSummary(),
-        getAllFriends({ kind: tab === 'time' ? 'all' : tab, q: searchDebounced }),
-      ]);
-      setSummary(s);
-      setAllFriends(fs);
-    } catch {
+  const handleLiveSynced = useCallback(() => {
+    reloadAll().catch(() => {
       // transient (e.g. a DB mid-swap) — the next sync or a manual refresh catches up
-    }
-  }
+    });
+  }, [reloadAll]);
 
   async function handleRefresh() {
+    if (refreshing) return;
     setRefreshing(true);
-    setRefreshMsg('');
     const taskId = taskCenter.addTask({
       icon: 'lock', name: '正在解密最新数据', sub: '运行 refresh.py …', pct: 5, status: 'run',
     });
@@ -371,37 +696,46 @@ export function HomePage({ onOpenFriend, onOpenOnboarding }: Props) {
         pct: 100, status: r.ok ? 'done' : 'error',
         sub: r.ok ? successMsg : refreshFailureDetail(failure, failCode),
       });
-      setRefreshMsg(r.ok ? successMsg : failure);
+      setRefreshLog({ at: new Date(), ok: r.ok, text: r.ok ? successMsg : failure });
       if (r.ok) {
-        const [s, fs] = await Promise.all([
-          getHomeSummary(),
-          getAllFriends({ kind: tab === 'time' ? 'all' : tab, q: searchDebounced }),
-        ]);
-        setSummary(s);
-        setAllFriends(fs);
+        await reloadAll();
+        pollLiveSyncNow();
       }
     } catch (e: any) {
       window.clearInterval(progT);
       const failCode = errorCode(e);
       const failure = summarizeRefreshFailure(e?.message || String(e), failCode);
       taskCenter.updateTask(taskId, { status: 'error', pct: 100, sub: refreshFailureDetail(failure, failCode) });
-      setRefreshMsg(failure);
+      setRefreshLog({ at: new Date(), ok: false, text: failure });
     } finally {
       setRefreshing(false);
-      setTimeout(() => setRefreshMsg(''), 6000);
     }
   }
+
+  // ——— derived readouts (exact sums over what the backend returned) ———
+  const derived = useMemo(() => {
+    if (!everyone) return null;
+    const people = everyone.filter(f => !f.isGroup).sort((a, b) => b.count - a.count);
+    const groups = everyone.filter(f => f.isGroup).sort((a, b) => b.count - a.count);
+    return {
+      people, groups,
+      peopleMsgs: sumCounts(people),
+      groupMsgs: sumCounts(groups),
+      stale: people.filter(f => f.tag === '久未联系').length,
+    };
+  }, [everyone]);
 
   if (error && !summary) {
     if (isOnboardingNeededError(error)) {
       return (
         <EmptyState
           layout="page"
-          icon={<IconKey size={26} />}
+          icon={<IconKey size={22} />}
+          label="SETUP · 00"
           title="还没完成初始化"
           description="本地后端已经启动了，但还没有找到可用的解密数据。请按初始化引导选择微信数据目录、抓密钥并解密。"
           actions={onOpenOnboarding && (
-            <Button variant="primary" size="lg" onClick={onOpenOnboarding}>打开初始化引导</Button>
+            <Button variant="primary" kbd="↵" onClick={onOpenOnboarding}>打开初始化引导</Button>
           )}
         />
       );
@@ -447,95 +781,94 @@ export function HomePage({ onOpenFriend, onOpenOnboarding }: Props) {
 
   // Connected, but the decrypted data has no chats yet (fresh account, wrong
   // account picked, or a decrypt that is still filling in).
-  // A failed friend list is not "no data": it keeps its own ErrorState below.
+  // A failed chat list is not "no data": it keeps its own ErrorState in 04.
   const noData = homeHasNoData({
     totalContacts: summary.totalContacts, topFriends: summary.topFriends.length,
-    friendsLoaded, friendsCount: allFriends.length, friendsError, search: searchDebounced, tab,
+    friendsLoaded: everyone != null || everyoneError != null, friendsCount: everyone?.length ?? 0,
+    friendsError: everyoneError, search: '', tab: 'private',
   });
 
-  let list: ReactNode;
-  if (!friendsLoaded) {
-    list = <FriendGridSkeleton />;
-  } else if (friendsError && !loadingFriends) {
-    const code = errorCode(friendsError);
-    const entry = lookupError(code);
-    const raw = friendsError instanceof Error ? friendsError.message : String(friendsError);
-    list = (
-      <ErrorState
-        className="home-list-empty"
-        title={entry?.title ?? '朋友列表没能加载'}
-        code={code ?? undefined}
-        reason={entry?.reason ?? '读取朋友列表时本地服务返回了错误。'}
-        fixes={entry ? [entry.fix] : ['点「重试」再读一次', '还不行就点右上角「更新数据」']}
-        onRetry={() => setFriendsNonce(n => n + 1)}
-        details={raw ? <pre>{maskText(redactDiagnostics(raw))}</pre> : undefined}
-      />
-    );
-  } else if (allFriends.length === 0 && !loadingFriends) {
-    list = (
-      <EmptyState
-        className="home-list-empty"
-        icon={searchDebounced ? <IconSearch size={26} /> : <IconInbox size={26} />}
-        title={searchDebounced
-          ? `没找到「${maskText(searchDebounced)}」`
-          : tab === 'group' ? '还没有群聊记录' : '还没有私聊朋友'}
-        description={searchDebounced
-          ? '试试备注、昵称或微信号里的一部分。'
-          : '解密后的数据里还没有这类聊天。聊过天之后点右上角「更新数据」再看。'}
-        actions={searchDebounced
-          ? <Button size="sm" onClick={() => setSearch('')}>清除搜索</Button>
-          : undefined}
-      />
-    );
-  } else {
-    list = (
-      <div className={cx('home-grid', loadingFriends && 'is-refreshing')} aria-busy={loadingFriends || undefined}>
-        {allFriends.map((f, i) => (
-          <FriendCard key={f.id} friend={f} rank={i + 1} onClick={() => onOpenFriend(f.id)} />
-        ))}
-      </div>
-    );
-  }
+  const extract = (
+    <ExtractKeyDialog
+      open={extractOpen}
+      onClose={() => setExtractOpen(false)}
+      onSuccess={() => { void handleRefresh(); }}
+    />
+  );
 
-  return (
-    <div className="home-page et-root">
-      <HomeChromeBar onRefresh={handleRefresh} refreshing={refreshing} refreshMsg={refreshMsg}
-        onExtractKey={() => setExtractOpen(true)}
-        onToggleTaskCenter={() => setTaskCenterOpen(o => !o)}
-        taskCenterActive={taskCenterOpen}
-        onLiveSynced={handleLiveSynced} />
-      {noData ? (
+  if (noData) {
+    return (
+      <div className="home-page">
+        <PageHeader title="年代记" />
         <EmptyState
           layout="page"
-          icon={<IconInbox size={26} />}
+          icon={<IconInbox size={22} />}
+          label="NO DATA · 00"
           title="这里还空着"
-          description="已经连上本地服务，但解密后的数据里还没有聊天记录。刚完成初始化的话，等解密跑完再点「更新数据」；也可能是选错了账号，可以在左下角切换。"
+          description="已经连上本地服务，但解密后的数据里还没有聊天记录。刚完成初始化的话，等解密跑完再点「更新数据」；也可能是选错了账号，可以在右下角切换。"
           actions={(
             <>
-              <Button variant="primary" icon={<IconRefresh size={15} />} loading={refreshing} onClick={handleRefresh}>
+              <Button variant="primary" kbd={<IconRefresh size={11} />} loading={refreshing} onClick={handleRefresh}>
                 更新数据
               </Button>
               {onOpenOnboarding && <Button onClick={onOpenOnboarding}>重新走一遍初始化</Button>}
             </>
           )}
         />
-      ) : (
-        <>
-          <HeroFrame summary={summary} onOpen={onOpenFriend} />
-          <Timeline summary={summary} />
-          <FilterBar tab={tab} setTab={setTab} search={search} setSearch={setSearch} count={allFriends.length} />
-          {list}
-          <footer className="home-footer">
-            <span className="et-meta">全部数据均在你的电脑上 · 不会上传到任何云端</span>
-            <span className="et-meta home-footer__version">{APP_VERSION}</span>
-          </footer>
-        </>
-      )}
-      <ExtractKeyDialog
-        open={extractOpen}
-        onClose={() => setExtractOpen(false)}
-        onSuccess={() => { handleRefresh(); }}
-      />
+        {extract}
+      </div>
+    );
+  }
+
+  const tabList = derived ? (tab === 'group' ? derived.groups : derived.people) : null;
+  const tabTotal = derived ? (tab === 'group' ? derived.groupMsgs : derived.peopleMsgs) : 0;
+  const rows = searchDebounced ? found : tabList;
+  const rowsError = searchDebounced ? findError : everyoneError;
+
+  return (
+    <div className="home-page">
+      <PageHeader title="年代记" />
+      <div className="home-rack ui-rack">
+        <ContactsModule
+          summary={summary}
+          people={derived ? derived.people.length : null}
+          groups={derived ? derived.groups.length : null}
+          totalMsgs={derived ? derived.peopleMsgs + derived.groupMsgs : null}
+          stale={derived ? derived.stale : null}
+        />
+        <HeatModule summary={summary} />
+        <TopModule
+          top={derived ? derived.people.slice(0, 8) : []}
+          privateTotal={derived?.peopleMsgs ?? 0}
+          onOpen={onOpenFriend}
+          loading={!derived && !everyoneError}
+        />
+        <IndexModule
+          tab={tab} setTab={setTab}
+          search={search} setSearch={setSearch}
+          rows={rows}
+          tabTotal={tabTotal}
+          tabMax={tabList?.[0]?.count ?? 0}
+          counts={{ private: derived?.people.length ?? null, group: derived?.groups.length ?? null }}
+          loading={finding}
+          error={rowsError}
+          onRetry={() => setEveryoneNonce(n => n + 1)}
+          onOpen={onOpenFriend}
+        />
+        <div className="home-side">
+          <LabelsModule people={derived ? derived.people : null} />
+          <SourceModule
+            refreshing={refreshing}
+            refreshLog={refreshLog}
+            onRefresh={handleRefresh}
+            onExtractKey={() => setExtractOpen(true)}
+            onToggleTasks={() => setTaskCenterOpen(o => !o)}
+            tasksOpen={taskCenterOpen}
+            onLiveSynced={handleLiveSynced}
+          />
+        </div>
+      </div>
+      {extract}
       {taskCenterOpen && <TaskCenterDrawer onClose={() => setTaskCenterOpen(false)} />}
     </div>
   );
@@ -571,7 +904,7 @@ function summarizeRefreshFailure(details: string, code: string | null = null): s
  * Errors from data/api.ts look like `API /api/home-summary: 503 {json}`;
  * anything else means fetch() itself failed (backend not listening). */
 function describeBootError(raw: string): { code: string; title: string; reason: ReactNode; fixes: ReactNode[] } {
-  const isMac = navigator.userAgent.toLowerCase().includes('mac');
+  const isMac = IS_MAC;
   const logHint = <>查看日志 <code>~/Documents/Murmur/logs/serve.log</code></>;
   const issueHint = '还不行就点「复制诊断信息」，贴到 GitHub issue 给作者 sgaofen';
   const m = /^API (\S+): (\d{3})\s*([\s\S]*)$/.exec(raw);
@@ -579,7 +912,7 @@ function describeBootError(raw: string): { code: string; title: string; reason: 
     return {
       code: 'BACKEND_UNREACHABLE',
       title: '后端没起来',
-      reason: <>Murmur 会在后台自动启动本地服务（{isMac ? 'etcli' : 'etcli.exe'}），但等了一分钟仍然连不上 <code>127.0.0.1:9100</code>。</>,
+      reason: <>Murmur 会在后台自动启动本地服务（{isMac ? 'etcli' : 'etcli.exe'}），但等了一分钟仍然连不上 <code>{BACKEND_HOST}</code>。</>,
       fixes: [
         '完全退出 Murmur 再重新打开',
         logHint,

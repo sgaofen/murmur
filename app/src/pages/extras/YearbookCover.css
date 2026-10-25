@@ -1,0 +1,125 @@
+/* 年度分享卡 (pages/extras/YearbookCover.tsx) — tokens only, prefix ybc-.
+ * The card is what gets saved as a PNG: everything it shows must be drawn
+ * by its own styles (no page backdrop), and its background colour is the
+ * one the image is painted on. */
+
+.ybc-wrap { display: flex; flex-direction: column; align-items: center; gap: 12px; }
+
+.ybc {
+  position: relative;
+  width: 100%; max-width: 360px; box-sizing: border-box;
+  padding: 22px 22px 18px;
+  background: var(--surface-card);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-xs);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+}
+.ybc .ui-crop { inset: 5px; }
+
+.ybc__top {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+  font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.1em;
+  color: var(--text-faint);
+}
+.ybc__brand b {
+  margin-left: 6px;
+  font-family: var(--font-sans); font-size: 11px; font-weight: 400; letter-spacing: 0.04em;
+  color: var(--text-secondary);
+}
+.ybc__no { font-size: 9.5px; letter-spacing: 0.14em; }
+
+.ybc__year {
+  margin-top: 14px;
+  display: flex; align-items: flex-end; justify-content: space-between; gap: 10px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.ybc__yn {
+  font-family: var(--font-mono); font-weight: 300; font-size: 64px; line-height: 0.9;
+  letter-spacing: -0.03em; font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+.ybc__yl {
+  display: inline-flex; align-items: center; gap: 6px; margin-bottom: 4px;
+  font-family: var(--font-mono); font-size: 9.5px; letter-spacing: 0.14em;
+  color: var(--text-faint);
+}
+.ybc__yl i, .ybc__local i { display: block; width: 6px; height: 6px; background: var(--signal); }
+
+.ybc__who { margin-top: 16px; display: flex; align-items: center; gap: 12px; min-width: 0; }
+.ybc__mono {
+  flex: none;
+  width: 40px; height: 40px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--text-primary); color: var(--surface-card);
+  font-family: var(--font-mono); font-size: 15px; font-weight: 600; letter-spacing: 0.04em;
+}
+.ybc__mono.is-long { font-size: 11px; }
+.ybc__who-t { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.ybc__with { font-size: 11px; color: var(--text-faint); }
+.ybc__name {
+  font-size: 20px; font-weight: 600; line-height: 1.2; letter-spacing: 0.02em;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.ybc__cap {
+  margin: 18px 0 0;
+  padding-left: 12px;
+  border-left: 2px solid var(--signal);
+  font-size: 14.5px; line-height: 1.7;
+  color: var(--text-primary);
+  text-wrap: pretty;
+}
+
+.ybc__hours { margin-top: 18px; }
+.ybc__bars { height: 40px; display: grid; grid-template-columns: repeat(24, minmax(0, 1fr)); gap: 2px; align-items: end; border-bottom: 1px solid var(--border-default); }
+.ybc__bars i { display: block; background: var(--heat-3); }
+.ybc__bars i.is-peak { background: var(--signal); }
+.ybc__ticks {
+  margin-top: 4px;
+  display: flex; justify-content: space-between;
+  font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.04em;
+  color: var(--text-faint);
+}
+
+.ybc__rows { margin: 14px 0 0; }
+.ybc__row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: 12px;
+  padding: 9px 0;
+  border-top: 1px solid var(--border-subtle);
+}
+.ybc__row dt { min-width: 0; font-size: 12.5px; color: var(--text-secondary); }
+.ybc__row-sub { display: block; margin-top: 2px; font-size: 10.5px; color: var(--text-faint); }
+.ybc__row dd { margin: 0; display: flex; align-items: baseline; gap: 3px; white-space: nowrap; }
+.ybc__row-v {
+  font-family: var(--font-mono); font-size: 19px; font-weight: 400; font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+}
+.ybc__row-u { font-family: var(--font-mono); font-size: 11px; color: var(--text-faint); }
+
+.ybc__foot {
+  margin-top: 4px; padding-top: 12px;
+  border-top: 1px solid var(--border-default);
+  display: flex; align-items: flex-start; gap: 14px;
+}
+.ybc__local {
+  flex: none;
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 6px;
+  border: 1px solid var(--border-default);
+  font-family: var(--font-mono); font-size: 9.5px; letter-spacing: 0.12em;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.ybc__note { font-size: 10px; line-height: 1.6; color: var(--text-faint); }
+
+.ybc-acts { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+.ybc-status {
+  min-height: 16px;
+  font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.04em;
+  color: var(--text-muted); text-align: center;
+}
+.ybc-status.is-err { color: var(--danger-fg); }

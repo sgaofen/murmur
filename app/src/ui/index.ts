@@ -9,6 +9,8 @@ export { Chip } from './Chip';
 export type { ChipProps, ChipTone } from './Chip';
 export { Dialog } from './Dialog';
 export type { DialogProps } from './Dialog';
+export { Module } from './Module';
+export type { ModuleProps } from './Module';
 export { EmptyState } from './EmptyState';
 export type { EmptyStateProps } from './EmptyState';
 export { ErrorState } from './ErrorState';

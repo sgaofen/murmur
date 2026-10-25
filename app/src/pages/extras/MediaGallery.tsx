@@ -5,7 +5,7 @@ import { lookupError } from '../../data/errorCatalog';
 import { useTaskCenter } from '../../components/extras/TaskCenter';
 import { displayName, maskText } from '../../utils/privacy';
 import { usePrivacy } from '../../utils/usePrivacy';
-import { Button, EmptyState, ErrorState, Skeleton } from '../../ui';
+import { Button, EmptyState, ErrorState, Module, Skeleton } from '../../ui';
 import { IconClose, IconPlay, IconSearch, IconSparkle } from '../../ui/icons';
 import './MediaGallery.css';
 
@@ -22,7 +22,8 @@ interface MediaItem {
 }
 
 interface MediaGroup {
-  month: string;          // "2026 · 4 月"
+  key: string;            // "2026-04"
+  month: string;          // "2026-04" (mono header)
   items: MediaItem[];
 }
 
@@ -40,10 +41,7 @@ function groupByMonth(items: MediaItem[]): MediaGroup[] {
   }
   return [...map.entries()]
     .sort(([a], [b]) => b.localeCompare(a))
-    .map(([m, items]) => {
-      const [y, mo] = m.split('-');
-      return { month: `${y} · ${parseInt(mo, 10)} 月`, items };
-    });
+    .map(([m, items]) => ({ key: m, month: m || '未知月份', items }));
 }
 
 export function MediaGallery({ friend }: Props) {
@@ -114,89 +112,100 @@ export function MediaGallery({ friend }: Props) {
   const imgCount = items.filter(i => i.kind === 'img').length;
   const vidCount = items.filter(i => i.kind === 'vid').length;
 
-  return (
-    <div className="media-page et-root">
-      <div className="media-head">
-        <div className="et-eyebrow">相册 · 你和 {displayName(friend.id, friend.name)}</div>
-        <div className="et-meta media-head__count">
-          共 <b className="et-num">{imgCount}</b> 张图 · <b className="et-num">{vidCount}</b> 条视频
-        </div>
-        {items.length > 0 && (
-          <label className="media-search">
-            <IconSearch size={13} />
-            <input
-              type="search"
-              placeholder="搜文件名"
-              aria-label="搜文件名"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-            />
-          </label>
-        )}
-      </div>
+  const name = displayName(friend.id, friend.name);
+  const right = items.length > 0 ? (
+    <label className="ui-field media-search">
+      <span className="ui-field__prompt" aria-hidden="true"><IconSearch size={12} /></span>
+      <input
+        type="search"
+        placeholder="搜文件名"
+        aria-label="搜文件名"
+        value={search}
+        onChange={(e) => setSearch(e.target.value)}
+      />
+    </label>
+  ) : undefined;
 
-      {loading && (
-        <div className="media-body" aria-busy="true" aria-label="正在加载相册">
-          <div>
-            <div className="media-month__head"><Skeleton width={96} height={16} /><span className="media-month__rule" /></div>
-            <div className="media-grid">
-              {Array.from({ length: 8 }, (_, i) => <Skeleton key={i} height="auto" radius={8} className="media-skel" />)}
-            </div>
-          </div>
-        </div>
-      )}
-      {!loading && loadError != null && (
-        <div className="media-empty">
-          <MediaLoadError error={loadError} onRetry={loadMedia} />
-        </div>
-      )}
-      {!loading && loadError == null && items.length === 0 && (
-        <div className="media-empty">
-          <EmptyState
-            icon={<IconSparkle size={24} />}
-            title="这里还没有媒体"
-            description="视频和图片需要先建立本地索引，只扫描这台电脑上的微信缓存。"
-            actions={(
-              <Button variant="primary" loading={indexing} onClick={handleIndexMedia}>
-                {indexing ? '正在建立索引…' : '一键建立媒体索引'}
-              </Button>
+  return (
+    <div className="media-page">
+      <div className="media-rack ui-rack">
+        <Module
+          title="相册"
+          en={loading ? 'MEDIA' : `MEDIA · ${imgCount} IMG · ${vidCount} VID`}
+          right={right}
+          className="media-mod"
+        >
+          <div className="media-sub">
+            <span className="ui-label">WITH<b>你和 {name}</b></span>
+            {!loading && items.length > 0 && (
+              <span className="media-sub__count">
+                共 <b>{imgCount}</b> 张图 · <b>{vidCount}</b> 条视频
+                {search.trim() && <> · 匹配 <b>{filtered.length}</b></>}
+              </span>
             )}
-          />
-          {indexError && (
-            <div className="media-empty__error" role="alert">
-              {maskText(indexError)}
+          </div>
+
+          {loading && (
+            <div className="media-body" aria-busy="true" aria-label="正在加载相册">
+              <div className="media-grid">
+                {Array.from({ length: 18 }, (_, i) => <Skeleton key={i} height="auto" radius={0} className="media-skel" />)}
+              </div>
             </div>
           )}
-        </div>
-      )}
-      {!loading && items.length > 0 && groups.length === 0 && (
-        <div className="media-empty">
-          <EmptyState
-            icon={<IconSearch size={24} />}
-            title={`没有文件名包含「${maskText(search)}」的媒体`}
-            actions={<Button size="sm" onClick={() => setSearch('')}>清除搜索</Button>}
-          />
-        </div>
-      )}
+          {!loading && loadError != null && (
+            <div className="media-empty">
+              <MediaLoadError error={loadError} onRetry={loadMedia} />
+            </div>
+          )}
+          {!loading && loadError == null && items.length === 0 && (
+            <div className="media-empty">
+              <EmptyState
+                icon={<IconSparkle size={22} />}
+                label="NO MEDIA"
+                title="这里还没有媒体"
+                description="视频和图片需要先建立本地索引，只扫描这台电脑上的微信缓存。"
+                actions={(
+                  <Button variant="primary" loading={indexing} onClick={handleIndexMedia}>
+                    {indexing ? '正在建立索引…' : '一键建立媒体索引'}
+                  </Button>
+                )}
+              />
+              {indexError && (
+                <div className="media-empty__error" role="alert">
+                  {maskText(indexError)}
+                </div>
+              )}
+            </div>
+          )}
+          {!loading && items.length > 0 && groups.length === 0 && (
+            <div className="media-empty">
+              <EmptyState
+                icon={<IconSearch size={22} />}
+                label="NO MATCH"
+                title={`没有文件名包含「${maskText(search)}」的媒体`}
+                actions={<Button size="sm" onClick={() => setSearch('')}>清除搜索</Button>}
+              />
+            </div>
+          )}
 
-      {!loading && groups.length > 0 && (
-        <div className="media-body">
-          {groups.map((g) => (
-            <section key={g.month}>
-              <div className="media-month__head">
-                <h3 className="media-month__title">{g.month}</h3>
-                <span className="media-month__rule" aria-hidden="true" />
-                <span className="et-meta">{g.items.length} 项</span>
-              </div>
+          {!loading && groups.length > 0 && (
+            // One contact sheet: each month opens with a slate cell, then its frames.
+            <div className="media-body">
               <div className="media-grid">
-                {g.items.map((it) => (
-                  <Thumb key={it.md5} item={it} onClick={() => setActive(it)} />
-                ))}
+                {groups.map((g) => [
+                  <h3 key={`slate-${g.key}`} className="media-slate">
+                    <span className="media-slate__m">{g.month}</span>
+                    <span className="media-slate__n">{g.items.length} 项</span>
+                  </h3>,
+                  ...g.items.map((it) => (
+                    <Thumb key={it.md5} item={it} onClick={() => setActive(it)} />
+                  )),
+                ])}
               </div>
-            </section>
-          ))}
-        </div>
-      )}
+            </div>
+          )}
+        </Module>
+      </div>
 
       {active && <Lightbox item={active} onClose={() => setActive(null)} />}
     </div>
@@ -224,7 +233,8 @@ function Thumb({ item, onClick }: { item: MediaItem; onClick: () => void }) {
   const senderLabel = item.from
     ? item.from === 'self' ? '你' : displayName(item.from, item.from)
     : '';
-  const when = new Date(item.ts * 1000).toLocaleString();
+  // ts is 0 when the index only knows the month (no message link yet).
+  const when = item.ts ? new Date(item.ts * 1000).toLocaleString() : item.month;
 
   return (
     <button type="button" className="media-thumb" onClick={onClick}
