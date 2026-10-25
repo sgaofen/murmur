@@ -1,19 +1,21 @@
 // Search ↔ chat links. The search page keeps its state in its own hash query
-// (q / mode / from / to); a chat opened from a hit carries that whole query in
+// (q / mode / from / to, plus who=self when only your own messages are
+// searched); a chat opened from a hit carries that whole query in
 // `back`, so the chat page's 「返回」 lands on the same results — same words,
 // same mode, same dates — instead of only the same words.
 
 export type SearchMode = 'keyword' | 'semantic';
 
-const KEYS = ['q', 'mode', 'from', 'to'] as const;
+const KEYS = ['q', 'mode', 'from', 'to', 'who'] as const;
 
 /** The search page's query string, e.g. `q=火锅&mode=semantic&from=2024-01-01`. */
-export function searchQuery(q: string, mode: SearchMode, dates: { from: string; to: string }): string {
+export function searchQuery(q: string, mode: SearchMode, dates: { from: string; to: string }, who?: 'all' | 'self'): string {
   const p = new URLSearchParams();
   if (q) p.set('q', q);
   if (mode === 'semantic') p.set('mode', 'semantic');
   if (dates.from) p.set('from', dates.from);
   if (dates.to) p.set('to', dates.to);
+  if (who === 'self') p.set('who', 'self');
   return p.toString();
 }
 
@@ -27,7 +29,7 @@ export function searchBackPath(chatParams: URLSearchParams): string {
   const out = new URLSearchParams();
   for (const k of KEYS) {
     const v = src.get(k);
-    if (!v || (k === 'mode' && v !== 'semantic')) continue;
+    if (!v || (k === 'mode' && v !== 'semantic') || (k === 'who' && v !== 'self')) continue;
     out.set(k, v);
   }
   const s = out.toString();

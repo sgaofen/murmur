@@ -100,7 +100,7 @@ function shellFor(route: Route, go: (path: string) => void): { active: NavKey | 
       // Same rule as the page's own header: groups have no friend page.
       return route.id.endsWith('@chatroom')
         ? { active: 'chat', header: { title: '对话', back: { label: '年代记', onClick: () => go('') } } }
-        : { active: 'chat', header: { title: '对话', back: { label: '朋友页', onClick: () => go(`friend/${route.id}`) } } };
+        : { active: 'chat', header: { title: '对话', back: { label: '档案', onClick: () => go(`friend/${route.id}`) } } };
     }
     case 'settings':
       return { active: 'settings', header: { title: '设置' } };

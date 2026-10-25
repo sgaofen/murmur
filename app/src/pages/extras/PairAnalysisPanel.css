@@ -1,0 +1,59 @@
+/* PairAnalysisPanel — tokens only, prefix pap-. */
+.pap {
+  background: var(--surface-card);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+}
+.pap--bare { background: none; border: 0; }
+.pap__head {
+  height: 30px; display: flex; align-items: center; gap: 10px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.pap__codes {
+  margin-left: auto;
+  font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.06em;
+  color: var(--text-secondary); white-space: nowrap;
+}
+.pap__who { padding: 14px 14px 0; }
+.pap__names { font-size: 15px; font-weight: 600; line-height: 1.4; overflow-wrap: anywhere; }
+.pap__names span { margin: 0 6px; font-weight: 400; color: var(--text-faint); }
+.pap__sub { margin-top: 2px; font-size: 12px; color: var(--text-muted); }
+.pap__note {
+  margin: 12px 14px 14px;
+  font-size: 12px; line-height: 1.75; color: var(--text-secondary);
+  text-wrap: pretty;
+}
+.pap--bare .pap__note { margin: 0 0 14px; }
+.pap__list { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--border-subtle); }
+.pap__list li { border-bottom: 1px solid var(--border-subtle); }
+.pap__row {
+  appearance: none; margin: 0; border: 0; background: none; font: inherit; text-align: left; cursor: pointer;
+  width: 100%;
+  display: grid; grid-template-columns: 48px minmax(0, 1fr) auto; gap: 12px; align-items: center;
+  padding: 10px 14px;
+  color: var(--text-primary);
+}
+.pap--bare .pap__row { padding-left: 0; padding-right: 0; }
+.pap__row:hover:not(:disabled) { background: var(--surface-hover); }
+.pap__row:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+.pap__row:disabled { cursor: default; }
+.pap__row:disabled:not(.is-busy) { opacity: 0.5; }
+.pap__ext { font-family: var(--font-mono); font-size: 11px; color: var(--text-faint); }
+.pap__txt { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.pap__label { font-size: 13px; font-weight: 500; }
+.pap__label em { margin-left: 10px; font-style: normal; font-weight: 400; font-size: 11.5px; color: var(--text-muted); }
+.pap__body { font-size: 11.5px; line-height: 1.6; color: var(--text-faint); }
+.pap__go {
+  font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.06em;
+  color: var(--text-secondary); white-space: nowrap;
+}
+.pap__row.is-busy .pap__go { color: var(--signal-ink); }
+.pap__err { margin: 10px 14px 0; font-size: 12px; line-height: 1.6; color: var(--danger-fg); overflow-wrap: anywhere; }
+.pap--bare .pap__err { margin-left: 0; margin-right: 0; }
+.pap__foot {
+  padding: 10px 14px;
+  font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.06em;
+  color: var(--text-faint);
+}
+.pap--bare .pap__foot { padding: 12px 0 0; }

@@ -1,0 +1,50 @@
+/* RelationshipReportView (running state) — tokens only, prefix rrv-.
+ * The finished report uses ReportReader.css. */
+.rrv { padding: 0 12px; height: var(--shell-vh, 100vh); min-height: 420px; display: flex; flex-direction: column; }
+.rrv__rack {
+  flex: 1 1 auto; min-height: 0;
+  border-top: 0; border-bottom: 0;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  grid-template-rows: minmax(0, 1fr);
+}
+@media (max-width: 899px) {
+  .rrv { height: auto; }
+  .rrv__rack { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto; }
+  .rrv__out { max-height: 60vh; }
+}
+.rrv__run { display: inline-flex; align-items: center; gap: 8px; color: var(--signal-ink); }
+.rrv__stream > .ui-mod__body { display: flex; flex-direction: column; }
+.rrv__lead { padding: 18px 16px 16px; border-bottom: 1px solid var(--border-subtle); }
+.rrv__h { margin: 10px 0 0; font-size: 18px; font-weight: 600; line-height: 1.45; }
+.rrv__lead-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-top: 8px; }
+.rrv__p { margin: 0; max-width: 640px; font-size: 12.5px; line-height: 1.75; color: var(--text-muted); }
+.rrv__log { flex: 1 1 auto; min-height: 200px; display: flex; flex-direction: column; }
+.rrv__log-h {
+  height: 30px; display: flex; align-items: center; gap: 10px;
+  padding: 0 16px; border-bottom: 1px solid var(--border-subtle);
+}
+.rrv__stage { margin-left: auto; font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.06em; color: var(--text-faint); }
+.rrv__out {
+  flex: 1 1 auto; min-height: 0; margin: 0; padding: 14px 16px 18px;
+  overflow: auto;
+  background: var(--surface-sunken);
+  font-family: var(--font-mono); font-size: 12px; line-height: 1.75;
+  color: var(--text-secondary);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.rrv__out.is-empty { color: var(--text-faint); }
+.rrv__cursor {
+  display: inline-block; width: 7px; height: 13px; margin-left: 2px; vertical-align: -2px;
+  background: var(--signal);
+  animation: rrv-blink 1s steps(1, end) infinite;
+}
+@keyframes rrv-blink { 50% { opacity: 0; } }
+.rrv__track { position: relative; height: 2px; background: var(--heat-1); overflow: hidden; }
+.rrv__track i { position: absolute; top: 0; bottom: 0; width: 24%; background: var(--signal); animation: rrv-run 1.6s linear infinite; }
+@keyframes rrv-run { from { left: -24%; } to { left: 100%; } }
+.rrv__ros { display: flex; flex-direction: column; }
+.rrv__ro { padding: 12px 16px 14px; border-bottom: 1px solid var(--border-subtle); }
+.rrv__ro-v { margin-top: 8px; font-family: var(--font-mono); font-size: 18px; font-variant-numeric: tabular-nums; color: var(--text-primary); }
+@media (prefers-reduced-motion: reduce) {
+  .rrv__cursor, .rrv__track i { animation: none; }
+}
