@@ -1,8 +1,9 @@
-/* 设置 → 应用锁: turn on / change / turn off the password, idle auto-lock,
- * lock now. Layout comes from pages/Settings.css (settings-row). */
+/* 设置 → 93 应用锁: turn on / change / turn off the password, idle auto-lock,
+ * lock now. A numbered instrument module; the row grid comes from
+ * pages/Settings.css (settings-row), the inputs from ./AppLock.css. */
 import { useEffect, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
-import { Button, Callout, Card, CardHeader, Chip, SegmentedControl, Skeleton } from '../ui';
+import { Button, Callout, Module, SegmentedControl, Skeleton, cx } from '../ui';
 import { IconEye, IconEyeOff } from '../ui/icons';
 import {
   APP_LOCK_STATUS_EVENT, IDLE_LABEL, disableAppLock, getAppLockStatus, requestLock, resetHint,
@@ -63,16 +64,18 @@ export function AppLockSettings() {
   };
 
   return (
-    <Card padding="lg" className="app-lock-settings">
-      <CardHeader
-        title="应用锁"
-        description="打开 Murmur 或闲置一段时间后要先输入密码，解锁前不显示任何聊天内容。"
-        actions={status?.enabled ? <Chip size="sm" tone="success">已开启</Chip> : status ? <Chip size="sm">未开启</Chip> : undefined}
-      />
+    <Module
+      id="93" title="应用锁" en="APP LOCK" className="st-mod app-lock-settings"
+      right={status ? (
+        <span className={cx('st-onoff', status.enabled && 'is-on')}>{status.enabled ? '已开启 · ON' : '未开启 · OFF'}</span>
+      ) : undefined}
+    >
+      <span id="st-93" className="st-anchor" />
+      <p className="settings-lede">打开 Murmur 或闲置一段时间后要先输入密码，解锁前不显示任何聊天内容。</p>
       {status === null ? (
         offline
-          ? <span className="settings-muted">读不到应用锁状态（本地服务没响应）。</span>
-          : <Skeleton height={44} />
+          ? <div className="st-pad"><span className="settings-muted">读不到应用锁状态（本地服务没响应）。</span></div>
+          : <div className="st-pad"><Skeleton height={30} /></div>
       ) : !status.enabled ? (
         mode === 'enable' ? (
           <Row label="设置密码" hint={`至少 ${MIN_LEN} 位`}>
@@ -134,14 +137,16 @@ export function AppLockSettings() {
         </>
       )}
       {status !== null && (
+        <div className="st-pad">
         <Callout tone="info" compact title="防旁人翻看，不是加密">
           {'应用锁只拦住打开 Murmur 界面和本地服务的人，'}<b>不会加密</b>
           {'电脑上已经解密的聊天数据库；能登录这台电脑账户的人仍然可以直接读取那些文件。密码只以加盐哈希（PBKDF2）保存在 '}
           <code>{maskText(resetHint(status.lock_file))}</code>
           {'。忘记密码：完全退出 Murmur，删掉这个文件再打开，应用锁就关闭了，聊天数据不受影响。Touch ID 解锁暂不支持。'}
         </Callout>
+        </div>
       )}
-    </Card>
+    </Module>
   );
 }
 
@@ -183,7 +188,7 @@ function PasswordForm({
   return (
     <form className="app-lock-settings__form" onSubmit={submit}>
       {fields.map((f, i) => (
-        <label key={f} className="ui-stack" style={{ gap: 4 }}>
+        <label key={f} className="app-lock-settings__f">
           <span className="app-lock-settings__label">{FIELD_LABEL[f]}</span>
           <div className="app-lock-field">
             <input
@@ -204,7 +209,7 @@ function PasswordForm({
         </label>
       ))}
       {withIdle && (
-        <div className="ui-stack" style={{ gap: 4 }}>
+        <div className="app-lock-settings__f">
           <span className="app-lock-settings__label">闲置多久自动锁定</span>
           <SegmentedControl
             label="闲置自动锁定"

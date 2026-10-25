@@ -1,0 +1,33 @@
+/* Floating batch-progress pill (components/extras/BatchTracker.tsx).
+ * Tokens only; prefix bpill-. Bottom-left of the content area, above the
+ * key bar. The reports page hides it (its module 46 shows the same run). */
+.bpill {
+  position: fixed; z-index: 60;
+  left: calc(var(--shell-left, 0px) + 12px); bottom: calc(var(--shell-bottom, 0px) + 12px);
+  width: 300px;
+  display: flex; align-items: flex-start; gap: 6px;
+  padding: 10px 8px 10px 12px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  color: var(--text-primary);
+}
+.bpill__main {
+  appearance: none; margin: 0; padding: 0; border: 0; background: none; font: inherit; color: inherit; text-align: left; cursor: pointer;
+  flex: 1 1 auto; min-width: 0;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.bpill__main:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.bpill__top { display: flex; align-items: center; gap: 8px; }
+.bpill__state { font-size: 12px; font-weight: 500; }
+.bpill__pct { margin-left: auto; font-family: var(--font-mono); font-size: 11px; font-variant-numeric: tabular-nums; color: var(--text-secondary); }
+.bpill__bar { display: block; height: 2px; background: var(--heat-1); }
+.bpill__bar i { display: block; height: 100%; background: var(--text-secondary); transition: width var(--dur-base) var(--ease-out); }
+.bpill.is-run .bpill__bar i { background: var(--signal); }
+.bpill__sub {
+  font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.02em;
+  color: var(--text-faint);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.bpill__x { width: 22px; height: 22px; font-size: 14px; }

@@ -215,6 +215,10 @@ export function AppShell({ active, fallbackHeader, profileHref, chatHref, childr
   const [headerSlot, setHeaderSlot] = useState<HTMLElement | null>(null);
   const [palette, setPalette] = useState<PaletteMode | null>(null);
   const compactStrip = useMediaQuery('(max-width: 899px)');
+  // Below this the LOCAL / SYNC / PRIV readouts drop their values and keep
+  // only the LEDs. Above it PRIV always says ON / OFF: a bare "PRIV" read as
+  // a cut-off label at ~820px.
+  const tinyStrip = useMediaQuery('(max-width: 767px)');
   const clockDate = !useMediaQuery('(max-width: 1099px)');
   const compactAccount = useMediaQuery('(max-width: 1099px)');
 
@@ -284,8 +288,8 @@ export function AppShell({ active, fallbackHeader, profileHref, chatHref, childr
           <div className="app-strip__slot" ref={setHeaderSlot} />
           <div className="app-strip__fallback"><HeaderBar {...fallbackHeader} /></div>
           <div className="app-strip__status">
-            <BackendStats compact={compactStrip} />
-            <PrivacyToggle compact={compactStrip} />
+            <BackendStats compact={tinyStrip} />
+            <PrivacyToggle compact={tinyStrip} />
             {!compactStrip && <Clock withDate={clockDate} />}
           </div>
         </header>

@@ -155,14 +155,25 @@
 .app-lock-field__eye:hover { color: var(--text-primary); background: var(--surface-hover); }
 .app-lock-field__eye:focus-visible { outline: 2px solid var(--focus-ring); }
 
-/* settings section */
+/* settings section (module 93): flat mono fields like .ui-field */
 .app-lock-settings__form {
   display: flex; flex-direction: column; gap: 10px;
-  max-width: 340px;
+  max-width: 360px;
 }
 .app-lock-settings__form [role=radiogroup] { align-self: flex-start; }
-.app-lock-settings__label { font-size: 12px; font-weight: 600; color: var(--text-secondary); }
-.app-lock-settings__actions { display: flex; flex-wrap: wrap; gap: 8px; }
-.app-lock-settings__error { font-size: 12.5px; color: var(--danger-fg); }
-.app-lock-settings__ok { font-size: 12.5px; color: var(--success-fg); }
-.app-lock-settings .ui-callout { margin-top: 14px; }
+.app-lock-settings__f { display: flex; flex-direction: column; gap: 5px; }
+.app-lock-settings__label {
+  font-family: var(--font-mono); font-size: var(--label-size); letter-spacing: var(--label-tracking);
+  color: var(--text-faint);
+}
+.app-lock-settings .app-lock-input {
+  height: 30px; padding-right: 36px;
+  font-family: var(--font-mono); font-size: 13px; letter-spacing: 0.08em;
+  background: var(--surface-sunken);
+  border-radius: var(--radius-md);
+}
+.app-lock-settings .app-lock-input:focus { border-color: var(--text-secondary); box-shadow: none; }
+.app-lock-settings .app-lock-field__eye { right: 3px; width: 24px; height: 24px; }
+.app-lock-settings__actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.app-lock-settings__error { font-size: 12px; color: var(--danger-fg); }
+.app-lock-settings__ok { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.04em; color: var(--success-fg); }
