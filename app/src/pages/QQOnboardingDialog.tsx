@@ -8,8 +8,15 @@
  * Flow: detect → pick-account → extract-key → decrypting → done
  *   → setActiveProfile(qq, qq_number) → reload → user lands on Home with
  *     the QQ data behind every page.
+ *
+ * Look: the same instrument parts as the WeChat onboarding (ui/Dialog +
+ * Stepper, onboarding/parts, onboarding.css) — no inline colours.
  */
 import { useEffect, useRef, useState } from 'react';
+import { Button, Dialog, Stepper } from '../ui';
+import type { StepItem } from '../ui';
+import { IconRefresh } from '../ui/icons';
+import { Lead, March, Note, Ops, PathText, Sec, Working } from '../onboarding/parts';
 import {
   cancelQQScan, decryptQQ, extractQQKey, getQQProfiles, getQQScanStatus,
   saveQQKey, saveQQRoot, setActiveProfile, startQQScan,
@@ -17,6 +24,24 @@ import {
 import type { QQProfile, QQProfilesResponse, QQScanState } from '../data/api';
 
 type QQPhase = 'detect' | 'pick-account' | 'extract-key' | 'decrypting' | 'done' | 'no-data' | 'error';
+
+const QQ_STEPS: StepItem[] = [
+  { key: 'detect', label: '检测' },
+  { key: 'pick', label: '选账号' },
+  { key: 'key', label: '抓密钥' },
+  { key: 'decrypt', label: '解密' },
+  { key: 'done', label: '完成' },
+];
+
+const QQ_TITLE: Record<QQPhase, string> = {
+  'detect': '正在检测 QQ…',
+  'pick-account': '选择要导入的 QQ 账号',
+  'extract-key': '抓 QQ 数据库密钥',
+  'decrypting': '正在解密…',
+  'done': 'QQ 数据已就绪',
+  'no-data': '没找到 QQ 数据',
+  'error': '出了点问题',
+};
 
 interface Props {
   open: boolean;
@@ -229,190 +254,185 @@ export function QQOnboardingDialog({ open, onClose, onDone }: Props) {
     setTimeout(() => window.location.reload(), 50);
   }
 
+  // Display only: which cell of the step bar is lit.
+  const stepKey = phase === 'detect' || phase === 'no-data' ? 'detect'
+    : phase === 'pick-account' ? 'pick'
+      : phase === 'decrypting' ? 'decrypt'
+        : phase === 'done' ? 'done'
+          : phase === 'error' && !activeQQ ? 'detect' : 'key';
+
   return (
-    <div style={overlay}>
-      <div style={modal}>
-        <div style={accentBar} />
-        <button onClick={onClose} title="关闭" style={closeBtn}>×</button>
-        <div style={{ padding: '28px 32px 0' }}>
-          <div className="et-eyebrow" style={{ color: 'var(--et-orange)' }}>导入 QQ 聊天</div>
-          <div className="et-h1" style={{ color: 'var(--et-ink)', marginTop: 8, fontSize: 30 }}>
-            {phase === 'detect' && '正在检测 QQ…'}
-            {phase === 'pick-account' && '选择要导入的 QQ 账号'}
-            {phase === 'extract-key' && '抓 QQ 数据库密钥'}
-            {phase === 'decrypting' && '正在解密…'}
-            {phase === 'done' && '✓ QQ 数据已就绪'}
-            {phase === 'no-data' && '没找到 QQ 数据'}
-            {phase === 'error' && '出了点问题'}
-          </div>
-        </div>
-        <div style={{ padding: '14px 32px 28px' }}>
-          {phase === 'detect' && <Spinner text="读取 Tencent Files 目录…" />}
+    <Dialog
+      open={open}
+      onClose={onClose}
+      size="lg"
+      accent
+      closeOnScrim={false}
+      className="ob-dialog ob-dialog--qq"
+      eyebrow="导入 QQ 聊天"
+      title={QQ_TITLE[phase]}
+    >
+      <Stepper className="ob-key-stepper" steps={QQ_STEPS} current={stepKey}
+        error={phase === 'error' || phase === 'no-data'} />
+      <div className="ob-dialog-main" key={phase}>
+        {phase === 'detect' && (
+          <div className="ob-probe" role="status"><i className="ui-led is-pulse" />读取 Tencent Files 目录…</div>
+        )}
 
-          {phase === 'pick-account' && data && (
-            <>
-              <div className="et-serif" style={{ fontSize: 14, lineHeight: 1.7, marginBottom: 14 }}>
-                这台电脑有 <strong>{data.profiles.length}</strong> 个 QQ 账号。先选一个开始：
-              </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {data.profiles.map(p => (
-                  <button key={p.qq_number}
-                    onClick={() => { setActiveQQ(p.qq_number); setPhase('extract-key'); }}
-                    style={accountBtn}>
-                    <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--et-ink)' }}>
-                      🐧 QQ {p.qq_number}
-                    </div>
-                    <div style={{ fontSize: 11, color: 'var(--et-mute)', marginTop: 2 }}>
-                      {p.has_decrypted_data ? '已解密' : '未解密'}
-                      {p.has_saved_key && ' · 已保存 key'}
-                    </div>
+        {phase === 'pick-account' && data && (
+          <>
+            <Lead>这台电脑有 <strong>{data.profiles.length}</strong> 个 QQ 账号。先选一个开始：</Lead>
+            <ul className="ob-accts">
+              {data.profiles.map((p, i) => (
+                <li key={p.qq_number}>
+                  <button type="button" className="ob-acct"
+                    onClick={() => { setActiveQQ(p.qq_number); setPhase('extract-key'); }}>
+                    <span className="ob-acct__n" aria-hidden="true">{String(i + 1).padStart(2, '0')}</span>
+                    <span>
+                      <span className="ob-acct__id">QQ {p.qq_number}</span>
+                      <span className="ob-acct__sub">
+                        {p.has_decrypted_data ? '已解密' : '未解密'}
+                        {p.has_saved_key && ' · 已保存 key'}
+                      </span>
+                    </span>
+                    <span className="ob-acct__go" aria-hidden="true">选择 →</span>
                   </button>
-                ))}
-              </div>
-            </>
-          )}
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
 
-          {phase === 'no-data' && (
-            <>
-              <div className="et-serif" style={{ fontSize: 14, lineHeight: 1.7, marginBottom: 12 }}>
-                Murmur 在以下位置没找到 <code>&lt;QQ号&gt;/nt_qq/nt_db/nt_msg.db</code>：
-              </div>
-              <div style={{
-                padding: '10px 12px', background: 'var(--et-paper-2)',
-                border: '0.5px solid var(--et-line-2)', borderRadius: 8,
-                fontSize: 11, color: 'var(--et-mute)', maxHeight: 100, overflow: 'auto',
-                fontFamily: 'monospace', marginBottom: 16, lineHeight: 1.5,
-              }}>
-                {searchRoots.length > 0
-                  ? searchRoots.map((r, i) => <div key={i}>{r}</div>)
-                  : '（未列出，可能未启用 Windows）'}
-              </div>
+        {phase === 'no-data' && (
+          <>
+            <Lead>Murmur 在以下位置没找到 <code>&lt;QQ号&gt;/nt_qq/nt_db/nt_msg.db</code>：</Lead>
+            <div className="ob-well ob-well--list">
+              {searchRoots.length > 0
+                ? searchRoots.map((r, i) => <div key={i}><PathText path={r} /></div>)
+                : '（未列出，可能未启用 Windows）'}
+            </div>
 
-              <div className="et-h3" style={{ marginBottom: 6, fontSize: 14 }}>方法 A：手动粘贴路径</div>
-              <div className="et-meta" style={{ marginBottom: 8 }}>
-                打开 QQ → 设置 → 通用 → 聊天记录 → 数据保存位置，把那个路径复制过来：
+            <Sec label="A" title="手动粘贴路径">
+              <p className="ob-sec__text">打开 QQ → 设置 → 通用 → 聊天记录 → 数据保存位置，把那个路径复制过来：</p>
+              <div className="ob-row ui-mt-2">
+                <label className="ob-field">
+                  <span className="ob-field__p" aria-hidden="true">PATH</span>
+                  <input
+                    type="text"
+                    className="ob-input"
+                    aria-label="QQ 数据保存位置"
+                    value={manualPath}
+                    onChange={e => setManualPath(e.target.value)}
+                    placeholder='例：D:\Documents\Tencent Files'
+                    spellCheck={false}
+                    autoComplete="off"
+                  />
+                </label>
+                <Button variant="secondary" onClick={applyManualPath} disabled={!manualPath.trim()}>保存</Button>
               </div>
-              <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
-                <input
-                  type="text"
-                  value={manualPath}
-                  onChange={e => setManualPath(e.target.value)}
-                  placeholder='例：D:\Documents\Tencent Files'
-                  style={{
-                    flex: 1, padding: '10px 12px', fontSize: 13,
-                    border: '0.5px solid var(--et-line-2)', borderRadius: 8,
-                    background: 'var(--et-paper-2)', color: 'var(--et-ink)',
-                    fontFamily: 'monospace',
-                  }}
-                />
-                <button onClick={applyManualPath} disabled={!manualPath.trim()} style={{
-                  ...primaryBtn, width: 'auto', padding: '0 18px', marginTop: 0,
-                  opacity: manualPath.trim() ? 1 : 0.5,
-                  cursor: manualPath.trim() ? 'pointer' : 'not-allowed',
-                }}>
-                  保存
-                </button>
-              </div>
+            </Sec>
 
-              <div className="et-h3" style={{ marginBottom: 6, fontSize: 14 }}>方法 B：扫描所有硬盘</div>
-              <div className="et-meta" style={{ marginBottom: 8 }}>
-                自动遍历 C-Z 各盘找 Tencent Files 文件夹，约 10–60 秒。
-              </div>
+            <Sec label="B" title="扫描所有硬盘">
+              <p className="ob-sec__text">自动遍历 C-Z 各盘找 Tencent Files 文件夹，约 10–60 秒。</p>
 
               {!scanState && (
-                <button onClick={beginScan} style={{ ...primaryBtn, marginTop: 0 }}>
-                  开始扫描
-                </button>
+                <div className="ob-actions ob-actions--row ui-mt-3">
+                  <Button variant="primary" size="lg" onClick={beginScan}>开始扫描</Button>
+                </div>
               )}
 
               {scanState && scanState.running && (
-                <div style={{
-                  padding: '12px 14px', background: 'var(--et-paper-2)',
-                  border: '0.5px solid var(--et-line-2)', borderRadius: 8, marginBottom: 12,
-                }}>
-                  <div style={{ fontSize: 13, fontWeight: 600 }}>
-                    扫描中… 盘符 {scanState.drives_done}/{scanState.drives_total}
+                <div className="ob-scan ui-mt-3" role="status" aria-live="polite">
+                  <div className="ob-scan__read">
+                    <div>
+                      <div className="ui-label">DRIVES<b>盘符</b></div>
+                      <div className="ob-scan__v">{scanState.drives_done}<small> / {scanState.drives_total}</small></div>
+                    </div>
+                    <div>
+                      <div className="ui-label">DIRS<b>已扫目录</b></div>
+                      <div className="ob-scan__v">{scanState.dirs_scanned.toLocaleString()}</div>
+                    </div>
+                    <div>
+                      <div className="ui-label">FOUND<b>候选</b></div>
+                      <div className="ob-scan__v">{scanState.found.length}</div>
+                    </div>
                   </div>
-                  <div className="et-meta" style={{ marginTop: 4, fontFamily: 'monospace', fontSize: 11, color: 'var(--et-mute)' }}>
-                    {scanState.current_path || '准备中…'}（已扫 {scanState.dirs_scanned} 个目录）
+                  <March className="ui-mt-3" />
+                  <div className="ob-scan-status">扫描中… 盘符 {scanState.drives_done}/{scanState.drives_total}</div>
+                  <div className="ob-scan-path">{scanState.current_path || '准备中…'}（已扫 {scanState.dirs_scanned} 个目录）</div>
+                  <div className="ob-actions ob-actions--row ui-mt-3">
+                    <Button variant="secondary" onClick={stopScan}>取消</Button>
                   </div>
-                  <button onClick={stopScan} style={{
-                    ...primaryBtn, marginTop: 10, padding: '8px 0', fontSize: 13,
-                    background: 'var(--et-paper-2)', color: 'var(--et-ink)',
-                    border: '0.5px solid var(--et-line-2)', boxShadow: 'none',
-                  }}>
-                    取消
-                  </button>
                 </div>
               )}
 
               {scanState && !scanState.running && scanState.found.length === 0 && (
-                <div style={errBox}>
+                <Note tone="warning" label="EMPTY" className="ui-mt-3">
                   扫完了 —— 整台机器都没找到 Tencent Files 文件夹。可能你 QQ 还没在这台电脑上登录过，或者 nt_msg.db 没生成（先开一次 QQ 登录看看）。
-                </div>
+                </Note>
               )}
 
               {scanState && !scanState.running && scanState.found.length > 0 && (
                 <>
-                  <div className="et-meta" style={{ marginBottom: 8 }}>
-                    找到 {scanState.found.length} 个候选 —— 点一个保存：
-                  </div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <p className="ob-sec__text">找到 {scanState.found.length} 个候选 —— 点一个保存：</p>
+                  <ul className="ob-paths ui-mt-2">
                     {scanState.found.map((f, i) => (
-                      <button key={i} onClick={() => pickScanResult(f.path)} style={accountBtn}>
-                        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--et-ink)', fontFamily: 'monospace' }}>
-                          {f.path}
-                        </div>
-                        <div style={{ fontSize: 11, color: 'var(--et-mute)', marginTop: 2 }}>
-                          {f.qq_numbers.length} 个 QQ：{f.qq_numbers.slice(0, 3).join('、')}
-                          {f.qq_numbers.length > 3 && ' …'}
-                        </div>
-                      </button>
+                      <li key={i}>
+                        <button type="button" className="ob-path" onClick={() => pickScanResult(f.path)}>
+                          <span className="ob-path__name">{f.qq_numbers.length} 个 QQ</span>
+                          <span className="ob-path__value">
+                            <PathText path={f.path} />
+                            <span className="ob-path__sub">
+                              {f.qq_numbers.slice(0, 3).join('、')}
+                              {f.qq_numbers.length > 3 && ' …'}
+                            </span>
+                          </span>
+                          <span className="ob-path__go" aria-hidden="true">用这个 →</span>
+                        </button>
+                      </li>
                     ))}
-                  </div>
+                  </ul>
                 </>
               )}
+            </Sec>
 
-              {errMsg && (
-                <div style={{ ...errBox, marginTop: 12, marginBottom: 0 }}>{errMsg}</div>
-              )}
-            </>
-          )}
+            {errMsg && (
+              <Note tone="danger" label="ERR" className="ui-mt-4"><span className="ob-prewrap">{errMsg}</span></Note>
+            )}
+          </>
+        )}
 
-          {phase === 'extract-key' && activeQQ && (
-            <QQExtractStep qq={activeQQ} progress={progress} onStart={startExtract}
-              kicked={progress !== ''} />
-          )}
+        {phase === 'extract-key' && activeQQ && (
+          <QQExtractStep qq={activeQQ} progress={progress} onStart={startExtract}
+            kicked={progress !== ''} />
+        )}
 
-          {phase === 'decrypting' && <Spinner text={progress || '正在解密…'} />}
+        {phase === 'decrypting' && <Working title={progress || '正在解密…'} />}
 
-          {phase === 'done' && (
-            <>
-              <div style={successBox}>
-                <div style={{ fontSize: 14, fontWeight: 600, color: '#3a7a4f' }}>
-                  ✓ QQ 数据已解密 — 即将切换到 QQ 视角
-                </div>
-                <div className="et-meta" style={{ marginTop: 6 }}>
-                  Key 保存在 <code>~/.murmur/qq_keys.json</code>，下次启动直接读，不用重抓。Murmur 现有的所有页面（首页 / 朋友 / 关系网 / 报告）会用 QQ 数据重新加载。
-                </div>
-              </div>
-              <button onClick={finish} style={primaryBtn}>
-                进入 QQ 视角
-              </button>
-            </>
-          )}
+        {phase === 'done' && (
+          <>
+            <Note tone="success" label="PASS" title="QQ 数据已解密 — 即将切换到 QQ 视角">
+              Key 保存在 <code>~/.murmur/qq_keys.json</code>，下次启动直接读，不用重抓。Murmur 现有的所有页面（首页 / 朋友 / 关系网 / 报告）会用 QQ 数据重新加载。
+            </Note>
+            <div className="ob-actions ob-actions--row">
+              <Button variant="primary" size="lg" onClick={finish}>进入 QQ 视角</Button>
+            </div>
+          </>
+        )}
 
-          {phase === 'error' && (
-            <>
-              <div style={errBox}>{errMsg || '未知错误'}</div>
-              <button onClick={() => setPhase(activeQQ ? 'extract-key' : 'detect')} style={primaryBtn}>
+        {phase === 'error' && (
+          <>
+            <Note tone="danger" label="ERR"><span className="ob-prewrap">{errMsg || '未知错误'}</span></Note>
+            <div className="ob-actions ob-actions--row">
+              <Button variant="primary" size="lg" icon={<IconRefresh size={15} />}
+                onClick={() => setPhase(activeQQ ? 'extract-key' : 'detect')}>
                 再试一次
-              </button>
-            </>
-          )}
-        </div>
+              </Button>
+            </div>
+          </>
+        )}
       </div>
-    </div>
+    </Dialog>
   );
 }
 
@@ -420,101 +440,29 @@ function QQExtractStep({ qq, progress, onStart, kicked }:
   { qq: string; progress: string; onStart: () => void; kicked: boolean }) {
   return (
     <>
-      <div className="et-serif" style={{ fontSize: 14, lineHeight: 1.7, marginBottom: 12 }}>
-        QQ 账号 <strong>{qq}</strong>。点下面按钮后：
+      <Lead>QQ 账号 <strong>{qq}</strong>。点下面按钮后：</Lead>
+      <Note tone="warning" label="FIRST">
+        <strong>开始前请先把电脑端 QQ 完全退出</strong>（手机上确认登出 → 电脑上点退出/关闭进程）。否则 Murmur 启动的带调试器 QQ.exe 会被你已登录的实例抢走，抓不到 key。
+      </Note>
+      <Sec label="DOES" title="接下来会发生：">
+        <Ops items={[
+          <>Murmur 启动一个<strong>带调试器</strong>的 QQ.exe</>,
+          <>QQ 窗口出来后请<strong>正常扫码登录</strong></>,
+          '登录瞬间 Murmur 抓住数据库密钥（16 字符），断点后台触发，你看不到',
+          '抓完 QQ 自动关掉，立即解密 6 个数据库（约 5–15 秒）',
+        ]} />
+      </Sec>
+      <Note tone="info" label="NOTE" className="ui-mt-4">
+        全程<strong>不需要管理员权限</strong>。如果 QQ 窗口几秒后又被自启动 helper 拉起，可忽略 — 抓到 key 后那个无所谓。
+      </Note>
+      <div className="ob-actions ob-actions--row">
+        <Button variant="primary" size="lg" onClick={onStart} disabled={kicked} loading={kicked}>
+          {kicked ? '正在抓 key…' : '开始抓 QQ key'}
+        </Button>
       </div>
-      <div style={{
-        padding: '10px 14px', background: 'rgba(196,90,63,0.10)',
-        border: '0.5px solid rgba(196,90,63,0.35)', borderRadius: 8,
-        fontSize: 12.5, color: 'var(--et-rose)', marginBottom: 12, lineHeight: 1.65,
-      }}>
-        ⚠️ <strong>开始前请先把电脑端 QQ 完全退出</strong>（手机上确认登出 → 电脑上点退出/关闭进程）。否则 Murmur 启动的带调试器 QQ.exe 会被你已登录的实例抢走，抓不到 key。
-      </div>
-      <div style={{
-        padding: '12px 14px', background: 'var(--et-paper-2)',
-        border: '0.5px solid var(--et-line-2)', borderRadius: 8,
-        fontSize: 13, lineHeight: 1.85, color: 'var(--et-ink)', marginBottom: 12,
-      }}>
-        <ol style={{ margin: 0, paddingLeft: 20 }}>
-          <li>Murmur 启动一个<strong>带调试器</strong>的 QQ.exe</li>
-          <li>QQ 窗口出来后请<strong>正常扫码登录</strong></li>
-          <li>登录瞬间 Murmur 抓住数据库密钥（16 字符），断点后台触发，你看不到</li>
-          <li>抓完 QQ 自动关掉，立即解密 6 个数据库（约 5–15 秒）</li>
-        </ol>
-      </div>
-      <div style={hintBox}>
-        💡 全程<strong>不需要管理员权限</strong>。如果 QQ 窗口几秒后又被自启动 helper 拉起，可忽略 — 抓到 key 后那个无所谓。
-      </div>
-      <button onClick={onStart} disabled={kicked} style={{
-        ...primaryBtn, opacity: kicked ? 0.6 : 1, cursor: kicked ? 'wait' : 'pointer',
-      }}>
-        {kicked ? '正在抓 key…' : '开始抓 QQ key'}
-      </button>
       {kicked && progress && (
-        <div className="et-meta" style={{ marginTop: 12, color: 'var(--et-mute)', textAlign: 'center' }}>
-          {progress}
-        </div>
+        <div className="ob-probe ui-mt-3" role="status"><i className="ui-led is-pulse" />{progress}</div>
       )}
     </>
-  );
-}
-
-// ---- styles ----
-
-const overlay: React.CSSProperties = {
-  position: 'fixed', inset: 0, zIndex: 200,
-  background: 'rgba(20,24,42,0.62)', backdropFilter: 'blur(10px)',
-  display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24,
-};
-const modal: React.CSSProperties = {
-  width: 640, maxWidth: '94%', background: 'var(--et-paper)',
-  borderRadius: 'var(--et-r-lg)', boxShadow: 'var(--et-shadow-3)',
-  border: '0.5px solid var(--et-line-2)', overflow: 'hidden', position: 'relative',
-};
-const accentBar: React.CSSProperties = {
-  position: 'absolute', left: 0, top: 0, bottom: 0, width: 6, background: 'var(--et-orange)',
-};
-const closeBtn: React.CSSProperties = {
-  // `all: 'unset'` first, or it resets `position` and the × lands top-left.
-  all: 'unset', position: 'absolute', top: 14, right: 14, cursor: 'pointer',
-  width: 28, height: 28, borderRadius: 8, color: 'var(--et-mute)',
-  display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18,
-};
-const accountBtn: React.CSSProperties = {
-  all: 'unset', cursor: 'pointer', display: 'block',
-  padding: '12px 14px', background: 'var(--et-paper-2)',
-  border: '0.5px solid var(--et-line-2)', borderRadius: 'var(--et-r)',
-  textAlign: 'left',
-};
-const primaryBtn: React.CSSProperties = {
-  all: 'unset', cursor: 'pointer', display: 'block', width: '100%',
-  textAlign: 'center', padding: '14px 0', marginTop: 8,
-  background: 'var(--et-orange)', color: '#fff',
-  borderRadius: 'var(--et-r)', fontSize: 14, fontWeight: 600,
-  boxShadow: '0 6px 16px rgba(255,107,71,0.32)',
-};
-const successBox: React.CSSProperties = {
-  padding: '16px 18px', background: 'rgba(72,167,107,0.15)',
-  border: '0.5px dashed rgba(72,167,107,0.5)', borderRadius: 10, marginBottom: 16,
-};
-const errBox: React.CSSProperties = {
-  padding: '12px 14px', background: 'rgba(196,90,63,0.10)',
-  border: '0.5px solid rgba(196,90,63,0.35)', borderRadius: 8,
-  fontSize: 12.5, color: 'var(--et-rose)', marginBottom: 14,
-  whiteSpace: 'pre-wrap',
-};
-const hintBox: React.CSSProperties = {
-  padding: '10px 14px', background: 'rgba(232,181,122,0.18)',
-  border: '0.5px solid rgba(138,90,28,0.3)', borderRadius: 8,
-  fontSize: 11.5, color: '#8a5a1c', lineHeight: 1.6, marginBottom: 14,
-};
-
-function Spinner({ text }: { text: string }) {
-  return (
-    <div style={{ textAlign: 'center', padding: '32px 0' }}>
-      <div style={{ display: 'inline-block', animation: 'spin 1.4s linear infinite', fontSize: 32 }}>⏳</div>
-      <div className="et-h3" style={{ marginTop: 16 }}>{text}</div>
-      <style>{`@keyframes spin { from { transform: rotate(0); } to { transform: rotate(360deg); } }`}</style>
-    </div>
   );
 }

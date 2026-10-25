@@ -12,12 +12,12 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { cancelLiveKey, getLiveKeyStatus, getPrivateCopyStatus, installFrida, startLiveKey } from '../data/api';
 import type { LiveKeyStatus } from '../data/api';
-import { Button, Callout, Card, Chip, SegmentedControl } from '../ui';
+import { Button, Chip, SegmentedControl } from '../ui';
 import { IconCheck, IconFolder, IconKey } from '../ui/icons';
 import { PrivateCopyCapture } from './PrivateCopyCapture';
 import { lookupError } from '../data/errorCatalog';
 import { maskText } from '../utils/privacy';
-import { InlineError } from '../onboarding/parts';
+import { CaptureRun, Coverage, InlineError, March, Note, Ops, Sec, Segs } from '../onboarding/parts';
 import { liveBusy, resumeMethod } from '../onboarding/capture';
 import type { CaptureMethod } from '../onboarding/capture';
 
@@ -159,13 +159,13 @@ export function LiveKeyCapture({
     return <PrivateCopyCapture onDecrypt={onDecrypt} onBack={() => setMethod(null)} onBusyChange={setPcBusy} />;
   }
   if (method === null) {
-    if (!probed) return <div className="ob-working__sub" role="status">正在检查实时抓取环境…</div>;
+    if (!probed) return <div className="ob-probe" role="status"><i className="ui-led is-pulse" />正在检查实时抓取环境…</div>;
     return <MethodChooser reason={reason} wechatVersion={wechatVersion} frida={st?.frida}
       keycapAvailable={keycapAvailable} hardened={hardened} onPick={setMethod} onPaste={onPaste} />;
   }
 
   if (!st) {
-    return <div className="ob-working__sub" role="status">正在检查实时抓取环境…</div>;
+    return <div className="ob-probe" role="status"><i className="ui-led is-pulse" />正在检查实时抓取环境…</div>;
   }
 
   const job = st.job;
@@ -185,47 +185,52 @@ export function LiveKeyCapture({
       )}
 
       {st.frida.installed && !job.running && (
-        <div className="ui-stack ui-stack--md">
+        <div className="ob-live">
           {finished && job.phase === 'done' && (
             <RoundSummary newCount={job.new.length} matched={matched} total={total}
               missingCore={missingCore} round={job.round} />
           )}
           {job.phase === 'error' && <JobError error={job.error} code={job.code} log={job.log} />}
+          <Note tone="warning" label="RISK" className="ob-live__risk">
+            风控提示：挂钩微信进程有被腾讯检测到的可能。Murmur 只处理本机、你本人的数据，不上传任何内容。
+          </Note>
           {!finished && total > 0 && (
-            <div className="et-meta">
+            <Coverage matched={matched} total={total}>
               已有 <strong>{matched}</strong> / {total} 个数据库的密钥{matched > 0 ? '（之前抓到的会保留）' : ''}
-            </div>
+            </Coverage>
           )}
           <TodoList />
-          <div className="ui-row">
-            <span className="et-meta">每轮抓取时长：</span>
+          <div className="ob-dur">
+            <span className="ui-label">ROUND<b>每轮抓取时长：</b></span>
             <SegmentedControl label="每轮抓取时长" size="sm" value={String(seconds)}
               onChange={v => setSeconds(Number(v))}
               options={DURATIONS.map(d => ({ value: String(d), label: `${d} 秒` }))} />
           </div>
-          <Callout tone="warning" compact>
-            点开始后多半会弹 macOS 密码窗口（挂钩微信需要管理员权限），输完开机密码倒计时才开始。倒计时期间<strong>切到微信去操作</strong>，Murmur 这边不用看着。<br/>
-            风控提示：挂钩微信进程有被腾讯检测到的可能。Murmur 只处理本机、你本人的数据，不上传任何内容。
-          </Callout>
-          <div className="ui-stack">
+          <Note tone="info" label="AUTH" className="ob-live__note">
+            点开始后多半会弹 macOS 密码窗口（挂钩微信需要管理员权限），输完开机密码倒计时才开始。倒计时期间<strong>切到微信去操作</strong>，Murmur 这边不用看着。
+          </Note>
+          <div className="ob-actions ob-actions--row">
             {finished && matched > 0 ? (
               <>
-                <Button variant="primary" size="lg" block onClick={onDecrypt}>
+                <Button variant="primary" size="lg" onClick={onDecrypt}>
                   {matched >= total ? '全部抓到了 → 开始解密' : `用已抓到的 ${matched} 个开始解密`}
                 </Button>
-                <Button variant="secondary" size="lg" block onClick={start} loading={busy}>
+                <Button variant="secondary" size="lg" onClick={start} loading={busy}>
                   {busy ? '启动中…' : '再抓一轮（补齐剩下的）'}
                 </Button>
               </>
             ) : (
               <>
-                <Button variant="primary" size="lg" block onClick={start} loading={busy}>
+                <Button variant="primary" size="lg" onClick={start} loading={busy}>
                   {busy ? '启动中…' : finished ? '再抓一轮' : '开始实时抓取'}
                 </Button>
                 {!finished && matched > 0 && (
-                  <Button variant="secondary" size="lg" block onClick={onDecrypt}>已经够了，直接用现有的 {matched} 个解密</Button>
+                  <Button variant="secondary" size="lg" onClick={onDecrypt}>已经够了，直接用现有的 {matched} 个解密</Button>
                 )}
               </>
+            )}
+            {onPaste && !anyBusy && (
+              <Button variant="ghost" size="lg" onClick={onPaste}>或者：手动粘贴密钥</Button>
             )}
           </div>
         </div>
@@ -241,8 +246,10 @@ export function LiveKeyCapture({
 
       {err && <InlineError code={errCode} raw={err} className="ui-mt-3" />}
 
-      {onPaste && !anyBusy && (
-        <Button variant="ghost" block className="ui-mt-2" onClick={onPaste}>或者：手动粘贴密钥</Button>
+      {onPaste && !anyBusy && !(st.frida.installed && !job.running) && (
+        <div className="ob-actions ob-actions--row">
+          <Button variant="ghost" size="lg" onClick={onPaste}>或者：手动粘贴密钥</Button>
+        </div>
       )}
     </>
   );
@@ -253,43 +260,49 @@ function MethodChooser({ reason, wechatVersion, frida, keycapAvailable, hardened
   frida?: LiveKeyStatus['frida']; keycapAvailable?: boolean | null; hardened?: boolean;
   onPick: (m: CaptureMethod) => void; onPaste?: () => void;
 }) {
-  const card = (m: CaptureMethod, icon: ReactNode, title: ReactNode, desc: string, chips: ReactNode) => (
-    <Card variant="sunken" padding="sm" interactive role="button" tabIndex={0}
+  const card = (m: CaptureMethod, letter: string, en: string, icon: ReactNode, title: ReactNode, tag: ReactNode,
+    desc: string, chips: ReactNode) => (
+    <div className="ob-opt" role="button" tabIndex={0}
       onClick={() => onPick(m)}
       onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onPick(m); } }}>
-      <div className="ob-option">
-        <span className="ob-option__icon">{icon}</span>
-        <div className="ob-option__body">
-          <div className="ob-option__title">{title}</div>
-          <div className="ob-option__desc">{desc}</div>
-          {chips && <div className="ob-option__chips">{chips}</div>}
-        </div>
+      <div className="ob-opt__h">
+        <span className="ui-tsq">{letter}</span>
+        <span className="ob-opt__en">{en}</span>
+        {icon}
       </div>
-    </Card>
+      <div className="ob-opt__title">{title}</div>
+      {tag && <div className="ob-opt__tags">{tag}</div>}
+      <div className="ob-opt__desc">{desc}</div>
+      {chips && <div className="ob-opt__chips">{chips}</div>}
+      <div className="ob-opt__go" aria-hidden="true">选择这种方式 →</div>
+    </div>
   );
   return (
     <>
       <Intro reason={reason} wechatVersion={wechatVersion} />
-      <div className="ob-section-title">选一种抓取方式：</div>
-      <div className="ob-options">
-        {card('frida', <IconKey size={16} />, 'Frida 实时抓取',
-          '挂钩正在运行的微信。需要装一次 Frida，并会弹一次系统密码窗（管理员权限）。不改动微信本体，但微信要先重签名。',
-          <>
-            {hardened && <Chip size="sm" tone="warning">微信需要先重签名</Chip>}
-            {frida && (frida.installed
-              ? <Chip size="sm" tone="success" icon={<IconCheck size={11} />}>Frida 已安装</Chip>
-              : <Chip size="sm" tone="warning">{frida.installable ? '需要先装 Frida（约 45 MB）' : '这个版本没带 Frida'}</Chip>)}
-            <Chip size="sm">要管理员密码</Chip>
-          </>)}
-        {card('private-copy', <IconFolder size={16} />,
-          <>免 Frida 方式 <Chip size="sm" tone="accent">不用装 Frida · 不用管理员密码</Chip></>,
-          '把微信复制一份到 Murmur 自己的目录、重签名后打开这份副本来抓。不动 /Applications/WeChat.app；开始前要先完全退出原版微信。',
-          keycapAvailable == null ? null : keycapAvailable
-            ? <Chip size="sm" tone="success" icon={<IconCheck size={11} />}>捕获组件已就绪</Chip>
-            : <Chip size="sm" tone="warning">这个版本没带捕获组件</Chip>)}
-      </div>
+      <Sec label="METHOD" title="选一种抓取方式：" right="2 WAYS">
+        <div className="ob-opts">
+          {card('frida', 'A', 'FRIDA · LIVE HOOK', <IconKey size={15} />, 'Frida 实时抓取', null,
+            '挂钩正在运行的微信。需要装一次 Frida，并会弹一次系统密码窗（管理员权限）。不改动微信本体，但微信要先重签名。',
+            <>
+              {hardened && <Chip size="sm" tone="warning">微信需要先重签名</Chip>}
+              {frida && (frida.installed
+                ? <Chip size="sm" tone="success" icon={<IconCheck size={11} />}>Frida 已安装</Chip>
+                : <Chip size="sm" tone="warning">{frida.installable ? '需要先装 Frida（约 45 MB）' : '这个版本没带 Frida'}</Chip>)}
+              <Chip size="sm">要管理员密码</Chip>
+            </>)}
+          {card('private-copy', 'B', 'PRIVATE COPY', <IconFolder size={15} />, '免 Frida 方式',
+            <Chip size="sm" tone="accent">不用装 Frida · 不用管理员密码</Chip>,
+            '把微信复制一份到 Murmur 自己的目录、重签名后打开这份副本来抓。不动 /Applications/WeChat.app；开始前要先完全退出原版微信。',
+            keycapAvailable == null ? null : keycapAvailable
+              ? <Chip size="sm" tone="success" icon={<IconCheck size={11} />}>捕获组件已就绪</Chip>
+              : <Chip size="sm" tone="warning">这个版本没带捕获组件</Chip>)}
+        </div>
+      </Sec>
       {onPaste && (
-        <Button variant="ghost" block className="ui-mt-3" onClick={onPaste}>或者：手动粘贴密钥</Button>
+        <div className="ob-actions ob-actions--row">
+          <Button variant="ghost" size="lg" onClick={onPaste}>或者：手动粘贴密钥</Button>
+        </div>
       )}
     </>
   );
@@ -307,14 +320,9 @@ function Intro({ reason, wechatVersion }: { reason: Props['reason']; wechatVersi
 
 function TodoList() {
   return (
-    <Card variant="sunken" padding="sm">
-      <div className="ob-section-title">倒计时开始后，去微信里做这些：</div>
-      <ol className="ob-list">
-        {TODO.map(([what, why]) => (
-          <li key={what}>{what}<span className="ob-list__why">· {why}</span></li>
-        ))}
-      </ol>
-    </Card>
+    <Sec label="TODO" title="倒计时开始后，去微信里做这些：">
+      <Ops grid items={TODO.map(([what, why]) => ({ t: what, d: why }))} />
+    </Sec>
   );
 }
 
@@ -322,43 +330,18 @@ function Running({ status, matched, total, onStop }: {
   status: LiveKeyStatus; matched: number; total: number; onStop: () => void;
 }) {
   const job = status.job;
-  const pct = total > 0 ? Math.round((matched / total) * 100) : 0;
   const head =
     job.phase === 'auth' ? '请在系统弹窗里输入开机密码…' :
     job.phase === 'capturing' ? '正在抓取 —— 现在去微信里操作' :
     job.phase === 'waiting-wechat' ? '微信已退出 —— 重新打开并登录，我会自动接上' :
     '正在挂钩微信…';
+  const counting = (job.phase === 'capturing' || job.phase === 'waiting-wechat') && job.remaining != null;
   return (
-    <div style={{ padding: '8px 0 4px' }}>
-      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12 }}>
-        <div className="et-h3">{head}</div>
-        {(job.phase === 'capturing' || job.phase === 'waiting-wechat') && job.remaining != null && (
-          <div style={{ fontFamily: 'var(--font-mono)', fontSize: 34, fontWeight: 600, color: 'var(--accent)' }}>
-            {job.remaining}s
-          </div>
-        )}
-      </div>
-      <div style={{ margin: '12px 0 6px', height: 8, borderRadius: 4, background: 'var(--surface-sunken)', overflow: 'hidden' }}>
-        <div style={{ width: `${pct}%`, height: '100%', background: 'var(--accent)', transition: 'width .4s' }} />
-      </div>
-      <div className="et-meta" style={{ marginBottom: 10 }}>
-        已匹配 <strong>{matched}</strong> / {total} 个数据库
-        {job.new.length > 0 && <>（这轮新增 {job.new.length} 个）</>}
-        {job.phase === 'capturing' && <> · 已截获 {job.hits} 次加解密调用</>}
-      </div>
-      {job.passphrase_found && (
-        <div className="et-meta" style={{ marginBottom: 10, color: 'var(--success-fg)' }}>
-          ✓ 已截获账号口令，其余数据库的密钥直接推算出来了
-        </div>
-      )}
-      {job.new.length > 0 && (
-        <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--success-fg)', lineHeight: 1.6, marginBottom: 10 }}>
-          {job.new.slice(-6).map(n => <div key={n}>✓ {n}</div>)}
-        </div>
-      )}
-      {(job.phase === 'capturing' || job.phase === 'waiting-wechat') && <TodoList />}
-      <Button variant="secondary" size="lg" block className="ui-mt-3" onClick={onStop}>提前结束这一轮</Button>
-    </div>
+    <CaptureRun head={head} remaining={counting ? job.remaining : null} seconds={job.seconds}
+      matched={matched} total={total} newDbs={job.new} hits={job.phase === 'capturing' ? job.hits : null}
+      passphrase={job.passphrase_found ? '已截获账号口令，其余数据库的密钥直接推算出来了' : null}
+      todo={(job.phase === 'capturing' || job.phase === 'waiting-wechat') ? <TodoList /> : null}
+      onStop={onStop} />
   );
 }
 
@@ -367,8 +350,9 @@ function RoundSummary({ newCount, matched, total, missingCore, round }: {
 }) {
   const all = total > 0 && matched >= total;
   return (
-    <Callout tone={all ? 'success' : newCount > 0 ? 'warning' : 'danger'}
+    <Note tone={all ? 'success' : newCount > 0 ? 'warning' : 'danger'} label={`ROUND ${String(round).padStart(2, '0')}`}
       title={`第 ${round} 轮结束：新抓到 ${newCount} 个，累计 ${matched} / ${total}`}>
+      <Segs n={total} on={matched} className="ob-segs--db ob-note__segs" label={`${matched} / ${total}`} />
       {all && <div>全部数据库的密钥都到手了。</div>}
       {!all && newCount === 0 && (
         <div>这一轮什么都没截到。确认倒计时期间你在微信里发了消息、点开了新对话；如果弹密码窗时点了取消，也会这样。</div>
@@ -379,7 +363,7 @@ function RoundSummary({ newCount, matched, total, missingCore, round }: {
       {!all && newCount > 0 && missingCore.length === 0 && (
         <div>剩下的多半是你这次没碰到的功能（某些聊天分库、收藏、表情）。可以直接解密，缺的以后再补一轮。</div>
       )}
-    </Callout>
+    </Note>
   );
 }
 
@@ -410,34 +394,33 @@ function FridaMissing({ status, onInstall }: { status: LiveKeyStatus; onInstall:
   const inst = status.install;
   if (status.frida.installable) {
     return (
-      <Card variant="sunken" padding="sm" className="ui-mb-3">
-        <div className="ob-section-title">需要先装一个组件：Frida</div>
-        <div className="et-meta">实时抓取靠 Frida 挂钩微信的加密调用，只装一次（下载约 45 MB，装在当前 Python 的用户目录）。</div>
+      <Sec label="SETUP" title="需要先装一个组件：Frida" right={inst.running ? 'INSTALLING' : '≈ 45 MB'} className="ui-mb-3">
+        <p className="ob-sec__text">实时抓取靠 Frida 挂钩微信的加密调用，只装一次（下载约 45 MB，装在当前 Python 的用户目录）。</p>
+        {inst.running && <March className="ui-mt-3" />}
         {inst.ok === false && (
-          <Callout tone="danger" compact className="ui-mt-2" title="安装失败">
+          <Note tone="danger" label="ERR" className="ui-mt-3" title="安装失败">
             <details open>
               <summary>查看输出</summary>
-              <pre>{inst.log.slice(-1200)}</pre>
+              <pre className="ob-error-pre">{inst.log.slice(-1200)}</pre>
             </details>
-            <div>也可以在终端手动装：<code>python3 -m pip install --user "frida&gt;=17"</code>，装完回来刷新。</div>
-          </Callout>
+            <div className="ui-mt-2">也可以在终端手动装：<code>python3 -m pip install --user "frida&gt;=17"</code>，装完回来刷新。</div>
+          </Note>
         )}
-        <Button variant="primary" size="lg" block className="ui-mt-3" onClick={onInstall} loading={inst.running}>
-          {inst.running ? '正在安装 Frida…（一般 1 分钟内）' : inst.ok === false ? '重试安装' : '一键安装 Frida'}
-        </Button>
-      </Card>
+        <div className="ob-actions ob-actions--row">
+          <Button variant="primary" size="lg" onClick={onInstall} loading={inst.running}>
+            {inst.running ? '正在安装 Frida…（一般 1 分钟内）' : inst.ok === false ? '重试安装' : '一键安装 Frida'}
+          </Button>
+        </div>
+      </Sec>
     );
   }
   return (
-    <Card variant="sunken" padding="sm" className="ui-mb-3">
-      <div className="ob-section-title">这个版本的 App 没带上 Frida，先用终端抓一次</div>
-      <div className="et-meta" style={{ marginBottom: 6 }}>下载源码后在仓库目录里运行（抓的时候按下面的清单去用微信）：</div>
-      <pre style={{ background: 'var(--surface-card)', color: 'var(--text-secondary)', padding: '8px 10px', borderRadius: 6, fontSize: 11, fontFamily: 'var(--font-mono)', whiteSpace: 'pre-wrap', margin: 0 }}>
-{`python3.12 -m pip install -r requirements-mac-keyextract.txt
-python3.12 cli/hook_cc_key_frida.py --seconds 90`}
-      </pre>
-      <div className="et-meta" style={{ marginTop: 6 }}>如果提示 attach / permission 失败，在第二条命令前面加 <code>sudo</code>。一轮抓不全就多跑几次，已经抓到的会保留。</div>
-      <div className="et-meta" style={{ marginTop: 6 }}>抓到的密钥会存到 <code>~/.murmur/decrypted_keys.json</code>，回到 Murmur 重新检测即可解密。</div>
-    </Card>
+    <Sec label="CLI" title="这个版本的 App 没带上 Frida，先用终端抓一次" className="ui-mb-3">
+      <p className="ob-sec__text">下载源码后在仓库目录里运行（抓的时候按下面的清单去用微信）：</p>
+      <div className="ob-well">{`python3.12 -m pip install -r requirements-mac-keyextract.txt
+python3.12 cli/hook_cc_key_frida.py --seconds 90`}</div>
+      <p className="ob-sec__text">如果提示 attach / permission 失败，在第二条命令前面加 <code>sudo</code>。一轮抓不全就多跑几次，已经抓到的会保留。</p>
+      <p className="ob-sec__text">抓到的密钥会存到 <code>~/.murmur/decrypted_keys.json</code>，回到 Murmur 重新检测即可解密。</p>
+    </Sec>
   );
 }
